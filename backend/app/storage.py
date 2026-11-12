@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Any
+
+from .domain import Dataset, utc_now
+
+
+class SQLiteStorage:
+    def __init__(self, path: str | Path) -> None:
+        self.path = str(path)
+        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+        self._lock = threading.RLock()
+        self._initialize()
+
+    def _connect(self) -> sqlite3.Connection:
+        connection = sqlite3.connect(self.path, timeout=30)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA journal_mode=WAL")
+        return connection
+
+    def _initialize(self) -> None:
+        with self._connect() as connection:
+            connection.executescript("""
+                CREATE TABLE IF NOT EXISTS datasets (
+                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS backtests (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
+                    created_at TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_accounts (
+                    id TEXT PRIMARY KEY, updated_at TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_orders (
+                    id TEXT PRIMARY KEY, account_id TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS paper_trades (
+                    id TEXT PRIMARY KEY, account_id TEXT NOT NULL, payload TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_orders_account ON paper_orders(account_id);
+                CREATE INDEX IF NOT EXISTS idx_paper_trades_account ON paper_trades(account_id);
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+            """)
+
+    def get_setting(self, key: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO app_settings(key,value,updated_at) VALUES(?,?,?)",
+                (key, value, utc_now()),
+            )
+
+    def delete_setting(self, key: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM app_settings WHERE key=?", (key,))
+
+    def save_dataset(self, dataset: Dataset) -> None:
+        payload = json.dumps(dataset.to_dict(include_path=True), ensure_ascii=False)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO datasets(id,created_at,payload) VALUES(?,?,?)",
+                (dataset.id, dataset.created_at, payload),
+            )
+
+    def get_dataset(self, dataset_id: str) -> Dataset | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT payload FROM datasets WHERE id=?", (dataset_id,)).fetchone()
+        return Dataset(**json.loads(row["payload"])) if row else None
+
+    def list_datasets(self) -> list[Dataset]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT payload FROM datasets ORDER BY created_at DESC, id").fetchall()
+        return [Dataset(**json.loads(row["payload"])) for row in rows]
+
+    def save_backtest(self, report: dict[str, Any]) -> None:
+        payload = json.dumps(report, ensure_ascii=False, allow_nan=False)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO backtests(id,name,status,created_at,payload) VALUES(?,?,?,?,?)",
+                (report["id"], report["name"], report["status"], report["created_at"], payload),
+            )
+
+    def get_backtest(self, backtest_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT payload FROM backtests WHERE id=?", (backtest_id,)).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def list_backtests(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id,name,status,created_at,payload FROM backtests ORDER BY created_at DESC,id"
+            ).fetchall()
+        result = []
+        for row in rows:
+            report = json.loads(row["payload"])
+            metrics = report.get("metrics", {})
+            result.append({
+                "id": row["id"], "name": row["name"], "status": row["status"],
+                "created_at": row["created_at"],
+                "final_equity": metrics.get("final_equity"),
+                "total_return": metrics.get("total_return"),
+                "max_drawdown": metrics.get("max_drawdown"),
+                "total_trades": metrics.get("total_trades"),
+                "data_info": report.get("data_info", {}),
+            })
+        return result
+
+    def save_paper(self, state: dict[str, Any]) -> None:
+        payload = json.dumps(state, ensure_ascii=False, allow_nan=False)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO paper_accounts(id,updated_at,payload) VALUES(?,?,?)",
+                (state["id"], utc_now(), payload),
+            )
+            connection.execute("DELETE FROM paper_orders WHERE account_id=?", (state["id"],))
+            connection.execute("DELETE FROM paper_trades WHERE account_id=?", (state["id"],))
+            connection.executemany(
+                "INSERT INTO paper_orders(id,account_id,payload) VALUES(?,?,?)",
+                [
+                    (f"{state['id']}:{item['id']}", state["id"], json.dumps(item, ensure_ascii=False))
+                    for item in state.get("orders", [])
+                ],
+            )
+            connection.executemany(
+                "INSERT INTO paper_trades(id,account_id,payload) VALUES(?,?,?)",
+                [
+                    (f"{state['id']}:{item['id']}", state["id"], json.dumps(item, ensure_ascii=False))
+                    for item in state.get("trades", [])
+                ],
+            )
+
+    def get_paper(self, account_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT payload FROM paper_accounts WHERE id=?", (account_id,)).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def latest_paper(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM paper_accounts ORDER BY updated_at DESC,id DESC LIMIT 1"
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def find_paper_by_order(self, order_id: str, account_id: str) -> dict[str, Any] | None:
+        """按 (account_id, order_id) 精确定位账户。
+
+        本地单号（如 O00000001）在每个账户内都从 1 开始，不能用无账户限定的
+        LIMIT 1 猜归属，否则撤单会落到别的账户上。
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT account_id FROM paper_orders "
+                "WHERE account_id=? AND (id=? OR json_extract(payload, '$.id')=?) LIMIT 1",
+                (account_id, f"{account_id}:{order_id}", order_id),
+            ).fetchone()
+        return self.get_paper(row["account_id"]) if row else None
