@@ -12,9 +12,10 @@ import {
   signedMoney, signedPercent, statusLabel,
 } from '../lib/format';
 import FeeConfigPanel from '../components/FeeConfigPanel';
-import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SyntheticNotice, TableEmpty } from '../components/Ui';
+import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
+import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SuccessBanner, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { BacktestSummary, Dataset, FeeConfig, Report, Round, StrategyConfig } from '../types';
+import type { BacktestSummary, Dataset, FeeConfig, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -26,6 +27,26 @@ const fallbackConfig: StrategyConfig = {
   transfer_fee_rate: 0.00001,
   slippage_bps: 1,
   volume_participation: 0.2,
+};
+
+/** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
+type BacktestMode = 'funnel' | 'single';
+
+/** 漏斗轮动回测默认选股阈值；比率字段为小数，界面百分比换算在 ScreenerConfigPanel 内完成。 */
+const fallbackScreener: ScreenerConfig = {
+  boards: ['创业板', '科创板'],
+  chg20_max: -0.15,
+  week52_drawdown: 0.3,
+  day_change_max: 0.05,
+  min_amount: 5e8,
+  min_avg_amount_20d: 5e8,
+  min_listing_sessions: 6,
+  exclude_st: true,
+  exclude_delisting: true,
+  exclude_unprofitable_u: true,
+  enable_fundamental_veto: false,
+  max_deep_checks: 10,
+  blacklist: [],
 };
 
 const roundValue = (round: Round, keys: string[]): unknown => {
@@ -54,8 +75,11 @@ export default function BacktestPage() {
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
+  const [pendingNotice, setPendingNotice] = useState('');
   const [tableTab, setTableTab] = useState<'rounds' | 'trades' | 'orders'>('rounds');
   const [exporting, setExporting] = useState<'trades' | 'orders' | null>(null);
+  const [mode, setMode] = useState<BacktestMode>('funnel');
+  const [screener, setScreener] = useState<ScreenerConfig>(fallbackScreener);
 
   const loadInitial = async () => {
     setLoading(true);
@@ -67,6 +91,12 @@ export default function BacktestPage() {
       setConfig((current) => ({ ...current, ...defaultConfig }));
       setFees(defaults.fees || strategyToFeeConfig(defaultConfig));
       if (defaults.initial_cash) setInitialCash(defaults.initial_cash);
+      // 漏斗轮动回测：用后端选股默认阈值打底（失败不阻塞，沿用本地 fallbackScreener）。
+      api.screenerDefaults().then((screenerDefaults) => {
+        if (screenerDefaults?.config) {
+          setScreener((current) => ({ ...current, ...screenerDefaults.config, enable_fundamental_veto: false }));
+        }
+      }).catch(() => undefined);
       const daily = datasetResult.find((item) => item.timeframe === 'daily' && item.source === 'baostock')
         || datasetResult.find((item) => item.timeframe === 'daily');
       if (daily) {
@@ -77,6 +107,50 @@ export default function BacktestPage() {
         if (minute) setIntradayId((current) => current || minute.id);
         const index = datasetResult.find((item) => item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
         if (index) setIndexId((current) => current || index.id);
+      }
+      // 选股页「带入回测」写入的待应用数据集：预填三个选择器后立即清除，只消费一次。
+      const pendingRaw = sessionStorage.getItem('layerlab.pendingDatasets');
+      if (pendingRaw) {
+        sessionStorage.removeItem('layerlab.pendingDatasets');
+        try {
+          const pending = JSON.parse(pendingRaw) as {
+            runId?: string;
+            candidate?: { code?: string; name?: string };
+            datasets?: { daily?: Dataset; intraday?: Dataset | null; index?: Dataset | null };
+          };
+          const available = (id?: string) => Boolean(id && datasetResult.some((item) => item.id === id));
+          let missing = 0;
+          const pendingDaily = pending.datasets?.daily;
+          if (pendingDaily && available(pendingDaily.id)) {
+            setDatasetId(pendingDaily.id);
+            if (pendingDaily.start) setStartDate(pendingDaily.start.slice(0, 10));
+            if (pendingDaily.end) setEndDate(pendingDaily.end.slice(0, 10));
+          } else if (pendingDaily) {
+            missing += 1;
+          }
+          const pendingIntraday = pending.datasets?.intraday;
+          if (pendingIntraday) {
+            if (available(pendingIntraday.id)) setIntradayId(pendingIntraday.id);
+            else missing += 1;
+          } else {
+            setIntradayId('');
+          }
+          const pendingIndex = pending.datasets?.index;
+          if (pendingIndex) {
+            if (available(pendingIndex.id)) setIndexId(pendingIndex.id);
+            else missing += 1;
+          } else {
+            setIndexId('');
+          }
+          const code = pending.candidate?.code || pendingDaily?.symbol || '';
+          const name = pending.candidate?.name || pendingDaily?.name || '';
+          setPendingNotice(
+            `已从选股结果带入：${[code, name].filter(Boolean).join(' ')}（运行 ${pending.runId || '—'}）`
+            + (missing > 0 ? `；${missing} 个数据集未在后端找到，已保留默认选择` : '，可直接运行回测'),
+          );
+        } catch {
+          // 忽略损坏的 sessionStorage 数据
+        }
       }
       setHistory(reports);
       if (reports.length > 0) setReport(await api.backtest(reports[0].id));
@@ -94,18 +168,26 @@ export default function BacktestPage() {
   const indexOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
 
   const run = async () => {
-    if (!datasetId) { setError('请选择主数据集后再运行回测。'); return; }
     if (startDate && endDate && startDate > endDate) { setError('开始日期不能晚于结束日期，请调整回测区间。'); return; }
     if (initialCash <= 0) { setError('初始资金必须大于 0。'); return; }
+    // 单标的模式必须先选主数据集；漏斗轮动模式用本地 universe.db，无需数据集。
+    if (mode === 'single' && !datasetId) { setError('请选择主数据集后再运行回测。'); return; }
+    if (mode === 'funnel' && screener.boards.length === 0) { setError('请至少选择一个板块（创业板 / 科创板）。'); return; }
     setRunning(true);
     setError('');
     try {
-      const result = await api.runBacktest({
-        name: name.trim() || '未命名回测', dataset_id: datasetId,
-        intraday_dataset_id: intradayId || undefined, index_dataset_id: indexId || undefined,
-        initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
-        config: stripFeeFields(config), fees,
-      });
+      const result = mode === 'funnel'
+        ? await api.runFunnelBacktest({
+          name: name.trim() || '选股漏斗轮动回测',
+          initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
+          config: stripFeeFields(config), fees, screener,
+        })
+        : await api.runBacktest({
+          name: name.trim() || '未命名回测', dataset_id: datasetId,
+          intraday_dataset_id: intradayId || undefined, index_dataset_id: indexId || undefined,
+          initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
+          config: stripFeeFields(config), fees,
+        });
       setReport(result);
       setTableTab('rounds');
       const reports = await api.backtests().catch(() => history);
@@ -138,6 +220,11 @@ export default function BacktestPage() {
   const updateConfig = <K extends keyof StrategyConfig>(key: K, value: StrategyConfig[K]) => setConfig((current) => ({ ...current, [key]: value }));
   const metrics = report?.metrics;
   const closedRounds = useMemo(() => report?.rounds.filter((round) => !round.status || ['closed', 'completed', '已结束'].includes(lower(round.status))).length || 0, [report]);
+  // 漏斗轮动回测专属：每轮换票轨迹（选中日期/标的/入选依据/进出日期/盈亏）。
+  const rotationTrail = useMemo<RotationTrailItem[]>(() => {
+    const raw = report?.data_info?.rotation_trail;
+    return Array.isArray(raw) ? (raw as RotationTrailItem[]) : [];
+  }, [report]);
 
   return (
     <div className="page backtest-page">
@@ -154,35 +241,76 @@ export default function BacktestPage() {
       />
 
       {error && <ErrorBanner message={error} onRetry={!report && !loading ? () => void loadInitial() : undefined} onClose={() => setError('')} />}
+      {pendingNotice && <SuccessBanner onClose={() => setPendingNotice('')}>{pendingNotice}</SuccessBanner>}
 
       <Panel className="config-panel">
         <form onSubmit={(event) => { event.preventDefault(); void run(); }}>
           <div className="config-topline">
             <div className="config-title"><span className="step-index">01</span><div><h2>实验配置</h2><p>定义数据边界与交易摩擦，再启动本地回测。</p></div></div>
-            <label className="switch-row"><span><strong>启用做 T</strong><small>可选，不占用 16 笔序列</small></span><input type="checkbox" checked={config.enable_t} onChange={(event) => updateConfig('enable_t', event.target.checked)} /><span className="switch" /></label>
+            <div className="backtest-mode-toggle" role="tablist" aria-label="回测模式">
+              <button
+                type="button"
+                role="tab"
+                className={`backtest-mode-tab ${mode === 'funnel' ? 'active' : ''}`}
+                aria-selected={mode === 'funnel'}
+                onClick={() => setMode('funnel')}
+              >
+                <Layers3 size={15} />漏斗轮动回测
+              </button>
+              <button
+                type="button"
+                role="tab"
+                className={`backtest-mode-tab ${mode === 'single' ? 'active' : ''}`}
+                aria-selected={mode === 'single'}
+                onClick={() => setMode('single')}
+              >
+                <BarChart3 size={15} />单标的回测
+              </button>
+            </div>
           </div>
+          <label className="switch-row enable-t-row">
+            <span><strong>启用做 T</strong><small>可选，不占用 16 笔序列</small></span>
+            <input type="checkbox" checked={config.enable_t} onChange={(event) => updateConfig('enable_t', event.target.checked)} />
+            <span className="switch" />
+          </label>
+          {mode === 'funnel' && (
+            <div className="funnel-mode-note">
+              <Layers3 size={15} />
+              <span>
+                漏斗轮动回测：<strong>不再锁定单一标的</strong>，而是每次清仓后按下方选股漏斗（L0→L4）重跑、取当时第一名换票，与模拟盘「清仓后重新选股」口径一致；
+                行情取自本地 universe.db 缓存（双创日线），为日线口径（1 分钟做 T 与 tick 级风控降级）。
+              </span>
+            </div>
+          )}
           <div className="form-grid backtest-form-grid">
             <Field label="实验名称" className="span-2"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" /></Field>
-            <Field label="主数据集" hint="baostock 日线" className="span-2">
-              <select value={datasetId} onChange={(event) => {
-                const next = datasets.find((item) => item.id === event.target.value);
-                setDatasetId(event.target.value);
-                if (next) {
-                  setStartDate(next.start?.slice(0, 10));
-                  setEndDate(next.end?.slice(0, 10));
-                  const minute = datasets.find((item) => item.timeframe === '1m' && item.symbol === next.symbol);
-                  if (minute) setIntradayId(minute.id);
-                }
-              }} required>
-                <option value="">请选择数据集</option>
-                {datasets.filter((item) => item.timeframe === 'daily').map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)} · {item.source}</option>)}
-              </select>
-            </Field>
-            <Field label="开始日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={startDate} min={selectedDataset?.start?.slice(0, 10)} max={endDate || selectedDataset?.end?.slice(0, 10)} onChange={(event) => setStartDate(event.target.value)} /></div></Field>
-            <Field label="结束日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={endDate} min={startDate || selectedDataset?.start?.slice(0, 10)} max={selectedDataset?.end?.slice(0, 10)} onChange={(event) => setEndDate(event.target.value)} /></div></Field>
+            {mode === 'single' && (
+              <Field label="主数据集" hint="baostock 日线" className="span-2">
+                <select value={datasetId} onChange={(event) => {
+                  const next = datasets.find((item) => item.id === event.target.value);
+                  setDatasetId(event.target.value);
+                  if (next) {
+                    setStartDate(next.start?.slice(0, 10));
+                    setEndDate(next.end?.slice(0, 10));
+                    const minute = datasets.find((item) => item.timeframe === '1m' && item.symbol === next.symbol);
+                    if (minute) setIntradayId(minute.id);
+                  }
+                }} required>
+                  <option value="">请选择数据集</option>
+                  {datasets.filter((item) => item.timeframe === 'daily').map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)} · {item.source}</option>)}
+                </select>
+              </Field>
+            )}
+            {mode === 'funnel' && <div className="span-2"><ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff /></div>}
+            <Field label="开始日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={startDate} min={mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined} max={endDate || (mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined)} onChange={(event) => setStartDate(event.target.value)} /></div></Field>
+            <Field label="结束日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={endDate} min={startDate || (mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined)} max={mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined} onChange={(event) => setEndDate(event.target.value)} /></div></Field>
             <Field label="初始资金"><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => setInitialCash(Number(event.target.value))} required /><span>CNY</span></div></Field>
-            <Field label="分钟数据集" hint="腾讯 1 分钟"><select value={intradayId} onChange={(event) => setIntradayId(event.target.value)}><option value="">不使用（日线降级）</option>{intradayOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.timeframe} · {item.source}</option>)}</select></Field>
-            <Field label="指数数据集" hint="baostock 大盘门"><select value={indexId} onChange={(event) => setIndexId(event.target.value)}><option value="">不使用</option>{indexOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)}</option>)}</select></Field>
+            {mode === 'single' && (
+              <>
+                <Field label="分钟数据集" hint="腾讯 1 分钟"><select value={intradayId} onChange={(event) => setIntradayId(event.target.value)}><option value="">不使用（日线降级）</option>{intradayOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.timeframe} · {item.source}</option>)}</select></Field>
+                <Field label="指数数据集" hint="baostock 大盘门"><select value={indexId} onChange={(event) => setIndexId(event.target.value)}><option value="">不使用</option>{indexOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)}</option>)}</select></Field>
+              </>
+            )}
           </div>
           <button type="button" className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
             <span><Gauge size={15} />交易摩擦与撮合参数</span>{advanced ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
@@ -198,9 +326,15 @@ export default function BacktestPage() {
           )}
           <div className="config-footer">
             <div className="dataset-hint">
-              {selectedDataset ? <><span>{selectedDataset.rows.toLocaleString('zh-CN')} 行</span><i /> <span>{selectedDataset.timeframe} 粒度</span><i /><span>{shortDate(selectedDataset.start)} — {shortDate(selectedDataset.end)}</span>{selectedDataset.is_synthetic && <SyntheticNotice compact />}</> : <span>请选择主数据集以查看数据边界</span>}
+              {mode === 'funnel' ? (
+                <span>漏斗轮动 · {screener.boards.join(' / ')} · 每次清仓后重跑 L0→L4 取第一名换票（日线口径）</span>
+              ) : selectedDataset ? (
+                <><span>{selectedDataset.rows.toLocaleString('zh-CN')} 行</span><i /> <span>{selectedDataset.timeframe} 粒度</span><i /><span>{shortDate(selectedDataset.start)} — {shortDate(selectedDataset.end)}</span>{selectedDataset.is_synthetic && <SyntheticNotice compact />}</>
+              ) : (
+                <span>请选择主数据集以查看数据边界</span>
+              )}
             </div>
-            <button className="button primary run-button" type="submit" disabled={running || !datasetId}>
+            <button className="button primary run-button" type="submit" disabled={running || (mode === 'single' && !datasetId)}>
               {running ? <><span className="button-spinner" />正在运行回测</> : <><Play size={16} fill="currentColor" />运行回测</>}
             </button>
           </div>
@@ -274,6 +408,32 @@ export default function BacktestPage() {
             {Object.keys(report.data_info || {}).length > 0 && <div className="data-info-grid">{Object.entries(report.data_info).map(([key, value]) => <div key={key}><span>{key}</span><strong title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
             {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
           </Panel>
+
+          {rotationTrail.length > 0 && (
+            <Panel className="rotation-trail-panel" title="换票轨迹" description="每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待" action={<Layers3 size={18} />}>
+              <div className="table-scroll">
+                <table>
+                  <thead><tr><th>轮次</th><th>选股日</th><th>标的</th><th>名称</th><th className="num">入选 Chg20D</th><th>L0 门</th><th className="num">入场</th><th className="num">出场</th><th className="num">净盈亏</th><th>状态</th></tr></thead>
+                  <tbody>
+                    {rotationTrail.map((item, index) => (
+                      <tr key={`${item.round}-${index}`} className={item.status === 'WAITING' ? 'trail-waiting' : ''}>
+                        <td><strong className="round-id">{item.round || `#${index + 1}`}</strong></td>
+                        <td>{shortDate(item.select_date)}</td>
+                        <td>{item.symbol ? <strong title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="muted">空仓等待</span>}</td>
+                        <td>{item.name || '—'}</td>
+                        <td className={`num ${item.chg20d_at_select != null ? (item.chg20d_at_select >= 0 ? 'positive' : 'negative') : ''}`}>{item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</td>
+                        <td><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></td>
+                        <td className="num">{item.entry_date ? shortDate(item.entry_date) : '—'}</td>
+                        <td className="num">{item.exit_date ? shortDate(item.exit_date) : '—'}</td>
+                        <td className={`num ${item.pnl != null ? (item.pnl >= 0 ? 'positive' : 'negative') : ''}`}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</td>
+                        <td><Badge tone={item.status === 'CLOSED' ? 'green' : item.status === 'OPEN' ? 'indigo' : 'amber'}>{item.status === 'CLOSED' ? '已结束' : item.status === 'OPEN' ? '持仓中' : '空仓等待'}</Badge></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Panel>
+          )}
 
           <Panel className="records-panel">
             <div className="records-header">

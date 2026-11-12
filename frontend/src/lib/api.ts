@@ -7,6 +7,7 @@ import type {
   Dataset,
   DemoDatasets,
   FeeConfig,
+  FunnelBacktestRequest,
   FeeConfigResponse,
   HealthResponse,
   MarketFetchRequest,
@@ -14,11 +15,28 @@ import type {
   MarketQuote,
   MarketSourceStatus,
   Order,
+  PrepareResponse,
+  RefreshStatus,
   Report,
+  RotationRequest,
+  ScreenerCoverageResponse,
+  ScreenerDefaults,
+  ScreenerPrepareRequest,
+  ScreenerRefreshRequest,
+  ScreenerRefreshResponse,
+  ScreenerRunRequest,
+  ScreenerRunSummary,
+  ScreeningRun,
   StrategyDefaults,
   Timeframe,
+  TradingRulesAllResponse,
+  TradingRulesResponse,
 } from '../types';
 
+// 部署可配置：
+// - 本地开发默认走 127.0.0.1:8010（Vite dev server 5180 与后端 8010 分离）。
+// - 生产/部署时用 VITE_API_BASE 注入。推荐设为 `/api`（同源反代，避免跨域与混合内容）。
+//   HTTPS 站点若写死 http://IP:端口 会被浏览器当 mixed content 拦截，故部署一律用同源相对路径。
 export const API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8010/api').replace(/\/$/, '');
 
 export class ApiError extends Error {
@@ -74,6 +92,10 @@ function query(params: Record<string, string | undefined>): string {
 export const api = {
   health: () => request<HealthResponse>('/health'),
   strategyDefaults: () => request<StrategyDefaults>('/strategy/defaults'),
+  // 分板块 A 股交易规则：下单页按 symbol 拉取，驱动快捷档位 / 默认数量 / 实时校验。
+  tradingRules: (symbol: string) =>
+    request<TradingRulesResponse>(`/trading-rules/${encodeURIComponent(symbol)}`),
+  tradingRulesAll: () => request<TradingRulesAllResponse>('/trading-rules'),
   fees: () => request<FeeConfigResponse>('/fees'),
   saveFees: (fees: FeeConfig) => request<FeeConfigResponse>('/fees', { method: 'PUT', body: JSON.stringify(fees) }),
   resetFees: () => request<FeeConfigResponse>('/fees/reset', { method: 'POST' }),
@@ -89,6 +111,8 @@ export const api = {
     return request<Dataset>(`/datasets/upload${query({ symbol, name, timeframe })}`, { method: 'POST', body });
   },
   runBacktest: (payload: BacktestRequest) => request<Report>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),
+  // 漏斗轮动回测：每次清仓后按选股漏斗重新选票，与模拟盘 rotation v2 语义一致。
+  runFunnelBacktest: (payload: FunnelBacktestRequest) => request<Report>('/backtests/funnel', { method: 'POST', body: JSON.stringify(payload) }),
   backtests: () => request<BacktestSummary[]>('/backtests'),
   backtest: (id: string) => request<Report>(`/backtests/${encodeURIComponent(id)}`),
   createAccount: (payload: CreateAccountRequest) => request<AccountState>('/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
@@ -123,6 +147,23 @@ export const api = {
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/advance`, { method: 'POST', body: JSON.stringify({ bars }) }),
   liveTick: (accountId: string, symbol: string) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/live-tick`, { method: 'POST', body: JSON.stringify({ symbol }) }),
+
+  /* ---------- 选股漏斗（契约 §5.4 / §6.1） ---------- */
+  screenerDefaults: () => request<ScreenerDefaults>('/screener/defaults'),
+  screenerCoverage: () => request<ScreenerCoverageResponse>('/screener/coverage'),
+  screenerRefresh: (payload: ScreenerRefreshRequest = {}) =>
+    request<ScreenerRefreshResponse>('/screener/refresh', { method: 'POST', body: JSON.stringify(payload) }),
+  screenerRefreshStatus: () => request<RefreshStatus>('/screener/refresh'),
+  runScreener: (payload: ScreenerRunRequest = {}) =>
+    request<ScreeningRun>('/screener/run', { method: 'POST', body: JSON.stringify(payload) }),
+  screenerRuns: (limit = 20) => request<ScreenerRunSummary[]>(`/screener/runs${query({ limit: String(limit) })}`),
+  screenerRun: (id: string) => request<ScreeningRun>(`/screener/runs/${encodeURIComponent(id)}`),
+  deleteScreenerRun: (id: string) =>
+    request<{ deleted: boolean }>(`/screener/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  prepareScreenerRun: (id: string, payload: ScreenerPrepareRequest) =>
+    request<PrepareResponse>(`/screener/runs/${encodeURIComponent(id)}/prepare`, { method: 'POST', body: JSON.stringify(payload) }),
+  setRotation: (accountId: string, payload: RotationRequest) =>
+    request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/rotation`, { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 export async function downloadBacktestCsv(id: string, kind: 'trades' | 'orders'): Promise<void> {

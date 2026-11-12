@@ -15,3 +15,8 @@
 - 交易费用口径（2026-11-12 用户截图指定）：五项分项相加 = 佣金 + 印花税(仅卖出) + 经手费 + 证管费 + 过户费，佣金/经手/证管/过户双边；费率 UI/API 单位统一「万分之」，结算内部用小数比例；最低佣金（元/笔）**只兜底佣金项**；默认值 0.5 / 5 / 0.341 / 0.2 / 0.1 万分 + 最低 5 元；滑点体现在成交价，不计入 total_fees。
 - 费用配置是**全局可自定义**的：SQLite `app_settings` 表 key `fee_config_v1`，`GET/PUT /api/fees` + `/api/fees/reset`，已有模拟账户用 `POST /api/paper/accounts/{id}/fees` 同步（仅对此后成交生效）；回测/建账户请求可用 `fees` 局部覆盖，优先级 全局 < 本次 fees < 显式 config。
 - 后端服务改动后必须重启 uvicorn 才生效（8010 常驻进程 reload=False）；不要擅自重启盘中服务，需提示用户。
+- 选股漏斗（2026-11-12 完成）：`backend/app/universe.py` + `screener.py`，数据底座 `backend/data/universe.db`（`WB_UNIVERSE_DB` 可覆盖）；L0 门=板块指数20日收益<0 开门；L1=`chg20d<-15%` 且 `close<250日高×0.7`；L2=ST/退市/-U/上市不足6日/当日涨幅>5%/黑名单+财务深筛；L3=当日与20日均成交额≥5亿；L4 按 chg20d 升序逐只深筛，余票保留 `deep_checked=false`。`/api/screener/*` + `POST /api/paper/accounts/{id}/rotation` + `runs/{id}/prepare`（一键带入回测/模拟盘）。
+- 数据源限速铁律：**禁止并发 baostock**（多会话/多进程同时查询会被限速到 10~40s/票甚至僵死，有封禁风险）；`query_all_stock` 会挂死不可用，元数据用 `query_stock_basic`；`UniverseRefresher` 已加 socket 20s 读超时防僵死。腾讯批量快照 150 票/0.33s 可用（GBK），腾讯前复权日线无 amount，不可用于 L3。
+- 回补与覆盖：`python -u -m scripts.refresh_universe --boards 创业板,科创板 --lookback-days 400 --sleep 0`（增量、已回补票自动跳过）。2026-11-12 完成科创板 619 只，创业板仅 7 只（限速中断），`universe.db` 2030 代码/约 16.6 万行；选股页覆盖卡会显示 `missing_codes`。
+- prepare 一键带入**缓存优先**：本地已有覆盖最新交易日的日线+指数数据集时 0 网络直接复用（行情源限速也能用），失败才回落本地；轮动用 `rotation_pending_advance` 门控——只有「刚清仓归零」才允许推进，新账户空仓不得跳过池内首只。
+- 端口（2026-11-12 14:57 已恢复常规）：后端 `8010`、前端 `5180`。旧 WorkBuddy 会话关闭后端口释放，新系统按原命令重启回原端口；若 8010/5180 再次被旧环境占用，可临时跑 8020/5190 并用 `VITE_API_BASE` 指向 8020。

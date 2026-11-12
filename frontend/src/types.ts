@@ -1,4 +1,4 @@
-export type PageKey = 'backtest' | 'paper' | 'data' | 'strategy';
+export type PageKey = 'backtest' | 'paper' | 'data' | 'strategy' | 'screener';
 export type Timeframe = 'daily' | 'tick' | '1m' | '5m';
 export type OrderSide = 'buy' | 'sell';
 export type OrderType = 'market' | 'limit';
@@ -63,6 +63,32 @@ export interface BacktestRequest {
   end_date?: string;
   config: Partial<StrategyConfig>;
   fees?: FeeConfig;
+}
+
+/** 漏斗轮动回测请求：不选单标的，改为每次清仓后按选股漏斗重新选票。 */
+export interface FunnelBacktestRequest {
+  name: string;
+  initial_cash: number;
+  start_date?: string;
+  end_date?: string;
+  config: Partial<StrategyConfig>;
+  fees?: FeeConfig;
+  screener?: Partial<ScreenerConfig>;
+}
+
+/** 单轮换票轨迹（漏斗轮动回测 data_info.rotation_trail 元素）。 */
+export interface RotationTrailItem {
+  round: string;
+  symbol: string | null;
+  name: string;
+  board: string;
+  select_date: string;
+  entry_date: string | null;
+  exit_date: string | null;
+  pnl: number | null;
+  chg20d_at_select: number | null;
+  gate_open: boolean;
+  status: 'CLOSED' | 'OPEN' | 'WAITING' | string;
 }
 
 export interface EquityPoint {
@@ -225,6 +251,8 @@ export interface AccountState {
   config: StrategyConfig;
   dataset_id?: string;
   cursor: number;
+  /** 池内轮动状态；旧后端未返回该字段时为 undefined（契约 §5.2 / §6.3）。 */
+  rotation?: RotationState | null;
 }
 
 export interface CreateAccountRequest {
@@ -303,4 +331,304 @@ export interface MarketFetchResponse {
 export interface HealthResponse {
   status?: string;
   [key: string]: unknown;
+}
+
+/* ==========================================================================
+ * 分板块 A 股交易规则（trading_rules.py 单一来源）
+ * ========================================================================== */
+
+/** 单个板块的交易规则快照；数量单位为股，金额单位为元。 */
+export interface BoardRules {
+  board: string;
+  min_qty: number;
+  step: number;
+  limit_order_cap: number;
+  market_order_cap: number;
+  odd_lot_threshold: number;
+  odd_lot_label: string;
+  limit_pct: number;
+  cage_pct: number;
+  cage_abs_floor: number;
+  cage_label: string;
+  rule_basis: string;
+}
+
+/** GET /trading-rules/{symbol}：按标的返回板块规则 + 价格笼子 + 未建模清单。 */
+export interface TradingRulesResponse {
+  symbol: string;
+  board: string;
+  is_modeled_board: boolean;
+  rules: BoardRules;
+  price_cage: { lower: number; upper: number; reference_price: number } | null;
+  not_modeled: string[];
+}
+
+/** GET /trading-rules：六板块规则全表。 */
+export interface TradingRulesAllResponse {
+  boards: BoardRules[];
+  not_modeled: string[];
+}
+
+/* ==========================================================================
+ * 选股漏斗（五层 L0–L4）类型，对应契约 §6.1
+ * ========================================================================== */
+
+/** 选股参数，与后端 ScreenerConfig 一一对应（比率字段为小数，例如 -0.15 = -15%）。 */
+export interface ScreenerConfig {
+  boards: string[];
+  chg20_max: number;
+  week52_drawdown: number;
+  day_change_max: number;
+  min_amount: number;
+  min_avg_amount_20d: number;
+  min_listing_sessions: number;
+  exclude_st: boolean;
+  exclude_delisting: boolean;
+  exclude_unprofitable_u: boolean;
+  enable_fundamental_veto: boolean;
+  max_deep_checks: number;
+  blacklist: string[];
+}
+
+/** 全市场日线缓存覆盖情况（UniverseStore.coverage）。 */
+export interface ScreenerCoverage {
+  codes: number;
+  rows: number;
+  start: string | null;
+  end: string | null;
+  boards: Record<string, number>;
+  fundamentals: number;
+  updated_at: string | null;
+  /** 有代码但无日线的票。 */
+  missing_codes: number;
+  /** 最新日线落后于全局最新交易日的票。 */
+  stale_codes: number;
+}
+
+/** 后台回补任务快照（RefreshJob.to_dict）。 */
+export interface RefreshJob {
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  done: number;
+  total: number;
+  current: string;
+  message: string;
+  fetched_rows: number;
+  errors: string[];
+  skipped: number;
+}
+
+/** GET /screener/refresh 与 coverage 内嵌的刷新状态（UniverseRefresher.status）。 */
+export interface RefreshStatus {
+  running: boolean;
+  job: RefreshJob;
+  coverage: ScreenerCoverage;
+}
+
+/** GET /screener/coverage 返回体。 */
+export interface ScreenerCoverageResponse {
+  coverage: ScreenerCoverage;
+  refresh: RefreshStatus;
+}
+
+/** 单个板块的 L0 大盘门状态。 */
+export interface ScreenerGateBoard {
+  index: string;
+  ret20: number;
+  open: boolean;
+  date: string;
+}
+
+/** L0 大盘同步门：ret20 < 0 视为开门。 */
+export interface ScreenerGate {
+  boards: Record<string, ScreenerGateBoard>;
+  open: boolean;
+}
+
+/** 六段漏斗计数（eligible 之后另有 deep_checked）。 */
+export interface ScreenerFunnel {
+  universe: number;
+  after_l0: number;
+  after_l1: number;
+  after_l2: number;
+  after_l3: number;
+  eligible: number;
+  deep_checked: number;
+}
+
+/** 候选票逐条检查记录：status 为 pass / veto / unknown。 */
+export interface ScreenerCheck {
+  layer: string;
+  rule: string;
+  status: 'pass' | 'veto' | 'unknown' | string;
+  detail: string;
+}
+
+/** 候选池中的股票。 */
+export interface ScreenerCandidate {
+  code: string;
+  name: string;
+  board: string;
+  close: number;
+  prev_close: number;
+  as_of: string;
+  chg20d: number;
+  week52_high: number;
+  drawdown_52w: number;
+  day_change: number;
+  amount: number;
+  avg_amount_20d: number;
+  turnover: number | null;
+  sessions: number;
+  score: number;
+  checks: ScreenerCheck[];
+  vetoed_by: string | null;
+  deep_checked: boolean;
+}
+
+export interface ScreenerDataInfo {
+  universe_db?: string;
+  coverage?: ScreenerCoverage;
+  realtime?: boolean;
+  realtime_quotes?: number;
+  fundamental?: string;
+  elapsed_seconds?: number;
+  [key: string]: unknown;
+}
+
+/** 一次完整选股结果（GET /screener/runs/{id}）。 */
+export interface ScreeningRun {
+  id: string;
+  created_at: string;
+  as_of: string;
+  config: ScreenerConfig;
+  gate: ScreenerGate;
+  funnel: ScreenerFunnel;
+  pool: ScreenerCandidate[];
+  eligible: ScreenerCandidate[];
+  first: ScreenerCandidate | null;
+  warnings: string[];
+  data_info: ScreenerDataInfo;
+  elapsed_seconds: number;
+}
+
+/** 历史运行摘要（GET /screener/runs）。 */
+export interface ScreenerRunSummary {
+  id: string;
+  created_at: string;
+  as_of: string;
+  gate_open: boolean;
+  eligible_count: number;
+  first: { code: string; name: string; chg20d: number } | null;
+}
+
+/** GET /screener/defaults。 */
+export interface ScreenerDefaults {
+  config: ScreenerConfig;
+  boards: string[];
+  coverage: ScreenerCoverage;
+  sources?: Record<string, unknown>;
+  notes?: string[];
+}
+
+export interface ScreenerRefreshRequest {
+  boards?: string[];
+  codes?: string[];
+  lookback_days?: number;
+  force?: boolean;
+}
+
+export interface ScreenerRefreshResponse {
+  status: string;
+  job: RefreshJob;
+}
+
+export interface ScreenerRunRequest {
+  as_of?: string | null;
+  include_realtime?: boolean;
+  config?: Partial<ScreenerConfig>;
+}
+
+export interface ScreenerPrepareRequest {
+  target: 'paper' | 'backtest';
+  candidate_code?: string;
+  account_id?: string;
+  auto_strategy?: boolean;
+  rotation?: boolean;
+}
+
+/** prepare 保存并返回的三个数据集（分钟/指数可能缺失）。 */
+export interface ScreenerPrepareDatasets {
+  daily: Dataset;
+  intraday?: Dataset | null;
+  index?: Dataset | null;
+}
+
+/** prepare 返回的候选摘要（后端只回传 code / name / board / chg20d）。 */
+export interface ScreenerPreparedCandidate {
+  code: string;
+  name: string;
+  board: string;
+  chg20d: number | null;
+}
+
+/** POST /screener/runs/{id}/prepare 返回体。 */
+export interface PrepareResponse {
+  target: 'paper' | 'backtest' | string;
+  candidate: ScreenerPreparedCandidate;
+  datasets: ScreenerPrepareDatasets;
+  account: AccountState | null;
+}
+
+/** 轮动池条目（BrokerAccount.rotation_pool）。 */
+export interface RotationPoolItem {
+  symbol: string;
+  name: string;
+  chg20d?: number;
+  board?: string;
+  [key: string]: unknown;
+}
+
+/** 最近一次重筛的第一名摘要。 */
+export interface RotationScreenFirst {
+  code: string;
+  name: string;
+  chg20d: number | null;
+}
+
+/** 轮动 v2：清仓后重新跑五层选股的结果摘要（契约 rotation.last_screen）。 */
+export interface RotationLastScreen {
+  run_id?: string | null;
+  as_of?: string | null;
+  first?: RotationScreenFirst | null;
+  eligible_count?: number;
+  gate_open?: boolean;
+  warnings?: string[];
+}
+
+/** 账户池内轮动状态（契约 §5.2 rotation，v2 语义：清仓后重新选股取第一名）。 */
+export interface RotationState {
+  enabled: boolean;
+  /** rescreen = 每次清仓后重新运行五层选股并取当时第一名。 */
+  mode?: 'rescreen' | string;
+  pool: RotationPoolItem[];
+  /** 旧版固定池语义保留字段；v2 不再按池序号推进。 */
+  index: number;
+  current_symbol: string | null;
+  waiting: boolean;
+  note: string;
+  run_id: string | null;
+  /** 最近一次触发重筛的日期（YYYY-MM-DD）。 */
+  last_attempt_date?: string | null;
+  /** 最近一次成功重筛的 run id。 */
+  last_run_id?: string | null;
+  /** 最近一次重筛摘要；尚未成功重筛时为 null。 */
+  last_screen?: RotationLastScreen | null;
+}
+
+export interface RotationRequest {
+  enabled: boolean;
+  run_id?: string;
+  pool?: RotationPoolItem[];
 }

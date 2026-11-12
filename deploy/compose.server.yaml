@@ -1,0 +1,33 @@
+# layer-lab · 阿里云 ECS 服务编排
+# 应用容器：宿主机 3011 → 容器 3000（容器内 nginx 同源服务前端 + 反代 uvicorn）
+# 数据（SQLite/CSV/上传/行情缓存）落在命名卷 layerlab-data，持久化、可备份。
+# 用法：HOST_PORT=3011 docker compose -f deploy/compose.server.yaml --env-file .env up -d --build
+# 说明：compose 文件在 deploy/ 下，构建上下文显式指回项目根（含 Dockerfile）。
+
+services:
+  layer-lab:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: layer-lab:latest
+    container_name: layer-lab
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3011}:3000"
+    environment:
+      # 后端数据落卷；行情缓存随卷持久化，避免重启重复拉取 baostock/腾讯
+      WB_DATA_DIR: /data
+      WB_DB_PATH: /data/app.db
+      UVICORN_HOST: 127.0.0.1
+      UVICORN_PORT: 8010
+    volumes:
+      - layerlab-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  layerlab-data:

@@ -15,13 +15,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .backtest import run_backtest
+from .backtest import run_backtest, run_funnel_backtest
 from .broker import BrokerAccount
 from .data import dataset_from_bars, read_csv_bars, save_demo_datasets
-from .domain import Bar, FeeConfig, OrderRequest, STRATEGY_RULES, StrategyConfig, money, utc_now
+from .domain import Bar, FeeConfig, OrderRequest, STRATEGY_RULES, StrategyConfig, money, price, utc_now
 from .market import MarketDataService, normalize_symbol
+from .rotation import rescreen_and_advance, set_from_run as set_rotation_from_run, set_pool as set_rotation_pool
+from .screener import ScreenerConfig, ScreenerService, ScreeningResult
 from .storage import SQLiteStorage
 from .strategy import LayeredTStrategy
+from .trading_rules import NOT_MODELED, all_board_rules, board_of, price_cage_bounds, rules_for
 
 
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -71,6 +74,18 @@ class BacktestRequest(BaseModel):
     end_date: str | None = None
     config: dict = Field(default_factory=dict)
     fees: dict | None = None  # 万分之口径的自定义费用，覆盖全局默认
+
+
+class FunnelBacktestRequest(BaseModel):
+    """选股漏斗轮动回测请求；screener 为 ScreenerConfig 局部覆盖（未知键→400）。"""
+
+    name: str = "选股漏斗轮动回测"
+    initial_cash: float = Field(default=4_000_000.0, gt=0)
+    start_date: str | None = None
+    end_date: str | None = None
+    config: dict = Field(default_factory=dict)
+    fees: dict | None = None
+    screener: dict | None = None
 
 
 class PaperAccountRequest(BaseModel):
@@ -142,6 +157,33 @@ class LiveTickRequest(BaseModel):
     symbol: str
 
 
+class ScreenerRefreshRequest(BaseModel):
+    boards: list[str] | None = None
+    codes: list[str] | None = None
+    lookback_days: int = Field(default=400, ge=60, le=2000)
+    force: bool = False
+
+
+class ScreenerRunRequest(BaseModel):
+    as_of: str | None = None
+    include_realtime: bool = False
+    config: dict | None = None
+
+
+class ScreenerPrepareRequest(BaseModel):
+    target: Literal["paper", "backtest"]
+    candidate_code: str | None = None
+    account_id: str | None = None
+    auto_strategy: bool = True
+    rotation: bool = True
+
+
+class RotationRequest(BaseModel):
+    enabled: bool
+    run_id: str | None = None
+    pool: list[dict] | None = None
+
+
 def create_app() -> FastAPI:
     data_dir = Path(os.environ.get("WB_DATA_DIR", str(BASE_DIR / "data")))
     upload_dir = data_dir / "uploads"
@@ -155,6 +197,8 @@ def create_app() -> FastAPI:
     application.state.storage = storage
     application.state.data_dir = data_dir
     application.state.market_service = MarketDataService(data_dir / "cache")
+    # 选股服务挂在 application.state，数据目录与行情服务由 create_app 统一注入。
+    application.state.screener_service = ScreenerService(data_dir, application.state.market_service)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -236,6 +280,84 @@ def create_app() -> FastAPI:
             # 单元测试和本地合成数据使用 SYNTH001 等非真实代码；保留原样。
             return raw.strip().upper()
 
+    def screener_service() -> ScreenerService:
+        """选股服务句柄；测试可直接替换 application.state.screener_service。"""
+        return application.state.screener_service
+
+    def normalize_rotation_pool(raw_pool: list[dict]) -> list[dict]:
+        pool: list[dict] = []
+        for position, item in enumerate(raw_pool or []):
+            if not isinstance(item, dict):
+                raise ValueError(f"轮动池第 {position} 项不是对象")
+            raw_symbol = item.get("symbol") or item.get("code")
+            if not raw_symbol:
+                raise ValueError(f"轮动池第 {position} 项缺少 symbol")
+            entry = dict(item)
+            entry["symbol"] = standard_symbol(str(raw_symbol))
+            entry.setdefault("name", "")
+            entry.setdefault("chg20d", None)
+            entry.setdefault("board", "")
+            pool.append(entry)
+        return pool
+
+    def ensure_daily_dataset(symbol: str) -> str | None:
+        """换票后保证新标的有可回放的日线数据集，返回 dataset_id。"""
+        for dataset in storage.list_datasets():
+            if (
+                dataset.timeframe == "daily" and dataset.symbol == symbol
+                and dataset.file_path and Path(dataset.file_path).exists()
+            ):
+                return dataset.id
+        try:
+            bundle = application.state.market_service.fetch_history_bundle(
+                symbol, include_intraday=False,
+            )
+        except (requests.RequestException, ValueError):
+            return None
+        if not bundle.get("daily"):
+            return None
+        for key in ("daily", "index"):
+            dataset = bundle.get(key)
+            if dataset is not None:
+                storage.save_dataset(dataset)
+        return bundle["daily"].id
+
+    def rotation_screener_config(account: BrokerAccount) -> ScreenerConfig | None:
+        """账户轮动配置 → 本轮重筛配置；旧账户/脏配置回落到默认配置。"""
+        try:
+            return ScreenerConfig.from_dict(account.rotation_config)
+        except (ValueError, TypeError):
+            return None
+
+    def maybe_advance_rotation(account: BrokerAccount, bar: Bar) -> dict | None:
+        """live-tick 轮动接线：清仓后重新运行五层选股，取当时第一名。
+
+        只有「刚结束一轮」（apply_bar 里清仓归零时置 rotation_pending_advance）
+        且空仓、tick 的正好是当前轮动标的时处理，每个交易日最多重筛一次。
+        """
+        if not (account.auto_strategy and account.rotation_enabled):
+            return None
+        if not account.rotation_pending_advance:
+            return None
+        config = rotation_screener_config(account)
+
+        def runner() -> dict:
+            # 重筛用最新日线（include_realtime=False），结果落库供历史回看。
+            result = screener_service().run(config=config, include_realtime=False)
+            payload = result.to_dict()
+            storage.save_screener_run(payload)
+            return payload
+
+        event = rescreen_and_advance(
+            account, runner, today=bar.date, current_symbol=bar.symbol,
+        )
+        if event and event.get("advanced"):
+            dataset_id = ensure_daily_dataset(event["symbol"])
+            if dataset_id and dataset_id != account.dataset_id:
+                account.dataset_id = dataset_id
+                account.cursor = 0
+        return event
+
     def apply_bar(
         account: BrokerAccount, bar: Bar, daily_history: list[Bar] | None = None,
         index_history: list[Bar] | None = None, recent_bars: list[Bar] | None = None,
@@ -261,6 +383,8 @@ def create_app() -> FastAPI:
             if position.total_qty == 0 and strategy.liquidating:
                 strategy.reset_round(account)
                 account.last_daily_signal_date = None
+                # 一轮刚结束：允许下一次 tick 把轮动推进到池内下一只。
+                account.rotation_pending_advance = True
 
             if bar.timeframe != "daily":
                 previous_daily = [item for item in (daily_history or []) if item.date < bar.date]
@@ -389,6 +513,177 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=502, detail="腾讯实时行情请求失败")
         return quote
 
+    @application.get("/api/screener/defaults")
+    def screener_defaults():
+        return screener_service().defaults()
+
+    @application.get("/api/screener/coverage")
+    def screener_coverage():
+        return screener_service().coverage()
+
+    @application.post("/api/screener/refresh")
+    def screener_refresh(request: ScreenerRefreshRequest):
+        try:
+            return screener_service().refresh(**request.model_dump())
+        except ValueError as exc:
+            if "已在运行" in str(exc):
+                raise HTTPException(status_code=409, detail="刷新任务已在运行") from exc
+            raise
+
+    @application.get("/api/screener/refresh")
+    def screener_refresh_status():
+        return screener_service().refresh_status()
+
+    @application.post("/api/screener/run")
+    def run_screener(request: ScreenerRunRequest):
+        config = ScreenerConfig.from_dict(request.config) if request.config is not None else None
+        result: ScreeningResult = screener_service().run(
+            config=config, as_of=request.as_of, include_realtime=request.include_realtime,
+        )
+        payload = result.to_dict()
+        storage.save_screener_run(payload)
+        return payload
+
+    @application.get("/api/screener/runs")
+    def screener_runs(limit: int = Query(default=20, ge=1, le=200)):
+        return storage.list_screener_runs(limit=limit)
+
+    @application.get("/api/screener/runs/{run_id}")
+    def screener_run_detail(run_id: str):
+        run = storage.get_screener_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="选股运行不存在")
+        return run
+
+    @application.delete("/api/screener/runs/{run_id}")
+    def delete_screener_run(run_id: str):
+        return {"deleted": storage.delete_screener_run(run_id)}
+
+    @application.post("/api/screener/runs/{run_id}/prepare")
+    def prepare_screener_run(run_id: str, request: ScreenerPrepareRequest):
+        run = storage.get_screener_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="选股运行不存在")
+        first = run.get("first") or {}
+        candidates = run.get("eligible") or run.get("pool") or []
+        if request.candidate_code:
+            wanted = standard_symbol(request.candidate_code)
+            candidate = next(
+                (item for item in candidates
+                 if standard_symbol(str(item.get("code") or item.get("symbol") or "")) == wanted),
+                None,
+            )
+            if candidate is None:
+                raise ValueError(f"候选标的 {wanted} 不在本次选股结果中")
+        else:
+            wanted = standard_symbol(str(first.get("code") or "")) if first.get("code") else ""
+            if not wanted:
+                raise ValueError("本次选股结果没有可用候选标的")
+            candidate = next(
+                (item for item in candidates
+                 if standard_symbol(str(item.get("code") or item.get("symbol") or "")) == wanted),
+                first,
+            )
+        code = standard_symbol(str(candidate.get("code") or wanted))
+        # 一键带入优先复用本地已注册数据集：行情源限速时仍然可用，也避免重复拉取。
+        # 只有本地缺失或数据未覆盖最新交易日时才走行情服务；行情失败再回落本地，最后才 502。
+        index_symbol = "sh.000688" if code.split(".", 1)[-1].startswith(("688", "689")) else "sz.399006"
+        datasets = storage.list_datasets()
+        cached_daily = next(
+            (item for item in datasets
+             if item.timeframe == "daily" and item.symbol == code and item.source == "baostock"),
+            None,
+        )
+        cached_index = next(
+            (item for item in datasets
+             if item.timeframe == "daily" and item.symbol == index_symbol),
+            None,
+        )
+        cached_intraday = next(
+            (item for item in datasets
+             if item.timeframe == "1m" and item.symbol == code),
+            None,
+        )
+        try:
+            latest_trade = screener_service().store.latest_trade_date()
+        except Exception:  # noqa: BLE001 - 元数据不可用时不阻塞带入
+            latest_trade = None
+        cache_fresh = bool(
+            cached_daily and cached_index and latest_trade and cached_daily.end >= latest_trade
+        )
+        saved: dict = {}
+        if cache_fresh:
+            saved = {
+                "daily": cached_daily.to_dict(),
+                "index": cached_index.to_dict(),
+                "intraday": cached_intraday.to_dict() if cached_intraday else None,
+            }
+            bundle = None
+        else:
+            try:
+                bundle = application.state.market_service.fetch_history_bundle(code)
+            except requests.RequestException:
+                if cached_daily and cached_index:
+                    saved = {
+                        "daily": cached_daily.to_dict(),
+                        "index": cached_index.to_dict(),
+                        "intraday": cached_intraday.to_dict() if cached_intraday else None,
+                    }
+                    bundle = None
+                else:
+                    raise HTTPException(status_code=502, detail="行情源网络请求失败，请稍后重试")
+        if bundle is not None:
+            for key in ("daily", "index", "intraday"):
+                dataset = bundle.get(key)
+                if dataset is not None:
+                    storage.save_dataset(dataset)
+                    saved[key] = dataset.to_dict()
+                else:
+                    saved[key] = None
+        candidate_info = {
+            "code": code,
+            "name": candidate.get("name") or first.get("name") or "",
+            "board": candidate.get("board") or "",
+            "chg20d": candidate.get("chg20d"),
+        }
+        if request.target == "backtest":
+            return {
+                "target": "backtest", "candidate": candidate_info,
+                "datasets": saved, "account": None,
+            }
+
+        previous = get_paper(request.account_id) if request.account_id else None
+        account = BrokerAccount(
+            initial_cash=previous.initial_cash if previous else 4_000_000.0,
+            name=previous.name if previous else "选股带入模拟盘",
+            config=previous.config if previous else None,
+            account_id=previous.id if previous else None,
+            dataset_id=saved["daily"]["id"],
+        )
+        account.auto_strategy = request.auto_strategy
+        if request.rotation:
+            # 轮动 v2：记录该次选股的参数/快照，池=最新候选，序号指向本次带入的候选。
+            set_rotation_from_run(
+                account, run, enabled=True,
+                note=f"换票→{code}", current_symbol=code,
+            )
+        else:
+            account.rotation_enabled = False
+            account.rotation_pool = []
+            account.rotation_index = -1
+            account.rotation_waiting = False
+            account.rotation_pending_advance = False
+            account.rotation_note = ""
+            account.rotation_run_id = None
+            account.rotation_config = {}
+            account.rotation_last_run_id = None
+            account.rotation_last_screen = {}
+            account.rotation_last_attempt_date = None
+        return {
+            "target": "paper", "candidate": candidate_info,
+            "datasets": saved, "account": save_paper(account),
+        }
+
     @application.post("/api/datasets/demo")
     def demo_datasets():
         daily, intraday, index = save_demo_datasets(data_dir)
@@ -437,6 +732,27 @@ def create_app() -> FastAPI:
             "daily_source": daily_dataset.source,
             "intraday_source": intraday_dataset.source if intraday_dataset else None,
             "index_source": index_dataset.source if index_dataset else None,
+        })
+        storage.save_backtest(report)
+        return report
+
+    @application.post("/api/backtests/funnel")
+    def create_funnel_backtest(request: FunnelBacktestRequest):
+        """选股漏斗轮动回测：每次清仓后重跑 L0→L4 取当时第一名换票（不联网）。"""
+        config = resolve_config(request.config, request.fees)
+        screener = ScreenerConfig.from_dict({
+            **(request.screener or {}), "enable_fundamental_veto": False,
+        })
+        service = screener_service()
+        report = run_funnel_backtest(
+            store=service.store, market=application.state.market_service,
+            screener_config=screener, initial_cash=request.initial_cash,
+            config=config, start_date=request.start_date, end_date=request.end_date,
+            name=request.name,
+        )
+        report["data_info"].update({
+            "daily_source": "universe_db",
+            "universe_db": str(service.store.path),
         })
         storage.save_backtest(report)
         return report
@@ -499,6 +815,18 @@ def create_app() -> FastAPI:
             config=previous.config, account_id=previous.id, dataset_id=previous.dataset_id,
         )
         account.auto_strategy = previous.auto_strategy
+        # 重置账户保留轮动配置与最近一次筛选快照，但回到「未开始」状态。
+        account.rotation_enabled = previous.rotation_enabled
+        account.rotation_pool = [dict(item) for item in previous.rotation_pool]
+        account.rotation_run_id = previous.rotation_run_id
+        account.rotation_config = dict(previous.rotation_config)
+        account.rotation_last_run_id = previous.rotation_last_run_id
+        account.rotation_last_screen = dict(previous.rotation_last_screen)
+        account.rotation_last_attempt_date = None  # 重置后同一天也能重新筛选
+        account.rotation_index = -1
+        account.rotation_waiting = False
+        account.rotation_pending_advance = False
+        account.rotation_note = ""
         return save_paper(account)
 
     @application.post("/api/paper/accounts/{account_id}/fees")
@@ -519,6 +847,77 @@ def create_app() -> FastAPI:
             account.armed_state = "OFF"
         return save_paper(account)
 
+    @application.post("/api/paper/accounts/{account_id}/rotation")
+    def set_paper_rotation(account_id: str, request: RotationRequest):
+        account = get_paper(account_id)
+        if request.run_id:
+            run = storage.get_screener_run(request.run_id)
+            if run is None:
+                raise HTTPException(status_code=404, detail="选股运行不存在")
+            # 轮动 v2：启用时记录该次选股配置/快照，池=最新候选，序号=first。
+            # 若账户已持有某标的（尚未清仓），当前轮动标的必须指向它，
+            # 否则该持仓清仓后的 tick 标的不等于 current_symbol，永远不会触发重筛。
+            held_symbol = next(
+                (symbol for symbol, position in account.positions.items() if position.total_qty > 0),
+                None,
+            )
+            set_rotation_from_run(
+                account, run, enabled=request.enabled, current_symbol=held_symbol,
+            )
+            if request.pool is not None:
+                # pool 显式给出时优先用它覆盖候选摘要（保留上面记录的配置/快照）。
+                set_rotation_pool(
+                    account, normalize_rotation_pool(request.pool),
+                    run_id=request.run_id, enabled=request.enabled,
+                )
+        elif request.pool is not None:
+            set_rotation_pool(
+                account, normalize_rotation_pool(request.pool),
+                run_id=account.rotation_run_id,
+                enabled=request.enabled,
+            )
+        else:
+            account.rotation_enabled = request.enabled
+            account.rotation_pending_advance = False
+            if not request.enabled:
+                account.rotation_waiting = False
+                account.rotation_note = ""
+            # 仅开关：保留旋转配置与最近筛选快照（disabled 也保留）。
+        return save_paper(account)
+
+    @application.get("/api/trading-rules")
+    def trading_rules_all():
+        """六板块规则全表 + 未建模清单，供规则面板与选股带入参考。"""
+        return {
+            "boards": [item.to_dict() for item in all_board_rules()],
+            "not_modeled": list(NOT_MODELED),
+        }
+
+    @application.get("/api/trading-rules/{symbol}")
+    def trading_rules(symbol: str):
+        """按标的返回其板块交易规则；合成标的回退旧口径并显式标注。"""
+        try:
+            code = standard_symbol(symbol)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        board = board_of(code)
+        rules = rules_for(code)
+        reference = 0.0
+        try:
+            _, bar = application.state.market_service.fetch_quote(code)
+            reference = bar.close
+        except (ValueError, requests.RequestException):
+            reference = 0.0
+        cage = price_cage_bounds(code, reference) if reference > 0 else None
+        return {
+            "symbol": code,
+            "board": board or rules.board,
+            "is_modeled_board": bool(board),
+            "rules": rules.to_dict(),
+            "price_cage": {"lower": cage[0], "upper": cage[1], "reference_price": price(reference)} if cage else None,
+            "not_modeled": list(NOT_MODELED),
+        }
+
     @application.post("/api/paper/accounts/{account_id}/orders")
     def create_paper_order(account_id: str, request: PaperOrderRequest):
         account = get_paper(account_id)
@@ -528,6 +927,10 @@ def create_app() -> FastAPI:
             limit_price=request.limit_price, purpose=request.purpose,
             execution_mode="NEXT_BAR", reason="模拟手工单",
         ), utc_now())
+        # 不合规申报（板块数量/单笔上限/T+1 可卖）转 400 + 具体原因，且不落库，
+        # 避免前端把被拒单误当成已挂单。合法订单才持久化账户。
+        if order.status == "REJECTED":
+            raise HTTPException(status_code=400, detail=order.message or "委托被拒绝")
         save_paper(account)
         return {"order": order.to_dict(), "account": account.to_dict()}
 
@@ -621,6 +1024,8 @@ def create_app() -> FastAPI:
             account, bar, daily_history=daily_history, index_history=index_history,
             recent_bars=recent_bars, daily_close=daily_close, execution_bar=execution_bar,
         )
+        # 池内轮动：空仓且 tick 标的 == 池内当前标的时，按 L4 顺序检查 L0 后换票。
+        maybe_advance_rotation(account, bar)
         return save_paper(account)
 
     @application.post("/api/paper/accounts/{account_id}/advance")

@@ -86,8 +86,9 @@ def test_multiple_paper_accounts_can_reuse_local_order_ids(tmp_path, monkeypatch
             "name": f"多账户{index}", "initial_cash": 100_000,
         }).json()
         ids.append(account["id"])
+        # 688200 属科创板，最小申报 200 股；旧用例的 100 股按新规则会被拒。
         response = client.post(f"/api/paper/accounts/{account['id']}/orders", json={
-            "symbol": "688200", "side": "BUY", "order_type": "MARKET", "quantity": 100,
+            "symbol": "688200", "side": "BUY", "order_type": "MARKET", "quantity": 200,
         })
         assert response.status_code == 200, response.text
         assert response.json()["order"]["symbol"] == "sh.688200"
@@ -122,7 +123,7 @@ def test_paper_order_api_enum_contract_is_uppercase(tmp_path, monkeypatch):
     url = f"/api/paper/accounts/{account['id']}/orders"
 
     accepted = client.post(url, json={
-        "symbol": "688200", "side": "BUY", "order_type": "MARKET", "quantity": 100,
+        "symbol": "688200", "side": "BUY", "order_type": "MARKET", "quantity": 200,
     })
     assert accepted.status_code == 200, accepted.text
     order = accepted.json()["order"]
@@ -149,7 +150,7 @@ def test_cancel_order_only_affects_its_own_account(tmp_path, monkeypatch):
             "name": f"撤单归属{index}", "initial_cash": 100_000,
         }).json()
         placed = client.post(f"/api/paper/accounts/{account['id']}/orders", json={
-            "symbol": "688200", "side": "BUY", "order_type": "MARKET", "quantity": 100,
+            "symbol": "688200", "side": "BUY", "order_type": "MARKET", "quantity": 200,
         })
         assert placed.status_code == 200, placed.text
         accounts.append((account["id"], placed.json()["order"]["id"]))

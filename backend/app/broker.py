@@ -8,6 +8,9 @@ from typing import Iterable
 from .domain import (
     Bar, FeeBreakdown, Fill, Order, OrderRequest, Position, StrategyConfig, money, price, utc_now,
 )
+from .trading_rules import (
+    BoardRules, rules_for, validate_order_amount, validate_quantity,
+)
 
 
 class BrokerAccount:
@@ -40,6 +43,20 @@ class BrokerAccount:
         self.orders: list[Order] = []
         self.trades: list[Fill] = []
         self.current_date: str | None = None
+        # 池内轮动 v2（清仓后重新选股）配置：与账户一起持久化，由 rotation.py 维护。
+        self.rotation_enabled: bool = False
+        self.rotation_pool: list[dict] = []
+        self.rotation_index: int = -1
+        self.rotation_waiting: bool = False
+        self.rotation_note: str = ""
+        self.rotation_run_id: str | None = None
+        # 轮动 v2：清仓后重新运行五层选股（rescreen）所需的配置与最近一次筛选快照。
+        self.rotation_config: dict = {}
+        self.rotation_last_attempt_date: str | None = None
+        self.rotation_last_run_id: str | None = None
+        self.rotation_last_screen: dict = {}
+        # 只有「刚结束一轮」才允许轮动推进；新账户空仓不能直接跳到池内第二只。
+        self.rotation_pending_advance: bool = False
         self._next_order_number = 1
         self._next_fill_number = 1
 
@@ -89,6 +106,10 @@ class BrokerAccount:
             position.today_permanent_buy_qty = 0
             position.today_t_buy_qty = 0
 
+    def board_rules(self, symbol: str) -> BoardRules:
+        """标的对应板块的交易规则；合成标的回退旧口径。"""
+        return rules_for(symbol)
+
     def submit(self, request: OrderRequest, timestamp: datetime | str | None = None) -> Order:
         side = request.side.upper()
         order_type = request.order_type.upper()
@@ -99,11 +120,9 @@ class BrokerAccount:
             raise ValueError("purpose 必须为 PERMANENT 或 T")
         if isinstance(request.quantity, bool) or int(request.quantity) != request.quantity or request.quantity <= 0:
             raise ValueError("quantity 必须为正整数")
-        quantity = int(request.quantity)
-        if side == "BUY" and quantity % 100:
-            raise ValueError("A股买入数量必须为100股整数手")
         if order_type == "LIMIT" and (request.limit_price is None or request.limit_price <= 0):
             raise ValueError("限价单必须提供正的 limit_price")
+        quantity = int(request.quantity)
         created = timestamp.isoformat() if isinstance(timestamp, datetime) else (timestamp or utc_now())
         order = Order(
             id=f"O{self._next_order_number:08d}", symbol=request.symbol,
@@ -114,6 +133,22 @@ class BrokerAccount:
         )
         self._next_order_number += 1
         position = self.position(request.symbol)
+        # 分板块数量口径：科创板 ≥200 股可 1 股递增，创业板/主板 100 股整数倍；
+        # 不合规申报记为 REJECTED 订单（不再抛异常），避免长周期回测被一笔申报打断。
+        rules = self.board_rules(request.symbol)
+        quantity_reason = validate_quantity(
+            request.symbol, quantity, side,
+            sellable_qty=position.permanent_sellable_qty if side == "SELL" else None,
+        )
+        # 单笔申报数量上限（按股数）：限价/市价分别校验，与价格/金额无关。
+        # 注意市价单没有委托价也能校验，不能因缺 reference 就跳过（旧版曾漏检市价超额）。
+        amount_reason = validate_order_amount(request.symbol, quantity, order_type)
+        reject_reason = quantity_reason or amount_reason
+        if reject_reason:
+            order.status = "REJECTED"
+            order.message = reject_reason
+            self.orders.append(order)
+            return order
         if side == "SELL":
             sellable = position.permanent_sellable_qty if purpose == "PERMANENT" else min(
                 position.t_qty, position.permanent_sellable_qty
@@ -170,11 +205,19 @@ class BrokerAccount:
                 return limit
         return None
 
-    def _tradable(self, side: str, base_price: float, previous_close: float | None) -> bool:
+    def _limit_pct(self, symbol: str) -> float:
+        """涨跌幅口径：真实板块按板块规则，合成标的沿用 config.limit_pct（旧口径）。"""
+        from .trading_rules import board_of
+
+        board = board_of(symbol)
+        return rules_for(symbol).limit_pct if board else self.config.limit_pct
+
+    def _tradable(self, side: str, base_price: float, previous_close: float | None, symbol: str = "") -> bool:
         if previous_close is None or previous_close <= 0:
             return True
-        upper = round(previous_close * (1 + self.config.limit_pct), 2)
-        lower = round(previous_close * (1 - self.config.limit_pct), 2)
+        limit_pct = self._limit_pct(symbol)
+        upper = round(previous_close * (1 + limit_pct), 2)
+        lower = round(previous_close * (1 - limit_pct), 2)
         if base_price < lower or base_price > upper:
             return False
         if side == "BUY" and base_price >= upper:
@@ -182,6 +225,17 @@ class BrokerAccount:
         if side == "SELL" and base_price <= lower:
             return False
         return True
+
+    def _fill_step(self, order: Order) -> int:
+        """按板块返回可成交数量的递增步长；零股整笔卖出的最小成交=委托数量本身。
+
+        科创板买入可 1 股递增；创业板/主板 100 股一手。持仓低于板块最小申报单位的
+        整笔清仓委托，最小成交等于委托数量（不能被 step 截断成 0 而拒绝成交）。
+        """
+        rules = self.board_rules(order.symbol)
+        if order.side == "SELL" and order.quantity < rules.min_qty:
+            return max(1, order.quantity)
+        return max(1, rules.step)
 
     def process_bar(self, bar: Bar, modes: Iterable[str] | None = None) -> list[Fill]:
         position = self.position(bar.symbol)
@@ -199,10 +253,11 @@ class BrokerAccount:
             base = self._limit_price(order, bar)
             if base is None:
                 continue
-            if not self._tradable(order.side, base, bar.prev_close or previous_close):
+            if not self._tradable(order.side, base, bar.prev_close or previous_close, order.symbol):
                 order.message = "涨跌停或超出价格限制，不可成交"
                 continue
-            capacity = max(0, int((bar.volume * self.config.volume_participation - used_volume) / 100) * 100)
+            step = self._fill_step(order)
+            capacity = max(0, int((bar.volume * self.config.volume_participation - used_volume) / step) * step)
             if capacity <= 0:
                 order.message = "成交量参与度额度不足"
                 continue
@@ -213,22 +268,22 @@ class BrokerAccount:
                     position.t_qty, position.permanent_sellable_qty
                 )
                 quantity = min(quantity, sellable)
-            if quantity < 100:
-                order.message = "可成交数量不足一手"
+            if quantity < step:
+                order.message = "可成交数量不足一个申报单位"
                 continue
             slippage_rate = self.config.slippage_bps / 10000.0
             execution = price(base * (1 + slippage_rate if order.side == "BUY" else 1 - slippage_rate))
-            if not self._tradable(order.side, execution, bar.prev_close or previous_close):
+            if not self._tradable(order.side, execution, bar.prev_close or previous_close, order.symbol):
                 continue
             amount = money(execution * quantity)
             fees = self._fees(order.side, amount)
             if order.side == "BUY":
-                while quantity >= 100 and amount + fees.total_fee > self.cash:
-                    quantity -= 100
+                while quantity >= step and amount + fees.total_fee > self.cash:
+                    quantity -= step
                     if quantity:
                         amount = money(execution * quantity)
                         fees = self._fees(order.side, amount)
-                if quantity < 100:
+                if quantity < step:
                     order.message = "可用资金不足"
                     continue
             realized = self._apply_execution(
@@ -318,6 +373,8 @@ class BrokerAccount:
         self.position(symbol).last_price = price(last_price)
 
     def to_dict(self, include_internal: bool = False) -> dict:
+        from .rotation import rotation_summary  # 延迟导入，避免 broker ↔ rotation 循环依赖
+
         result = {
             "id": self.id, "name": self.name, "initial_cash": self.initial_cash,
             "cash": self.cash, "available_cash": self.available_cash,
@@ -330,6 +387,7 @@ class BrokerAccount:
             "armed_state": self.armed_state, "status": self.status,
             "auto_strategy": self.auto_strategy,
             "config": self.config.to_dict(), "dataset_id": self.dataset_id, "cursor": self.cursor,
+            "rotation": rotation_summary(self),
         }
         if include_internal:
             result.update({
@@ -339,6 +397,11 @@ class BrokerAccount:
                 "current_date": self.current_date,
                 "strategy_state": self.strategy_state,
                 "last_daily_signal_date": self.last_daily_signal_date,
+                "rotation_pending_advance": self.rotation_pending_advance,
+                "rotation_config": self.rotation_config,
+                "rotation_last_attempt_date": self.rotation_last_attempt_date,
+                "rotation_last_run_id": self.rotation_last_run_id,
+                "rotation_last_screen": self.rotation_last_screen,
             })
         return result
 
@@ -352,6 +415,25 @@ class BrokerAccount:
             if field in data:
                 setattr(account, field, data[field])
         account.strategy_state = dict(data.get("strategy_state", {}))
+        rotation = data.get("rotation") or {}
+        account.rotation_enabled = bool(rotation.get("enabled", data.get("rotation_enabled", False)))
+        account.rotation_pool = list(rotation.get("pool") or data.get("rotation_pool") or [])
+        account.rotation_index = int(rotation.get("index", data.get("rotation_index", -1)))
+        account.rotation_waiting = bool(rotation.get("waiting", data.get("rotation_waiting", False)))
+        account.rotation_note = str(rotation.get("note", data.get("rotation_note", "")) or "")
+        run_id = rotation.get("run_id", data.get("rotation_run_id"))
+        account.rotation_run_id = str(run_id) if run_id else None
+        config = data.get("rotation_config", rotation.get("config"))
+        account.rotation_config = dict(config) if isinstance(config, dict) else {}
+        last_attempt = data.get("rotation_last_attempt_date", rotation.get("last_attempt_date"))
+        account.rotation_last_attempt_date = str(last_attempt) if last_attempt else None
+        last_run_id = data.get("rotation_last_run_id", rotation.get("last_run_id"))
+        account.rotation_last_run_id = str(last_run_id) if last_run_id else None
+        last_screen = data.get("rotation_last_screen", rotation.get("last_screen"))
+        account.rotation_last_screen = dict(last_screen) if isinstance(last_screen, dict) else {}
+        account.rotation_pending_advance = bool(
+            data.get("rotation_pending_advance", rotation.get("pending_advance", False))
+        )
         account.positions = {
             symbol: Position(**value) for symbol, value in data.get("_positions_internal", {}).items()
         }

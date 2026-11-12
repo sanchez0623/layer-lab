@@ -110,6 +110,8 @@ class StrategyConfig:
     transfer_fee_rate: float = 0.00001      # 万0.1，过户费，双边
     slippage_bps: float = 1.0
     volume_participation: float = 0.20
+    # 仅用于合成标的（TEST/SYNTH001 等无板块代码）的涨跌幅回退口径；
+    # 真实板块（科创板/创业板/沪深主板/B股）的涨跌幅一律取 trading_rules 的板块值，忽略本字段。
     limit_pct: float = 0.20
     right_drawdown: float = 0.05
     min_add_gap_days: int = 1

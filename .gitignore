@@ -14,6 +14,8 @@ frontend/dist/
 # Build & caches
 .cache/
 .vite/
+.pnpm-store/
+layer-lab-deploy.tar.gz
 
 # Databases & local data
 *.db

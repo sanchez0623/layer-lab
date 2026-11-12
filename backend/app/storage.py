@@ -46,6 +46,9 @@ class SQLiteStorage:
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS screener_runs (
+                    id TEXT PRIMARY KEY, created_at TEXT NOT NULL, as_of TEXT NOT NULL, payload TEXT NOT NULL
+                );
             """)
 
     def get_setting(self, key: str) -> str | None:
@@ -150,6 +153,61 @@ class SQLiteStorage:
                 "SELECT payload FROM paper_accounts ORDER BY updated_at DESC,id DESC LIMIT 1"
             ).fetchone()
         return json.loads(row["payload"]) if row else None
+
+    def save_screener_run(self, payload: dict[str, Any]) -> None:
+        """保存一次完整的选股结果（payload 即 ScreeningResult.to_dict()）。"""
+        body = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO screener_runs(id,created_at,as_of,payload) VALUES(?,?,?,?)",
+                (
+                    payload["id"], payload["created_at"],
+                    payload.get("as_of") or "", body,
+                ),
+            )
+
+    def get_screener_run(self, run_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM screener_runs WHERE id=?", (run_id,)
+            ).fetchone()
+        return json.loads(row["payload"]) if row else None
+
+    def list_screener_runs(self, limit: int = 20) -> list[dict[str, Any]]:
+        """历史运行摘要，供列表页使用，不返回整份候选池。"""
+        limit = max(1, int(limit))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id,created_at,as_of,payload FROM screener_runs "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        summaries: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            gate = payload.get("gate") or {}
+            eligible = payload.get("eligible") or []
+            first = payload.get("first") or (eligible[0] if eligible else None)
+            summaries.append({
+                "id": row["id"],
+                "created_at": row["created_at"],
+                "as_of": row["as_of"],
+                "gate_open": gate.get("open"),
+                "eligible_count": len(eligible),
+                "first": (
+                    {
+                        "code": first.get("code"),
+                        "name": first.get("name"),
+                        "chg20d": first.get("chg20d"),
+                    } if isinstance(first, dict) else None
+                ),
+            })
+        return summaries
+
+    def delete_screener_run(self, run_id: str) -> bool:
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM screener_runs WHERE id=?", (run_id,))
+        return cursor.rowcount > 0
 
     def find_paper_by_order(self, order_id: str, account_id: str) -> dict[str, Any] | None:
         """按 (account_id, order_id) 精确定位账户。

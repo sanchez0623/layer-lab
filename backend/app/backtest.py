@@ -9,7 +9,9 @@ from typing import Any
 
 from .broker import BrokerAccount
 from .domain import Bar, Fill, StrategyConfig, money, utc_now
+from .screener import ScreenerConfig, run_screener
 from .strategy import LayeredTStrategy
+from .universe import BOARD_INDEX, UniverseStore
 
 
 def performance_metrics(
@@ -312,3 +314,397 @@ class BacktestEngine:
 
 def run_backtest(**kwargs) -> dict[str, Any]:
     return BacktestEngine(**kwargs).run()
+
+
+class FunnelRotationBacktest:
+    """选股漏斗轮动回测：每次清仓后重新跑 L0→L4，取当时第一名换票。
+
+    与模拟盘 rotation v2 语义对齐（清仓→重筛→次日建仓），但全程日线口径：
+    无 1 分钟数据，T 交易与 tick 级风控降级。数据只读 universe.db 缓存，不联网。
+    """
+
+    def __init__(
+        self, store: UniverseStore, market: Any,
+        screener_config: ScreenerConfig | None = None,
+        initial_cash: float = 4_000_000.0, config: StrategyConfig | None = None,
+        start_date: str | None = None, end_date: str | None = None,
+        name: str = "选股漏斗轮动回测",
+    ) -> None:
+        self.store = store
+        self.market = market
+        # 引擎内部强制关闭财务深筛：既避免联网财务，也避免用「今天」的季报回看历史（未来数据）。
+        base = screener_config or ScreenerConfig()
+        self.screener_config = ScreenerConfig.from_dict({**base.to_dict(), "enable_fundamental_veto": False})
+        self.config = config or StrategyConfig()
+        self.account = BrokerAccount(initial_cash=initial_cash, config=self.config, name=name)
+        self.strategy = LayeredTStrategy(self.config)
+        self.start_date = datetime.fromisoformat(start_date).date() if start_date else None
+        self.end_date = datetime.fromisoformat(end_date).date() if end_date else None
+        self.name = name
+        self.events: list[dict[str, Any]] = []
+        self.warnings: list[str] = []
+        self.rounds: list[dict[str, Any]] = []
+        self.current_round: dict[str, Any] | None = None
+        self.max_invested = 0.0
+        self.max_float_loss = 0.0
+        self._prepare_data()
+
+    # -- 数据准备 ---------------------------------------------------------
+
+    def _prepare_data(self) -> None:
+        """一次性读入 universe.db 缓存（不联网、不打 baostock）。"""
+        if self.store.latest_trade_date() is None:
+            raise ValueError("universe 日线缓存为空，请先在选股页刷新数据")
+        self.candidates = self.store.list_codes(self.screener_config.boards)
+        self.name_by_code = {row.code: row.name for row in self.candidates}
+        self.board_by_code = {row.code: row.board for row in self.candidates}
+        codes = [row.code for row in self.candidates]
+        self.history: dict[str, list[Bar]] = (
+            self.store.load_history(codes, max_rows=260) if codes else {}
+        )
+        self.codes_with_daily = [code for code in codes if self.history.get(code)]
+        if not self.codes_with_daily:
+            raise ValueError("universe 日线缓存为空，请先在选股页刷新数据")
+        # 板块指数（L0 门 + 策略大盘门）
+        self.index_history: dict[str, list[Bar]] = {}
+        for board in self.screener_config.boards:
+            index_code = BOARD_INDEX[board]
+            self.index_history[board] = self.store.load_index(index_code, max_rows=260)
+        # 全局交易日时间线：所有候选日线日期的并集 ∩ [start_date, end_date]
+        dates: set[str] = set()
+        for code in self.codes_with_daily:
+            for bar in self.history[code]:
+                if self.start_date and bar.timestamp.date() < self.start_date:
+                    continue
+                if self.end_date and bar.timestamp.date() > self.end_date:
+                    continue
+                dates.add(bar.date)
+        self.timeline = sorted(dates)
+        if not self.timeline:
+            raise ValueError("指定日期范围内没有日线")
+
+    # -- 与 BacktestEngine 一致的轮次记账 --------------------------------
+
+    def _new_round(self, fill: Fill, session_index: int) -> None:
+        self.current_round = {
+            "id": f"R{len(self.rounds) + 1:03d}", "symbol": fill.symbol,
+            "name": self.name_by_code.get(fill.symbol, ""),
+            "board": self.board_by_code.get(fill.symbol, ""),
+            "chg20d_at_select": self._chg20d_at_select.get(fill.symbol),
+            "screen": self._screen_by_symbol.get(fill.symbol),
+            "start_date": fill.timestamp[:10], "end_date": None, "status": "OPEN",
+            "start_equity": money(self.account.equity + fill.total_fee),
+            "installment_count": 0, "invested": 0.0, "max_invested": 0.0,
+            "max_float_loss": 0.0, "float_loss_at_2_4m": None,
+            "float_loss_pct_at_2_4m": None, "float_loss_over_6_23pct": False,
+            "deep_loss_start_date": None, "deep_loss_recovery_days": None,
+            "deep_loss_threshold": self.config.deep_loss_threshold,
+            "t_net_profit_start": self.account.t_net_profit,
+            "t_net_profit": 0.0, "pnl": 0.0, "close_reason": None,
+            "_deep_loss_start_session": None,
+        }
+        self.strategy.round_t_start = self.account.t_net_profit
+        self.events.append({"date": fill.timestamp, "type": "ROUND_START", "round_id": self.current_round["id"]})
+
+    def _update_round(self, bar: Bar, session_index: int) -> None:
+        position = self.account.position(bar.symbol)
+        invested = position.permanent_cost
+        floating = position.permanent_qty * bar.close - invested
+        self.max_invested = max(self.max_invested, invested)
+        self.max_float_loss = max(self.max_float_loss, -floating)
+        if not self.current_round:
+            return
+        item = self.current_round
+        item["installment_count"] = self.account.sequence_index
+        item["invested"] = money(invested)
+        item["max_invested"] = money(max(item["max_invested"], invested))
+        item["max_float_loss"] = money(max(item["max_float_loss"], -floating))
+        item["t_net_profit"] = money(self.account.t_net_profit - item["t_net_profit_start"])
+        if invested > 0:
+            loss_pct = floating / invested
+            if invested >= 2_400_000 and item["float_loss_at_2_4m"] is None:
+                item["float_loss_at_2_4m"] = money(floating)
+                item["float_loss_pct_at_2_4m"] = loss_pct
+                self.events.append({
+                    "date": bar.date, "type": "INVESTED_2_4M", "float_loss": money(floating),
+                    "float_loss_pct": loss_pct, "round_id": item["id"],
+                })
+            if loss_pct <= self.config.deep_loss_threshold and item["deep_loss_start_date"] is None:
+                item["deep_loss_start_date"] = bar.date
+                item["_deep_loss_start_session"] = session_index
+            if (
+                item["deep_loss_start_date"] is not None and item["deep_loss_recovery_days"] is None
+                and floating >= 0 and session_index > item["_deep_loss_start_session"]
+            ):
+                item["deep_loss_recovery_days"] = session_index - item["_deep_loss_start_session"]
+
+    def _handle_fills(self, fills: list[Fill], session_index: int, bar: Bar) -> None:
+        for fill in fills:
+            if fill.side == "BUY" and fill.purpose == "PERMANENT" and self.current_round is None:
+                self._new_round(fill, session_index)
+            self.strategy.on_fill(fill, session_index)
+            self.events.append({
+                "date": fill.timestamp, "type": "FILL", "fill_id": fill.id,
+                "side": fill.side, "purpose": fill.purpose, "quantity": fill.quantity,
+                "price": fill.price, "fee": fill.total_fee,
+            })
+            self._update_round(bar, session_index)
+        position = self.account.position(bar.symbol)
+        if self.current_round and position.total_qty == 0:
+            item = self.current_round
+            item["status"] = "CLOSED"
+            item["end_date"] = bar.date
+            item["pnl"] = money(self.account.equity - item["start_equity"])
+            item["close_reason"] = self.strategy.close_reason or "整体止盈/事件熔断"
+            item["t_net_profit"] = money(self.account.t_net_profit - item["t_net_profit_start"])
+            item.pop("_deep_loss_start_session", None)
+            self.events.append({
+                "date": bar.date, "type": "ROUND_CLOSED", "round_id": item["id"],
+                "pnl": item["pnl"], "reason": item["close_reason"],
+            })
+            self.rounds.append(item)
+            self.current_round = None
+            self.strategy.reset_round(self.account)
+            # 轮次闭合：清掉当前持有标的，让收盘重筛（对齐 rotation v2「清仓后重新选股」）。
+            self._round_just_closed = True
+
+    def _submit(self, requests, timestamp: datetime) -> None:
+        for request in requests:
+            if request.quantity < 100:
+                continue
+            order = self.account.submit(request, timestamp)
+            self.events.append({
+                "date": timestamp.isoformat(), "type": "SIGNAL", "order_id": order.id,
+                "symbol": order.symbol, "side": order.side, "purpose": order.purpose,
+                "quantity": order.quantity, "reason": order.reason, "status": order.status,
+                "execution_mode": order.execution_mode,
+            })
+
+    # -- 选股 ------------------------------------------------------------
+
+    def _screen(self, as_of: str) -> dict[str, Any]:
+        """在 as_of 时点跑一次 L0→L4（不联网），返回轻量快照。"""
+        result = run_screener(
+            self.store, self.market, self.screener_config,
+            as_of=as_of, include_realtime=False,
+        )
+        first = result.first
+        snapshot = {
+            "as_of": result.as_of,
+            "gate_open": bool(result.gate.get("open")),
+            "funnel": dict(result.funnel),
+            "first_code": first.code if first else "",
+            "first_name": first.name if first else "",
+            "first_chg20d": (first.chg20d if first else None),
+        }
+        for warning in result.warnings:
+            if warning not in self.warnings:
+                self.warnings.append(warning)
+        self.events.append({
+            "date": as_of, "type": "SCREEN", "as_of": result.as_of,
+            "gate_open": snapshot["gate_open"], "first_code": snapshot["first_code"],
+            "first_name": snapshot["first_name"], "funnel": dict(result.funnel),
+            "eligible_count": len(result.eligible),
+        })
+        return snapshot
+
+    def run(self) -> dict[str, Any]:
+        self.warnings.append("漏斗轮动回测为日线口径，1分钟做T与tick级风控降级")
+        self.warnings.append("财务深筛已强制关闭（enable_fundamental_veto=False）：避免联网财务与未来数据")
+        self._chg20d_at_select: dict[str, float | None] = {}
+        self._screen_by_symbol: dict[str, dict] = {}
+        # 每次选股的轨迹（含空仓等待的选股），轮次闭合时回填 entry/exit/pnl
+        self._trail: list[dict[str, Any]] = []
+        current_symbol: str | None = None
+        flat_wait_days = 0
+        session_index = -1
+        self._round_just_closed = False
+
+        equity_curve: list[dict[str, Any]] = []
+        used_dates: list[str] = []
+        for date_str in self.timeline:
+            session_index += 1
+            used_dates.append(date_str)
+            # cancel_previous=False：隔夜 NEXT_OPEN 挂单要保留到次日开盘撮合（与 BacktestEngine 一致）。
+            self.account.new_day(date_str, cancel_previous=False)
+            submitted_signal = False
+            if self._round_just_closed:
+                # 前一交易日轮次闭合：清掉持有标的，今日收盘重新选股（rotation v2 语义）。
+                current_symbol = None
+                flat_wait_days = 0
+                self._round_just_closed = False
+            if current_symbol is not None:
+                self.strategy.start_day(False)
+                bars = self.history.get(current_symbol, [])
+                bar = next((item for item in bars if item.date == date_str), None)
+                if bar is not None:
+                    fills = self.account.process_bar(bar, modes={"NEXT_OPEN"})
+                    self._handle_fills(fills, session_index, bar)
+                    self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
+                    self.account.mark(current_symbol, bar.close)
+                    history = [item for item in bars if item.date <= date_str]
+                    board = self.board_by_code.get(current_symbol, "")
+                    index_history = [
+                        item for item in self.index_history.get(board, [])
+                        if item.timestamp.date().isoformat() <= date_str
+                    ]
+                    self._update_round(bar, session_index)
+                    requests = self.strategy.on_daily(
+                        history, index_history, self.account, session_index, False,
+                    )
+                    self._submit(requests, bar.timestamp)
+                    submitted_signal = bool(requests)
+                # 首笔成交后把轨迹项关联到新开的轮次（供结尾回填 entry/exit/pnl）
+                if self.current_round is not None:
+                    round_id = self.current_round["id"]
+                    for entry in reversed(self._trail):
+                        if entry["symbol"] == current_symbol and entry["round"] is None:
+                            entry["round"] = round_id
+                            break
+            # 清仓后（无持仓）重新选股；与 rotation v2「清仓后重新选股」一致
+            flat = not any(position.total_qty > 0 for position in self.account.positions.values())
+            has_live_order = any(order.status in {"PENDING", "PARTIALLY_FILLED"} for order in self.account.orders)
+            if current_symbol is not None and flat and self.current_round is None:
+                if has_live_order or submitted_signal:
+                    # 首笔挂单还在（次日开盘成交）或当晚刚出首笔信号：给成交机会，不放弃。
+                    flat_wait_days = 0
+                else:
+                    flat_wait_days += 1
+                    if flat_wait_days > 3:
+                        # 迟迟建不起仓（建仓日指数门关闭 / 首笔被撤 / 长期停牌）：
+                        # 视为本次选股作废，置空 current_symbol 让下一交易日重新选股，避免卡死。
+                        self.events.append({
+                            "date": date_str, "type": "ENTRY_ABANDON", "symbol": current_symbol,
+                            "reason": "选中标的连续多日未能建仓，放弃并重新选股",
+                        })
+                        current_symbol = None
+                        flat_wait_days = 0
+            else:
+                flat_wait_days = 0
+            if flat and current_symbol is None:
+                snapshot = self._screen(date_str)
+                first_code = snapshot["first_code"]
+                # 复用本次选股结果里 first 的 Chg20D（与漏斗口径一致）
+                chg20d_at_select = snapshot["first_chg20d"]
+                self._trail.append({
+                    "round": None, "symbol": first_code or None,
+                    "name": snapshot["first_name"], "board": (
+                        self.board_by_code.get(first_code, "") if first_code else ""
+                    ),
+                    "select_date": snapshot["as_of"], "entry_date": None,
+                    "exit_date": None, "pnl": None,
+                    "chg20d_at_select": chg20d_at_select,
+                    "gate_open": snapshot["gate_open"], "status": "WAITING",
+                })
+                if first_code:
+                    current_symbol = first_code
+                    flat_wait_days = 0
+                    self._chg20d_at_select[first_code] = self._trail[-1]["chg20d_at_select"]
+                    self._screen_by_symbol[first_code] = snapshot
+                    self._trail[-1]["status"] = "OPEN"
+                    self.events.append({
+                        "date": date_str, "type": "SELECT", "symbol": first_code,
+                        "note": "选中标的，次一交易日开盘建仓",
+                    })
+                else:
+                    self.events.append({
+                        "date": date_str, "type": "WAIT",
+                        "reason": "L0 大盘门关闭" if not snapshot["gate_open"] else "L0–L4 后无候选，空仓等待",
+                    })
+            # 净值曲线点
+            held = current_symbol if current_symbol else None
+            position = self.account.position(held) if held else None
+            equity_curve.append({
+                "date": date_str, "equity": self.account.equity, "cash": self.account.cash,
+                "market_value": self.account.market_value,
+                "invested": position.permanent_cost if position else 0.0,
+                "drawdown": 0.0,
+                "position_qty": position.total_qty if position else 0,
+                "symbol": held,
+            })
+
+        # 收尾：未闭合的轮次按 OPEN 记录；清掉剩余挂单
+        if self.current_round:
+            item = self.current_round
+            item["pnl"] = money(self.account.equity - item["start_equity"])
+            item["close_reason"] = None
+            item.pop("_deep_loss_start_session", None)
+            self.rounds.append(item)
+            self.current_round = None
+        self.account.cancel_open_orders("回测结束")
+
+        # 回填轨迹里的 entry/exit/pnl（按 round_id 关联）
+        rounds_by_id = {item["id"]: item for item in self.rounds}
+        for entry in self._trail:
+            round_id = entry.get("round")
+            if round_id and round_id in rounds_by_id:
+                closed = rounds_by_id[round_id]
+                entry["entry_date"] = closed["start_date"]
+                entry["exit_date"] = closed["end_date"]
+                entry["pnl"] = closed["pnl"]
+                entry["status"] = "CLOSED" if closed["status"] == "CLOSED" else "OPEN"
+        # 选股了但从未建仓（选中即回测结束）的轨迹补 status=OPEN
+        for entry in self._trail:
+            if entry["round"] is None and entry["symbol"] and entry["status"] == "OPEN":
+                entry["status"] = "OPEN"
+
+        # 业绩指标：buy_hold 用「第一只入选标的」全程持有作参照；从未建仓则回退板块指数
+        reference = self.rounds[0]["symbol"] if self.rounds else None
+        buy_hold_return = 0.0
+        reference_symbol = None
+        if reference and self.history.get(reference):
+            bars = [
+                item for item in self.history[reference]
+                if self.timeline[0] <= item.date <= self.timeline[-1]
+            ]
+            if bars:
+                reference_symbol = reference
+                buy_hold_return = bars[-1].close / bars[0].close - 1
+        elif self.rounds:
+            # 首轮标的日线缺失（罕见）：回退到其所属板块指数全程，仍给出可复核参照。
+            board = self.board_by_code.get(self.rounds[0]["symbol"], "")
+            index_bars = [
+                item for item in self.index_history.get(board, [])
+                if self.timeline[0] <= item.date <= self.timeline[-1]
+            ]
+            if len(index_bars) >= 2 and index_bars[0].close > 0:
+                reference_symbol = self.index_history and BOARD_INDEX.get(board)
+                buy_hold_return = index_bars[-1].close / index_bars[0].close - 1
+        metrics = performance_metrics(
+            equity_curve, self.account.initial_cash, self.rounds,
+            [item.to_dict() for item in self.account.trades], self.account.total_fees,
+            self.account.t_net_profit, self.max_invested, self.max_float_loss,
+            buy_hold_return,
+        )
+        screening_count = len(self._trail)
+        data_info = {
+            "mode": "funnel_rotation", "boards": list(self.screener_config.boards),
+            "universe_codes": len(self.candidates), "codes_with_daily": len(self.codes_with_daily),
+            "daily_timeframe": "daily", "intraday_rows": 0, "index_rows": sum(
+                len(item) for item in self.index_history.values()
+            ),
+            "execution": "T日收盘选股/T+1开盘建仓；T日收盘信号/T+1开盘；无未来价",
+            "start": used_dates[0], "end": used_dates[-1],
+            "date_range": [self.timeline[0], self.timeline[-1]],
+            "screening_count": screening_count,
+            "reference_symbol": reference_symbol,
+            "rotation_trail": self._trail,
+        }
+        return {
+            "id": str(uuid.uuid4()), "name": self.name, "status": "COMPLETED",
+            "created_at": utc_now(), "config": {
+                **self.config.to_dict(), "initial_cash": self.account.initial_cash,
+                "screener": self.screener_config.to_dict(),
+                "start_date": self.start_date.isoformat() if self.start_date else None,
+                "end_date": self.end_date.isoformat() if self.end_date else None,
+            },
+            "metrics": metrics, "equity_curve": equity_curve,
+            "trades": [item.to_dict() for item in self.account.trades],
+            "orders": [item.to_dict() for item in self.account.orders],
+            "rounds": self.rounds, "events": self.events,
+            "warnings": list(dict.fromkeys(self.warnings)), "data_info": data_info,
+        }
+
+
+def run_funnel_backtest(**kwargs) -> dict[str, Any]:
+    return FunnelRotationBacktest(**kwargs).run()

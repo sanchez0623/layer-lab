@@ -5,7 +5,7 @@ import re
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import requests
 
@@ -120,6 +120,45 @@ def _float(value: Any, default: float = 0.0) -> float:
     return result if result == result else default
 
 
+def _parse_tencent_batch(text: str) -> dict[str, dict[str, Any]]:
+    """解析腾讯批量快照文本（GBK 已解码）→ {标准代码: quote}。无效代码跳过。"""
+    result: dict[str, dict[str, Any]] = {}
+    for match in re.finditer(r'v_([a-z]{2})(\d{6})="([^"]*)"', text):
+        exchange, code, payload = match.groups()
+        fields = payload.split("~")
+        if len(fields) < 45 or not fields[3]:
+            continue
+        close = _float(fields[3])
+        if close <= 0:
+            continue
+        prev_close = _float(fields[4], close)
+        volume = _float(fields[36])
+        amount = _float(fields[37]) * 10000.0
+        if amount <= 0 and volume > 0:
+            amount = close * volume
+        standard = f"{exchange}.{code}"
+        try:
+            symbol = normalize_symbol(standard)
+        except ValueError:
+            continue
+        turnover = _float(fields[38]) / 100.0 if len(fields) > 38 and fields[38] else None
+        result[standard] = {
+            "symbol": standard,
+            "code": code,
+            "name": fields[1],
+            "board": symbol.board,
+            "price": price(close),
+            "prev_close": price(prev_close),
+            "change": _float(fields[31]),
+            "change_pct": round(_float(fields[32]) / 100.0, 6) if fields[32] else 0.0,
+            "amount": money(amount),
+            "turnover_rate": round(turnover, 6) if turnover is not None else None,
+            "volume": volume,
+            "source": "tencent",
+        }
+    return result
+
+
 class MarketDataService:
     """baostock 历史日线 + 腾讯实时/1分钟数据适配层。
 
@@ -185,6 +224,113 @@ class MarketDataService:
             "timestamp": timestamp.isoformat(timespec="seconds"), "source": "tencent",
         }
         return quote, bar
+
+    def fetch_quotes_batch(self, raw_symbols: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """腾讯批量快照：每批 ≤80 个代码，返回 {标准代码: quote}。
+
+        GBK 解码；无效代码（``v_xxx="";``）跳过；网络异常抛 ``requests.RequestException``。
+        """
+        symbols: list[SymbolInfo] = []
+        seen: set[str] = set()
+        for raw in raw_symbols or []:
+            try:
+                symbol = normalize_symbol(str(raw))
+            except ValueError:
+                continue
+            if symbol.standard in seen:
+                continue
+            seen.add(symbol.standard)
+            symbols.append(symbol)
+
+        result: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(symbols), 80):
+            chunk = symbols[start : start + 80]
+            url = TENCENT_QUOTE_URL.format(symbol=",".join(item.tencent for item in chunk))
+            response = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
+            response.raise_for_status()
+            response.encoding = "gbk"
+            result.update(_parse_tencent_batch(response.text))
+        return result
+
+    def fetch_index_daily_by_code(
+        self, index_code: str, start_date: str, end_date: str
+    ) -> tuple[list[Bar], str]:
+        """按标准指数代码取日线：``sz.399006`` / ``sh.000688``。
+
+        ``sh.000688``（科创50）baostock 不覆盖，沿用腾讯兜底，source="tencent_index"。
+        """
+        text = unicodedata.normalize("NFKC", str(index_code or "")).strip().lower().replace(" ", "")
+        if "." not in text and re.fullmatch(r"\d{6}", text):
+            text = ("sh." if text.startswith("000") else "sz.") + text
+        exchange, _, code = text.partition(".")
+        if exchange not in {"sh", "sz"} or not re.fullmatch(r"\d{6}", code or ""):
+            raise ValueError(f"指数代码不合法: {index_code}")
+        standard = f"{exchange}.{code}"
+        tencent_symbol = f"{exchange}{code}"
+
+        if standard == "sh.000688":
+            bars = self.fetch_tencent_daily(tencent_symbol, start_date, end_date)
+            for bar in bars:
+                bar.symbol = standard
+            return bars, "tencent_index"
+
+        try:
+            import baostock as bs
+        except ImportError as exc:
+            raise ValueError("baostock 未安装，无法获取指数日线") from exc
+        login = bs.login()
+        if login.error_code != "0":
+            raise ValueError(f"baostock 登录失败: {login.error_msg}")
+        try:
+            fields = "date,code,open,high,low,close,preclose,volume,amount"
+            result_set = bs.query_history_k_data_plus(
+                standard, fields, start_date=start_date, end_date=end_date,
+                frequency="d", adjustflag="3",
+            )
+            if result_set.error_code != "0":
+                raise ValueError(f"baostock 指数查询失败: {result_set.error_msg}")
+            rows: list[list[str]] = []
+            while result_set.next():
+                rows.append(list(result_set.get_row_data()))
+        finally:
+            bs.logout()
+
+        if not rows and standard == "sh.000688":
+            bars = self.fetch_tencent_daily(tencent_symbol, start_date, end_date)
+            for bar in bars:
+                bar.symbol = standard
+            return bars, "tencent_index"
+
+        bars: list[Bar] = []
+        previous_close: float | None = None
+        for row in rows:
+            if len(row) < 9 or not row[0] or not row[5]:
+                continue
+            timestamp = datetime.strptime(row[0], "%Y-%m-%d")
+            open_ = _float(row[2])
+            high = _float(row[3])
+            low = _float(row[4])
+            close = _float(row[5])
+            volume = _float(row[7])
+            amount = _float(row[8])
+            if min(open_, high, low, close) <= 0:
+                continue
+            if amount <= 0 and volume > 0:
+                amount = close * volume
+            if previous_close is None:
+                previous_close = _float(row[6], close)
+            bars.append(Bar(
+                timestamp=timestamp, symbol=standard, open=price(open_),
+                high=price(high), low=price(low), close=price(close), volume=volume,
+                amount=money(amount), timeframe="daily", prev_close=price(previous_close),
+            ))
+            previous_close = close
+        if not bars:
+            bars = self.fetch_tencent_daily(tencent_symbol, start_date, end_date)
+            for bar in bars:
+                bar.symbol = standard
+            return bars, "tencent_index"
+        return bars, "baostock_index"
 
     def fetch_baostock_daily(self, raw_symbol: str, start_date: str, end_date: str) -> list[Bar]:
         symbol = normalize_symbol(raw_symbol)

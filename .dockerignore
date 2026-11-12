@@ -1,0 +1,16 @@
+# layer-lab 镜像构建忽略（瘦构建上下文，避免把密钥/缓存/运行数据打进包）
+.git
+.env
+.env.*
+!.env.example
+frontend/node_modules
+frontend/dist
+backend/data
+backend/.pytest_cache
+**/__pycache__
+*.pyc
+*.sqlite
+*.sqlite-journal
+*.log
+.workbuddy
+.pnpm-store

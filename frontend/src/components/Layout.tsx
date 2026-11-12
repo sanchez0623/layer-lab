@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { Activity, BarChart3, BookOpenCheck, ChevronRight, Database, Layers3, Menu, MonitorDot, Wifi, WifiOff, X } from 'lucide-react';
+import { Activity, BarChart3, BookOpenCheck, ChevronRight, Database, Filter, Layers3, Menu, MonitorDot, Wifi, WifiOff, X } from 'lucide-react';
 import { API_BASE, api } from '../lib/api';
 import type { PageKey } from '../types';
 
 const navigation: Array<{ key: PageKey; label: string; caption: string; icon: typeof BarChart3 }> = [
+  { key: 'screener', label: '选股漏斗', caption: '五层筛选', icon: Filter },
   { key: 'backtest', label: '回测工作台', caption: '策略验证', icon: BarChart3 },
   { key: 'paper', label: '模拟交易', caption: '逐根撮合', icon: Activity },
   { key: 'data', label: '数据中心', caption: '行情管理', icon: Database },
@@ -11,7 +12,7 @@ const navigation: Array<{ key: PageKey; label: string; caption: string; icon: ty
 ];
 
 const titles: Record<PageKey, string> = {
-  backtest: '回测工作台', paper: '模拟交易', data: '数据中心', strategy: '策略规则',
+  screener: '选股漏斗', backtest: '回测工作台', paper: '模拟交易', data: '数据中心', strategy: '策略规则',
 };
 
 export default function Layout({ page, onNavigate, children }: { page: PageKey; onNavigate: (page: PageKey) => void; children: ReactNode }) {
