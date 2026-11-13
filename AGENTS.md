@@ -90,3 +90,7 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
 - **分板块申报口径**：股数计算必须走 `trading_rules.rules_for(symbol)` 的 `min_qty`/`step`（科创板 200/1，创业板·主板 100/100），不要写死 100 股整手。
 - **16 笔序列**：高价股按「方案 2」——金额不足最小申报也按最小申报建仓（`board_buy_quantity`），宁可略微透支该笔预算也不跳过。
 - **止盈**：价格轨/账户轨各 15% 立即清；10%~15% 进 Armed 区间，内含量价背离、VWAP 回撤 4% 两个辅助清仓点。做 T 目标价差 `t_target_spread` 已可配置（模拟盘 config 面板）。
+- **baostock 禁止并发**：baostock 数据源**不能并发访问**，并发会被服务端拉黑（封 IP/账号）。任何调用 baostock 的路径必须串行化：
+  - `universe.py` 已做对：单 login 复用全部查询 + `threading.RLock` 串行 + 后台单线程回补（`_relogin` 定时轮换）。
+  - **`market.py` 是隐患**：`fetch_baostock_daily` / 两处 `fetch_*_index` 各自独立 `bs.login()`（约 317/378/431 行），**没有全局锁**；若调度线程（paper-scheduler）与用户触发请求并发打 baostock，会撞车。新增任何 baostock 调用前，先确认已被全局锁串行化，或复用 `universe.py` 的会话，别再各开 login。
+  - 默认数据源已是 quan_parquet（只读本地 parquet，无并发限制），只有回落旧链路时才真正打 baostock——但别因此掉以轻心，回落路径同样要串行。
