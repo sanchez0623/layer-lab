@@ -163,20 +163,28 @@ export default function PaperPage() {
         setAccount(current);
         setAutoStrategy(Boolean(current.auto_strategy));
         if (current.dataset_id) setDatasetId(current.dataset_id);
+        // 标的代码默认带出轮动当前标的（若不是刚从选股页带入其它候选）。
+        const rotationCode = current.rotation?.current_symbol ? cleanSymbolInput(current.rotation.current_symbol) : '';
+        if (rotationCode) setSymbol((prev) => prev || rotationCode);
         // 选股页「带入模拟盘」写入的提示：候选标的与运行来源。
         const pendingPaper = sessionStorage.getItem('layerlab.pendingPaper');
+        let broughtIn = false;
         if (pendingPaper) {
           sessionStorage.removeItem('layerlab.pendingPaper');
           try {
             const pending = JSON.parse(pendingPaper) as { runId?: string; candidate?: { code?: string; name?: string } };
             const code = pending.candidate?.code ? cleanSymbolInput(pending.candidate.code) : '';
-            if (code) setSymbol(code);
+            if (code) { setSymbol(code); broughtIn = true; }
             const label = [code, pending.candidate?.name].filter(Boolean).join(' ');
             const rotationText = current.rotation?.enabled ? '，已自动开启轮动（每次清仓后重新选股）' : '';
             setSuccess(`已从选股结果建立模拟账户：${label || '候选标的'}（运行 ${pending.runId || '—'}）${rotationText}。`);
           } catch {
             // 忽略损坏的 sessionStorage 数据
           }
+        }
+        if (!broughtIn && !rotationCode) {
+          const held = current.positions.find((position) => position.total_qty > 0);
+          if (held) setSymbol(cleanSymbolInput(held.symbol));
         }
       }
       catch (cause) {
@@ -725,7 +733,7 @@ export default function PaperPage() {
           </Panel>
 
           <div className="paper-top-grid">
-            <Panel className="quote-panel" title="腾讯实时行情" description={currentDataset ? `${currentDataset.name} · ${displaySymbol(currentDataset.symbol)} · ${currentDataset.timeframe}` : '直接读取腾讯快照，无需绑定缓存数据集'} action={<Badge tone="indigo">5 MIN</Badge>}>
+            <Panel className="quote-panel" title="腾讯实时行情" description={currentDataset ? `${currentDataset.name} · ${currentDataset.timeframe}` : '直接读取腾讯快照，无需绑定缓存数据集'} action={<Badge tone="indigo">5 MIN</Badge>}>
               <div className="quote-list">
                 {quoteRows.length === 0 ? <EmptyState compact icon={<Activity size={22} />} title="等待实时快照" description="输入标的并拉取腾讯行情后，本地账户会显示最新价；不会用前端行情替代后端状态。" /> : quoteRows.map((quote) => {
                   const heldQty = heldQtyBySymbol.get(quote.symbol) ?? 0;
@@ -741,13 +749,10 @@ export default function PaperPage() {
                     <button className="button secondary" disabled={liveLoading || liveCode.length !== 6} onClick={() => void liveTick()}>
                       {liveLoading ? <span className="button-spinner" /> : <Radio size={16} />}拉取实时快照
                     </button>
-                    <Badge tone={autoSyncPaused ? 'neutral' : scheduler?.running ? 'green' : 'neutral'}>
-                      {autoSyncPaused ? '后端自动·已暂停' : scheduler?.running ? '后端自动·运行中' : '后端自动'}
-                    </Badge>
+                    <Badge tone={autoSyncPaused ? 'neutral' : scheduler?.running ? 'green' : 'neutral'} title={autoSyncPaused ? '后端自动同步已暂停' : scheduler?.running ? '后端自动同步运行中' : '后端自动同步'}>后端自动</Badge>
                   </div>
                   <div className="quote-control-note">
                     <Timer size={13} className="note-icon" />
-                    {rotationCurrent ? `轮动当前标的 ${displaySymbol(rotationCurrent)}；` : ''}
                     {scheduler && !scheduler.enabled
                       ? '后端定时器未启用，需手动拉取快照'
                       : autoSyncPaused
@@ -767,55 +772,36 @@ export default function PaperPage() {
               </div>
             </Panel>
 
-            <Panel className="order-ticket" title="委托下单" description="订单将提交至本地仿真撮合引擎" action={<span className="ticket-label">ORDER TICKET</span>}>
-              <div className="side-selector"><button className={side === 'buy' ? 'buy active' : 'buy'} onClick={() => setSide('buy')}><ArrowDownLeft size={16} />买入</button><button className={side === 'sell' ? 'sell active' : 'sell'} onClick={() => setSide('sell')}><ArrowUpRight size={16} />卖出</button></div>
-              <div className="order-type-row"><span>仓位用途</span><div className="segmented purpose-selector"><button className={purpose === 'PERMANENT' ? 'active' : ''} onClick={() => setPurpose('PERMANENT')}>永久仓</button><button className={purpose === 'T' ? 'active' : ''} onClick={() => setPurpose('T')}>做T仓</button></div></div>
-              <p className="purpose-hint">{purpose === 'PERMANENT' ? '永久仓买入成交后推进 16 笔序列笔位；卖出为永久仓减仓。' : '做T仓不占用 16 笔金额序列，买入次日可卖，盈亏单独统计。'}</p>
-              <div className="order-type-row"><span>委托方式</span><div className="segmented"><button className={orderType === 'market' ? 'active' : ''} onClick={() => { setOrderType('market'); resetTier(); }}>市价</button><button className={orderType === 'limit' ? 'active' : ''} onClick={() => { setOrderType('limit'); resetTier(); }}>限价</button></div></div>
-              <div className="ticket-fields">
-                <Field label="标的代码" hint={rotationCurrent ? `轮动标的 ${displaySymbol(rotationCurrent)}` : '6 位代码'}><input value={symbol} onChange={(event) => applySymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
-                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><div className="input-with-unit"><input type="number" min="1" step={tradingRules?.rules.step || 100} value={quantity} onChange={(event) => { setQuantity(Number(event.target.value)); resetTier(); }} /><span>股</span></div></Field>
-                {orderType === 'limit' && <Field label="委托价格" className="span-2"><div className="input-with-unit"><input type="number" min="0.01" step="0.01" value={limitPrice} onChange={(event) => { setLimitPrice(event.target.value); resetTier(); }} placeholder="0.00" /><span>元</span></div></Field>}
-              </div>
-              {rotationCandidates.length > 0 && (
-                <div className="ticket-picks">
-                  <div className="ticket-picks-head">
-                    <strong>选股结果</strong>
-                    <small>点击快速带入标的代码 · 共 {rotationCandidates.length} 只候选</small>
-                  </div>
-                  <div className="ticket-picks-list">
-                    {rotationCandidates.slice(0, 8).map((item, index) => {
-                      const code = cleanSymbolInput(item.symbol);
-                      const active = cleanSymbolInput(symbol) === code;
-                      return (
-                        <button
-                          key={item.symbol}
-                          type="button"
-                          className={`ticket-pick ${active ? 'active' : ''}`}
-                          title={`${item.name || ''} ${displaySymbol(item.symbol)}${index === 0 ? '（选股第 1 名）' : ''}`}
-                          onClick={() => applySymbol(code)}
-                        >
-                          <strong>{displaySymbol(item.symbol)}</strong>
-                          <small>{item.name || (index === 0 ? '第 1 名' : '候选')}</small>
-                        </button>
-                      );
-                    })}
-                  </div>
+            <Panel className="order-ticket" title="委托下单" action={<span className="ticket-label">ORDER TICKET</span>}>
+              <div className="ticket-topline">
+                <p>订单将提交至本地仿真撮合引擎</p>
+                <div className="ticket-purpose">
+                  <span>仓位用途</span>
+                  <div className="segmented purpose-selector"><button className={purpose === 'PERMANENT' ? 'active' : ''} title="买入成交推进 16 笔序列；卖出为永久仓减仓。" onClick={() => setPurpose('PERMANENT')}>永久仓</button><button className={purpose === 'T' ? 'active' : ''} title="不占 16 笔序列，次日可卖，盈亏单独统计。" onClick={() => setPurpose('T')}>做T仓</button></div>
                 </div>
-              )}
-              <div className="quick-tiers">
-                {AMOUNT_TIERS.map((amount) => (
-                  <button
-                    key={amount}
-                    type="button"
-                    className={`quick-tier ${tierAmount === amount ? 'active' : ''}`}
-                    disabled={tierPicking !== null}
-                    title="按参考价与板块规则换算股数"
-                    onClick={() => void applyAmountTier(amount)}
-                  >
-                    {tierPicking === amount ? <span className="button-spinner" /> : `${amount / 10_000}万`}
-                  </button>
-                ))}
+              </div>
+              <div className="side-selector"><button className={side === 'buy' ? 'buy active' : 'buy'} onClick={() => setSide('buy')}><ArrowDownLeft size={16} />买入</button><button className={side === 'sell' ? 'sell active' : 'sell'} onClick={() => setSide('sell')}><ArrowUpRight size={16} />卖出</button></div>
+              <div className="order-type-row"><span>委托方式</span><div className="segmented"><button className={orderType === 'market' ? 'active' : ''} onClick={() => { setOrderType('market'); resetTier(); }}>市价</button><button className={orderType === 'limit' ? 'active' : ''} onClick={() => { setOrderType('limit'); resetTier(); }}>限价</button></div></div>
+              <div className="ticket-main-grid">
+                <div className="ticket-fields">
+                <Field label="标的代码" hint="6 位代码"><input value={symbol} onChange={(event) => applySymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
+                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><div className="input-with-unit"><input type="number" min="1" step={tradingRules?.rules.step || 100} value={quantity} onChange={(event) => { setQuantity(Number(event.target.value)); resetTier(); }} /><span>股</span></div></Field>
+                {orderType === 'limit' && <Field label="委托价格"><div className="input-with-unit"><input type="number" min="0.01" step="0.01" value={limitPrice} onChange={(event) => { setLimitPrice(event.target.value); resetTier(); }} placeholder="0.00" /><span>元</span></div></Field>}
+                </div>
+                <div className="quick-tiers">
+                  {AMOUNT_TIERS.map((amount) => (
+                    <button
+                      key={amount}
+                      type="button"
+                      className={`quick-tier ${tierAmount === amount ? 'active' : ''}`}
+                      disabled={tierPicking !== null}
+                      title="按参考价与板块规则换算股数"
+                      onClick={() => void applyAmountTier(amount)}
+                    >
+                      {tierPicking === amount ? <span className="button-spinner" /> : `${amount / 10_000}万`}
+                    </button>
+                  ))}
+                </div>
               </div>
               {tierNote && <div className={`tier-note ${tierError ? 'warn' : ''}`}>{tierNote}</div>}
               {qtyError && <div className="qty-warning"><AlertTriangle size={13} /><span>{qtyError}</span></div>}

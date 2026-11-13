@@ -76,8 +76,8 @@ export function SyntheticNotice({ compact = false }: { compact?: boolean }) {
   return <span className={`synthetic-notice ${compact ? 'compact' : ''}`}><FlaskConical size={13} />合成行情，仅用于功能验证</span>;
 }
 
-export function Badge({ children, tone = 'neutral' }: { children: ReactNode; tone?: 'neutral' | 'indigo' | 'red' | 'green' | 'amber' }) {
-  return <span className={`badge badge-${tone}`}>{children}</span>;
+export function Badge({ children, tone = 'neutral', title }: { children: ReactNode; tone?: 'neutral' | 'indigo' | 'red' | 'green' | 'amber'; title?: string }) {
+  return <span className={`badge badge-${tone}`} title={title}>{children}</span>;
 }
 
 export function TableEmpty({ colSpan, message = '暂无记录' }: { colSpan: number; message?: string }) {
