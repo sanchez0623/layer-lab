@@ -777,10 +777,13 @@ export default function PaperPage() {
                 <p>订单将提交至本地仿真撮合引擎</p>
                 <div className="ticket-purpose">
                   <span>仓位用途</span>
-                  <div className="segmented purpose-selector"><button className={purpose === 'PERMANENT' ? 'active' : ''} title="买入成交推进 16 笔序列；卖出为永久仓减仓。" onClick={() => setPurpose('PERMANENT')}>永久仓</button><button className={purpose === 'T' ? 'active' : ''} title="不占 16 笔序列，次日可卖，盈亏单独统计。" onClick={() => setPurpose('T')}>做T仓</button></div>
+                  <div className="segmented purpose-selector"><button className={purpose === 'PERMANENT' ? 'active' : ''} onClick={() => setPurpose('PERMANENT')}>永久仓</button><button className={purpose === 'T' ? 'active' : ''} onClick={() => setPurpose('T')}>做T仓</button></div>
                 </div>
               </div>
-              <div className="side-selector"><button className={side === 'buy' ? 'buy active' : 'buy'} onClick={() => setSide('buy')}><ArrowDownLeft size={16} />买入</button><button className={side === 'sell' ? 'sell active' : 'sell'} onClick={() => setSide('sell')}><ArrowUpRight size={16} />卖出</button></div>
+              <div className="side-hint-row">
+                <div className="side-selector"><button className={side === 'buy' ? 'buy active' : 'buy'} onClick={() => setSide('buy')}><ArrowDownLeft size={15} />买入</button><button className={side === 'sell' ? 'sell active' : 'sell'} onClick={() => setSide('sell')}><ArrowUpRight size={15} />卖出</button></div>
+                <p className="purpose-hint">{purpose === 'PERMANENT' ? '买入成交推进 16 笔序列；卖出为永久仓减仓。' : '不占 16 笔序列，次日可卖，盈亏单独统计。'}</p>
+              </div>
               <div className="order-type-row"><span>委托方式</span><div className="segmented"><button className={orderType === 'market' ? 'active' : ''} onClick={() => { setOrderType('market'); resetTier(); }}>市价</button><button className={orderType === 'limit' ? 'active' : ''} onClick={() => { setOrderType('limit'); resetTier(); }}>限价</button></div></div>
               <div className="ticket-main-grid">
                 <div className="ticket-fields">
