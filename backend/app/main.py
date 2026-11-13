@@ -4,8 +4,9 @@ import csv
 import io
 import json
 import os
+import threading
 import uuid
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -17,9 +18,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .backtest import run_backtest, run_funnel_backtest
 from .broker import BrokerAccount
+from .calendar_api import FuyaoCalendar
 from .data import dataset_from_bars, read_csv_bars, save_demo_datasets
 from .domain import Bar, FeeConfig, OrderRequest, STRATEGY_RULES, StrategyConfig, money, price, utc_now
-from .market import MarketDataService, normalize_symbol
+from .market import (
+    INTRADAY_BAR_MINUTES,
+    INTRADAY_TIMEFRAME,
+    REALTIME_INTERVAL_SECONDS,
+    TENCENT_INTRADAY_MAX_BARS,
+    MarketDataService,
+    normalize_symbol,
+)
+from .quan_data import QuanRefresher, QuanStore, quan_data_dir
 from .rotation import rescreen_and_advance, set_from_run as set_rotation_from_run, set_pool as set_rotation_pool
 from .screener import ScreenerConfig, ScreenerService, ScreeningResult
 from .storage import SQLiteStorage
@@ -31,34 +41,63 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 FEE_SETTING_KEY = "fee_config_v1"
 FEE_CONFIG_VERSION = "v1"
 
+# 可复用的日线数据集来源：quan_parquet（当前）与 baostock（旧链路）。
+DAILY_DATASET_SOURCES = ("quan_parquet", "baostock")
+
+
+def is_daily_dataset(dataset, symbol: str | None = None) -> bool:
+    if dataset is None or dataset.timeframe != "daily":
+        return False
+    if symbol is not None and dataset.symbol != symbol:
+        return False
+    return dataset.source in DAILY_DATASET_SOURCES
+
 
 def trading_minutes_elapsed(timestamp: datetime) -> int:
-    """当日已开盘分钟数（9:30-11:30 / 13:00-15:00），用于把当日累计量折算为 1 分钟当量。"""
+    """当日已开盘分钟数（9:30-11:30 / 13:00-15:00），用于把当日累计量折算为盘中当量。"""
     clock = timestamp.hour * 60 + timestamp.minute
     morning = min(120, max(0, clock - 9 * 60 - 30))
     afternoon = min(120, max(0, clock - 13 * 60)) if clock >= 13 * 60 else 0
     return max(1, morning + afternoon)
 
 
+def trading_intraday_bars_elapsed(timestamp: datetime) -> int:
+    """当日已收盘的 5 分钟 K 线数量，用于把当日累计量折算为 5 分钟当量。"""
+    return max(1, (trading_minutes_elapsed(timestamp) + INTRADAY_BAR_MINUTES - 1) // INTRADAY_BAR_MINUTES)
+
+
+def intraday_bucket(timestamp: datetime, minutes: int = INTRADAY_BAR_MINUTES) -> datetime:
+    """把时间向下取整到盘中 K 线边界（腾讯 5 分钟 bar 的 timestamp 是区间结束时间）。"""
+    return timestamp.replace(minute=timestamp.minute - timestamp.minute % minutes, second=0, microsecond=0)
+
+
+def latest_closed_intraday_bar(bars: list[Bar], now: datetime) -> Bar | None:
+    """返回截至 ``now`` 已收盘的最后一根盘中 K 线；不含仍在形成的当前 bar。"""
+    cutoff = intraday_bucket(now)
+    closed = [bar for bar in bars if bar.timestamp <= cutoff]
+    return closed[-1] if closed else None
+
+
 def snapshot_execution_bar(
-    bar: Bar, minute_volume: float | None = None, minute_amount: float | None = None,
+    bar: Bar, bar_volume: float | None = None, bar_amount: float | None = None,
 ) -> Bar:
-    """把腾讯实时快照转换成**仅用于撮合**的 1 分钟 bar。
+    """把腾讯实时快照转换成**仅用于撮合**的 5 分钟 bar。
 
     快照的 open/high/low 是全天口径（今开 / 当日最高 / 当日最低），volume/amount
     是当日累计值。直接交给 process_bar 会让市价单按今日开盘价成交、限价单按全天
-    区间判定、成交量参与度额度被全天量放大。策略信号仍使用原始快照 bar。
+    区间判定、成交量参与度额度被全天量放大。策略信号使用已收盘的 5 分钟 bar，
+    这里的 ``bar_volume`` / ``bar_amount`` 应是最近一根已收盘 5 分钟 bar 的量额。
     """
     reference = bar.close
     bid = bar.bid if bar.bid and bar.bid > 0 else reference
     ask = bar.ask if bar.ask and bar.ask > 0 else reference
-    elapsed = trading_minutes_elapsed(bar.timestamp)
-    volume = minute_volume if minute_volume and minute_volume > 0 else bar.volume / elapsed
-    amount = minute_amount if minute_amount and minute_amount > 0 else bar.amount / elapsed
+    elapsed = trading_intraday_bars_elapsed(bar.timestamp)
+    volume = bar_volume if bar_volume and bar_volume > 0 else bar.volume / elapsed
+    amount = bar_amount if bar_amount and bar_amount > 0 else bar.amount / elapsed
     return Bar(
         timestamp=bar.timestamp, symbol=bar.symbol, open=reference,
         high=max(reference, ask, bid), low=min(reference, ask, bid), close=reference,
-        volume=volume, amount=money(amount), timeframe="1m",
+        volume=volume, amount=money(amount), timeframe=INTRADAY_TIMEFRAME,
         turnover_rate=bar.turnover_rate, prev_close=bar.prev_close,
         bid=bar.bid, ask=bar.ask,
     )
@@ -116,6 +155,21 @@ class AccountFeesRequest(BaseModel):
 
 class AutoStrategyRequest(BaseModel):
     enabled: bool
+
+
+class AccountConfigRequest(BaseModel):
+    """POST /api/paper/accounts/{id}/config 的局部更新：只接受策略（非费率）字段。
+
+    费率字段（commission_rate 等）归 /fees 端点管，这里显式拒绝，避免两处写同一
+    状态打架。改完立刻生效：策略每根 K 线都从 account.config 读取（如 T 仓
+    t_target_spread），下一根 K 的操作即用新值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enable_t: bool | None = None
+    t_target_spread: float | None = Field(default=None, ge=0, le=1)
+    t_order_amount: float | None = Field(default=None, gt=0)
 
 
 class PaperOrderRequest(BaseModel):
@@ -191,14 +245,35 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.1.0",
-        description="历史日线来自baostock，实时快照与1分钟K线来自腾讯行情；本地撮合，不连接券商。",
+        version="1.0.1",
+        description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
     application.state.data_dir = data_dir
-    application.state.market_service = MarketDataService(data_dir / "cache")
-    # 选股服务挂在 application.state，数据目录与行情服务由 create_app 统一注入。
-    application.state.screener_service = ScreenerService(data_dir, application.state.market_service)
+    # 交易日历（同花顺 fuyao，含未来交易日）：周末/节假日不轮询的权威来源。
+    application.state.fuyao_calendar = FuyaoCalendar(data_dir)
+
+    # 行情数据源选择：
+    # - 默认接入 quan_quant 的 parquet 数据目录（WB_QUAN_DATA_DIR 覆盖；空串=关闭）；
+    # - quan 源只读历史数据，实时快照仍走腾讯；数据目录不可用时回落旧的 baostock/universe.db 链路。
+    quan_dir = quan_data_dir()
+    quan_store: QuanStore | None = None
+    if quan_dir is not None:
+        try:
+            quan_store = QuanStore(quan_dir, cache_db=data_dir / "quan_cache.db")
+        except ImportError as exc:
+            raise RuntimeError(str(exc)) from exc
+        except ValueError:
+            quan_store = None
+    application.state.quan_store = quan_store
+    application.state.market_service = MarketDataService(data_dir / "cache", quan=quan_store)
+    # 选股服务挂在 application.state，数据目录、行情服务与数据源由 create_app 统一注入。
+    application.state.screener_service = ScreenerService(
+        data_dir,
+        application.state.market_service,
+        store=quan_store,
+        refresher=QuanRefresher(quan_store) if quan_store is not None else None,
+    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -362,7 +437,14 @@ def create_app() -> FastAPI:
         account: BrokerAccount, bar: Bar, daily_history: list[Bar] | None = None,
         index_history: list[Bar] | None = None, recent_bars: list[Bar] | None = None,
         daily_close: bool = False, execution_bar: Bar | None = None,
+        signal_bar: Bar | None = None, detect_intraday: bool = True,
     ) -> None:
+        """推进一根行情。
+
+        live-tick 路径把「最近一根已收盘 5 分钟 bar」作为 ``signal_bar`` 交给策略，
+        快照 ``bar`` 只负责撮合与日终信号；``detect_intraday=False`` 时（当日还没有
+        已收盘 5 分钟 bar）跳过盘中检测，避免用未完成 bar 反复计数。
+        """
         strategy: LayeredTStrategy | None = None
         is_new_day = account.current_date != bar.date
         if account.auto_strategy:
@@ -386,12 +468,16 @@ def create_app() -> FastAPI:
                 # 一轮刚结束：允许下一次 tick 把轮动推进到池内下一只。
                 account.rotation_pending_advance = True
 
-            if bar.timeframe != "daily":
+            if bar.timeframe != "daily" and detect_intraday:
                 previous_daily = [item for item in (daily_history or []) if item.date < bar.date]
+                detection_bar = signal_bar or bar
                 recent = list(recent_bars or [])
-                if not recent or recent[-1].timestamp != bar.timestamp:
-                    recent.append(bar)
-                intraday_requests = strategy.on_intraday(previous_daily, recent, bar, account)
+                if not recent or recent[-1].timestamp != detection_bar.timestamp:
+                    recent.append(detection_bar)
+                intraday_requests = strategy.on_intraday(
+                    previous_daily, recent, detection_bar, account,
+                    index_history=index_history, session_index=session_index,
+                )
                 for request in intraday_requests:
                     if request.quantity >= 100:
                         account.submit(request, bar.timestamp)
@@ -429,12 +515,310 @@ def create_app() -> FastAPI:
             elif permanent_return < account.config.price_disarm:
                 account.armed_state = "OFF"
 
+    # ------------------------------------------------------------------
+    # 后端定时驱动：live-tick 由进程内调度器推进，不再依赖前端定时器
+    # ------------------------------------------------------------------
+    SCHEDULER_INTERVAL_SECONDS = REALTIME_INTERVAL_SECONDS
+    scheduler_enabled = os.environ.get("WB_SCHEDULER", "1") != "0"
+    scheduler_state: dict = {
+        "enabled": scheduler_enabled,
+        "running": False,
+        "interval_seconds": SCHEDULER_INTERVAL_SECONDS,
+        "last_slot": None,
+        "last_tick_at": None,
+        "last_error": None,
+        "ticks": 0,
+        "failures": 0,
+        "last_result": {},
+    }
+    scheduler_stop = threading.Event()
+    tick_lock = threading.Lock()
+    daily_refresh_marks: dict[str, str] = {}
+
+    def is_trading_session(moment: datetime) -> bool:
+        if moment.weekday() >= 5:
+            return False
+        clock = moment.hour * 60 + moment.minute
+        return (9 * 60 + 30) <= clock <= (11 * 60 + 30) or (13 * 60) <= clock <= (15 * 60)
+
+    def trading_day_info(today_text: str | None = None) -> dict:
+        """今天是否交易日 + 下一个交易日：quan 交易日历优先，其次行情探测，最后工作日回落。
+
+        quan 的 trade_calendar 只记录「开市日」且通常滞后到上一交易日，覆盖不到今天；
+        节假日当天它无法判定。因此日历未覆盖今天时，在 09:35 之后用一笔实时快照探测：
+        快照日期 == 今天 → 今天开市；快照仍是上一交易日 → 今天休市（节假日）。
+        探测结果按天缓存，每天最多一次。
+        """
+        today_text = today_text or date.today().isoformat()
+        is_today = today_text == date.today().isoformat()
+        # 1) fuyao 交易日历（含未来日期，能提前识别长假）——最权威，优先。
+        provider = application.state.fuyao_calendar
+        if provider is not None and provider.enabled:
+            opened = provider.is_trading_day(today_text)
+            if opened is not None:
+                return {
+                    "today": today_text, "is_trading_day": opened,
+                    "next_trading_day": provider.next_trading_day(today_text),
+                    "source": "fuyao_calendar",
+                }
+        # 2) 本地 quan 日历：覆盖当天时以 is_open 为准。
+        store = application.state.quan_store
+        if store is not None:
+            try:
+                span = store.calendar_span()
+                if span is not None and span[0] <= today_text <= span[1]:
+                    open_today = bool(store.trade_days(today_text, today_text))
+                    horizon = (date.fromisoformat(today_text) + timedelta(days=31)).isoformat()
+                    future = store.trade_days(today_text, horizon) or []
+                    next_day = next((day for day in future if day > today_text), None)
+                    return {
+                        "today": today_text, "is_trading_day": open_today,
+                        "next_trading_day": next_day, "source": "quan_calendar",
+                    }
+            except Exception:  # noqa: BLE001 - 日历异常回落工作日
+                pass
+
+        cursor = date.fromisoformat(today_text)
+        if is_today and cursor.weekday() < 5 and probe_trading_day_enabled():
+            probed = probe_trading_day(today_text)
+            if probed is not None:
+                # 行情探测无法预知未来节假日，下一个候选先给「下一个工作日」；
+                # 到那天若仍是节假日，会再次被探测判为休市。
+                return {
+                    "today": today_text, "is_trading_day": probed,
+                    "next_trading_day": _next_weekday(today_text), "source": "quote_probe",
+                }
+
+        nxt = date.fromisoformat(today_text) + timedelta(days=1)
+        while nxt.weekday() >= 5:
+            nxt += timedelta(days=1)
+        return {
+            "today": today_text, "is_trading_day": cursor.weekday() < 5,
+            "next_trading_day": nxt.isoformat(), "source": "weekday_fallback",
+        }
+
+    probe_enabled = os.environ.get("WB_TRADING_PROBE", "1") != "0"
+    day_probe_cache: dict[str, bool] = {}
+
+    def probe_trading_day_enabled() -> bool:
+        return bool(probe_enabled)
+
+    def _next_weekday(today_text: str) -> str:
+        nxt = date.fromisoformat(today_text) + timedelta(days=1)
+        while nxt.weekday() >= 5:
+            nxt += timedelta(days=1)
+        return nxt.isoformat()
+
+    def probe_trading_day(today_text: str) -> bool | None:
+        """用一笔实时快照判断今天是否开市；09:35 前行情仍是上一交易日，不做判断。
+
+        返回 None 表示无法判断（未到探测时间/网络失败），调用方回落工作日启发式。
+        """
+        now = datetime.now()
+        if (now.hour * 60 + now.minute) < (9 * 60 + 35):
+            return None
+        cached = day_probe_cache.get(today_text)
+        if cached is not None:
+            return cached
+        try:
+            _, bar = application.state.market_service.fetch_quote("000001")
+        except Exception:  # noqa: BLE001 - 探测失败不能误伤交易日
+            return None
+        opened = bar.date == today_text
+        day_probe_cache.clear()
+        day_probe_cache[today_text] = opened
+        return opened
+
+    def scheduled_symbol(account: BrokerAccount) -> str | None:
+        """定时器选标的：轮动当前标的优先，其次账户绑定的日线数据集。"""
+        if account.rotation_enabled:
+            index = int(account.rotation_index)
+            if 0 <= index < len(account.rotation_pool):
+                symbol = str(account.rotation_pool[index].get("symbol") or "")
+                if symbol:
+                    return symbol
+        if account.dataset_id:
+            dataset = storage.get_dataset(account.dataset_id)
+            if dataset is not None and dataset.symbol:
+                return dataset.symbol
+        return None
+
+    def perform_live_tick(
+        account: BrokerAccount, raw_symbol: str, *, require_today: bool = False,
+    ) -> BrokerAccount | None:
+        """拉一次实时快照并推进账户；手动 live-tick 与后端定时器共用同一实现。
+
+        ``require_today=True`` 时若快照不属于当天（休市/节假日）直接返回 None，不做任何推进。
+        """
+        symbol_info = normalize_symbol(raw_symbol)
+        _, bar = application.state.market_service.fetch_quote(symbol_info.code)
+        if require_today and bar.date != date.today().isoformat():
+            # 休市/节假日腾讯返回的是上一交易日快照，定时器不能把它当新交易日推进。
+            return None
+
+        daily_history: list[Bar] = []
+        index_history: list[Bar] = []
+        recent_bars: list[Bar] = []
+        if account.auto_strategy:
+            symbol = symbol_info.standard
+            registered = storage.list_datasets()
+            daily_dataset = next(
+                (item for item in registered if is_daily_dataset(item, symbol)), None
+            )
+            index_dataset = next((
+                item for item in registered
+                if item.timeframe == "daily" and item.symbol in {"sh.000688", "sz.399006"}
+            ), None)
+            # 日线数据集落后于当日 → 每个标的每天最多刷新一次。
+            # session_index（加仓「间隔≥1交易日」判定）取自日线数据集长度，不刷新会永久冻结。
+            if (
+                daily_dataset is not None
+                and str(daily_dataset.end)[:10] < bar.date
+                and daily_refresh_marks.get(symbol) != bar.date
+            ):
+                daily_refresh_marks[symbol] = bar.date
+                try:
+                    bundle = application.state.market_service.fetch_history_bundle(
+                        raw_symbol, include_intraday=False,
+                    )
+                    for key in ("daily", "index"):
+                        dataset = bundle.get(key)
+                        if dataset is not None:
+                            storage.save_dataset(dataset)
+                    daily_dataset = bundle.get("daily") or daily_dataset
+                    index_dataset = bundle.get("index") or index_dataset
+                except (requests.RequestException, ValueError):
+                    pass  # 刷新失败保持旧数据集，次日再试
+            if daily_dataset is None or index_dataset is None:
+                bundle = application.state.market_service.fetch_history_bundle(
+                    raw_symbol, include_intraday=False,
+                )
+                storage.save_dataset(bundle["daily"])
+                storage.save_dataset(bundle["index"])
+                daily_dataset = bundle["daily"]
+                index_dataset = bundle["index"]
+            daily_history = read_csv_bars(daily_dataset.file_path, "daily", daily_dataset.symbol)
+            index_history = read_csv_bars(index_dataset.file_path, "daily", index_dataset.symbol)
+            try:
+                intraday_bars, _ = application.state.market_service.fetch_tencent_intraday(
+                    symbol, count=TENCENT_INTRADAY_MAX_BARS,
+                )
+                # 只保留截至当前快照的 K 线，并收敛到当日；VWAP/背离只在当日盘中计算。
+                recent_bars = [
+                    item for item in intraday_bars
+                    if item.timestamp <= bar.timestamp and item.date == bar.date
+                ]
+            except (requests.RequestException, ValueError):
+                recent_bars = []
+
+        daily_close = bar.timestamp.hour >= 15
+        # 盘中检测只看最近一根**已收盘**的 5 分钟 K 线；当日尚无收盘 bar 时跳过检测。
+        closed_bar = latest_closed_intraday_bar(recent_bars, bar.timestamp)
+        execution_bar = snapshot_execution_bar(
+            bar,
+            bar_volume=closed_bar.volume if closed_bar else None,
+            bar_amount=closed_bar.amount if closed_bar else None,
+        )
+        apply_bar(
+            account, bar, daily_history=daily_history, index_history=index_history,
+            recent_bars=recent_bars, daily_close=daily_close, execution_bar=execution_bar,
+            signal_bar=closed_bar, detect_intraday=closed_bar is not None,
+        )
+        # 池内轮动：空仓且 tick 标的 == 池内当前标的时，按 L4 顺序检查 L0 后换票。
+        maybe_advance_rotation(account, bar)
+        save_paper(account)
+        return account
+
+    def scheduler_run_once() -> dict:
+        """驱动所有「开启自动策略且状态 ACTIVE」的模拟账户各跑一次 live-tick。"""
+        result: dict = {"ticked": [], "skipped": [], "errors": []}
+        if not tick_lock.acquire(blocking=False):
+            result["skipped"].append("busy")
+            return result
+        try:
+            for state in storage.list_paper():
+                account = BrokerAccount.from_dict(state)
+                if account.status != "ACTIVE" or not account.auto_strategy:
+                    continue
+                try:
+                    symbol = scheduled_symbol(account)
+                    if not symbol:
+                        result["skipped"].append(f"{account.id}:no-symbol")
+                        continue
+                    ticked = perform_live_tick(account, symbol, require_today=True)
+                    if ticked is None:
+                        result["skipped"].append(f"{account.id}:not-today")
+                    else:
+                        result["ticked"].append(f"{account.id}:{symbol}")
+                except (ValueError, requests.RequestException) as exc:
+                    result["errors"].append(f"{account.id}:{exc}")
+                except Exception as exc:  # noqa: BLE001 - 单账户失败不能拖垮整轮
+                    result["errors"].append(f"{account.id}:{exc.__class__.__name__}: {exc}")
+            scheduler_state["last_tick_at"] = utc_now()
+            scheduler_state["ticks"] += 1
+        finally:
+            tick_lock.release()
+        return result
+
+    def scheduler_loop() -> None:
+        """每 20 秒醒一次；交易时段内每个 5 分钟整点的 +30s 跑一轮。"""
+        scheduler_state["running"] = True
+        try:
+            while not scheduler_stop.is_set():
+                try:
+                    now = datetime.now()
+                    # 交易日历门：周末/节假日直接跳过，连行情请求都不发。
+                    trading = trading_day_info(now.date().isoformat())
+                    if trading["is_trading_day"] and is_trading_session(now):
+                        slot = now.replace(
+                            minute=now.minute - now.minute % 5, second=0, microsecond=0
+                        )
+                        if (
+                            scheduler_state["last_slot"] != slot.isoformat()
+                            and (now - slot).total_seconds() >= 30
+                        ):
+                            scheduler_state["last_slot"] = slot.isoformat()
+                            scheduler_state["last_result"] = scheduler_run_once()
+                except Exception as exc:  # noqa: BLE001 - 调度线程不能退出
+                    scheduler_state["failures"] += 1
+                    scheduler_state["last_error"] = str(exc) or exc.__class__.__name__
+                scheduler_stop.wait(20)
+        finally:
+            scheduler_state["running"] = False
+
+    @application.on_event("startup")
+    def start_paper_scheduler() -> None:
+        if not scheduler_enabled or scheduler_state["running"]:
+            return
+        threading.Thread(target=scheduler_loop, name="paper-scheduler", daemon=True).start()
+
+    @application.get("/api/paper/scheduler")
+    def paper_scheduler_status():
+        return {**scheduler_state, "trading": trading_day_info()}
+
+    @application.get("/api/trading/session")
+    def trading_session_status():
+        """交易日/交易时段判定：供前端决定是否自动轮询（周末、节假日不轮询）。"""
+        info = trading_day_info()
+        info["in_session"] = bool(info["is_trading_day"] and is_trading_session(datetime.now()))
+        info["session_windows"] = ["09:30-11:30", "13:00-15:00"]
+        return info
+
+    @application.post("/api/paper/scheduler/run")
+    def paper_scheduler_run_once():
+        """立即跑一轮定时 tick（运维/调试用；交易时段由后台线程自动调用）。"""
+        return scheduler_run_once()
+
     @application.get("/api/health")
     def health():
+        sources = ["quan_parquet", "tencent"] if quan_store is not None else ["baostock", "tencent"]
         return {
             "status": "ok", "service": "layered-t-backtest", "broker_connected": False,
-            "database": "sqlite", "data_sources": ["baostock", "tencent"],
-            "realtime_interval_seconds": 60,
+            "database": "sqlite", "data_sources": sources,
+            "quan_data_dir": str(quan_store.path) if quan_store is not None else None,
+            "data_end": quan_store.latest_trade_date() if quan_store is not None else None,
+            "trading_calendar": application.state.fuyao_calendar.status(),
+            "realtime_interval_seconds": REALTIME_INTERVAL_SECONDS,
         }
 
     @application.get("/api/strategy/defaults")
@@ -473,7 +857,7 @@ def create_app() -> FastAPI:
 
     @application.get("/api/market/sources")
     def market_sources():
-        return MarketDataService.source_status()
+        return application.state.market_service.source_status()
 
     @application.post("/api/market/fetch")
     def fetch_market_data(request: MarketFetchRequest):
@@ -590,8 +974,7 @@ def create_app() -> FastAPI:
         index_symbol = "sh.000688" if code.split(".", 1)[-1].startswith(("688", "689")) else "sz.399006"
         datasets = storage.list_datasets()
         cached_daily = next(
-            (item for item in datasets
-             if item.timeframe == "daily" and item.symbol == code and item.source == "baostock"),
+            (item for item in datasets if is_daily_dataset(item, code)),
             None,
         )
         cached_index = next(
@@ -601,7 +984,7 @@ def create_app() -> FastAPI:
         )
         cached_intraday = next(
             (item for item in datasets
-             if item.timeframe == "1m" and item.symbol == code),
+             if item.timeframe == INTRADAY_TIMEFRAME and item.symbol == code),
             None,
         )
         try:
@@ -751,7 +1134,7 @@ def create_app() -> FastAPI:
             name=request.name,
         )
         report["data_info"].update({
-            "daily_source": "universe_db",
+            "daily_source": getattr(service.store, "provider", "universe_db"),
             "universe_db": str(service.store.path),
         })
         storage.save_backtest(report)
@@ -836,6 +1219,26 @@ def create_app() -> FastAPI:
         fees = merge_fees(request.fees)
         for key, value in fees.to_strategy_patch().items():
             setattr(account.config, key, value)
+        return save_paper(account)
+
+    @application.post("/api/paper/accounts/{account_id}/config")
+    def apply_paper_config(account_id: str, request: AccountConfigRequest):
+        """局部更新模拟账户的策略配置（非费率）；下一根 K 线起的新操作立刻生效。
+
+        策略每根 K 线都从 account.config 读取（如做T目标价差 t_target_spread），
+        因此改完无需重启或重建账户。费率字段请走 /fees 端点，这里不收。
+        """
+        account = get_paper(account_id)
+        patch = request.model_dump(exclude_none=True)
+        if not patch:
+            raise HTTPException(status_code=400, detail="没有要更新的配置字段")
+        # 只放行策略字段：AccountConfigRequest 已 extra="forbid" 且不含费率键，
+        # 这里再过一遍 from_dict 兜底（未知键会抛 ValueError → 400）。
+        try:
+            updated = StrategyConfig.from_dict({**account.config.to_dict(), **patch})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        account.config = updated
         return save_paper(account)
 
     @application.post("/api/paper/accounts/{account_id}/auto-strategy")
@@ -974,59 +1377,14 @@ def create_app() -> FastAPI:
     @application.post("/api/paper/accounts/{account_id}/live-tick")
     def paper_live_tick(account_id: str, request: LiveTickRequest):
         account = get_paper(account_id)
-        try:
-            symbol_info = normalize_symbol(request.symbol)
-            _, bar = application.state.market_service.fetch_quote(symbol_info.code)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except requests.RequestException:
-            raise HTTPException(status_code=502, detail="腾讯实时行情请求失败")
-
-        daily_history: list[Bar] = []
-        index_history: list[Bar] = []
-        recent_bars: list[Bar] = []
-        if account.auto_strategy:
-            symbol = symbol_info.standard
-            registered = storage.list_datasets()
-            daily_dataset = next((
-                item for item in registered
-                if item.symbol == symbol and item.timeframe == "daily" and item.source == "baostock"
-            ), None)
-            index_dataset = next((
-                item for item in registered
-                if item.timeframe == "daily" and item.symbol in {"sh.000688", "sz.399006"}
-            ), None)
-            if daily_dataset is None or index_dataset is None:
-                bundle = application.state.market_service.fetch_history_bundle(
-                    request.symbol, include_intraday=False,
-                )
-                storage.save_dataset(bundle["daily"])
-                storage.save_dataset(bundle["index"])
-                daily_dataset = bundle["daily"]
-                index_dataset = bundle["index"]
-            daily_history = read_csv_bars(daily_dataset.file_path, "daily", daily_dataset.symbol)
-            index_history = read_csv_bars(index_dataset.file_path, "daily", index_dataset.symbol)
+        with tick_lock:
             try:
-                minutes, _ = application.state.market_service.fetch_tencent_minutes(symbol, count=320)
-                recent_bars = [item for item in minutes if item.timestamp <= bar.timestamp]
-            except (requests.RequestException, ValueError):
-                recent_bars = []
-
-        daily_close = bar.timestamp.hour >= 15
-        # 自动策略分支已拉取腾讯 1 分钟 K 线，优先用真实分钟量；否则按已开盘分钟数折算。
-        last_minute = recent_bars[-1] if recent_bars else None
-        execution_bar = snapshot_execution_bar(
-            bar,
-            minute_volume=last_minute.volume if last_minute else None,
-            minute_amount=last_minute.amount if last_minute else None,
-        )
-        apply_bar(
-            account, bar, daily_history=daily_history, index_history=index_history,
-            recent_bars=recent_bars, daily_close=daily_close, execution_bar=execution_bar,
-        )
-        # 池内轮动：空仓且 tick 标的 == 池内当前标的时，按 L4 顺序检查 L0 后换票。
-        maybe_advance_rotation(account, bar)
-        return save_paper(account)
+                perform_live_tick(account, request.symbol)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except requests.RequestException:
+                raise HTTPException(status_code=502, detail="腾讯实时行情请求失败")
+            return account.to_dict()
 
     @application.post("/api/paper/accounts/{account_id}/advance")
     def advance_paper(account_id: str, request: AdvanceRequest):
@@ -1047,10 +1405,11 @@ def create_app() -> FastAPI:
                 if index_dataset is not None:
                     index_history = read_csv_bars(index_dataset.file_path, "daily", index_dataset.symbol)
             else:
-                daily_dataset = next((
-                    item for item in storage.list_datasets()
-                    if item.timeframe == "daily" and item.symbol == bound_dataset.symbol and item.source == "baostock"
-                ), None)
+                daily_dataset = next(
+                    (item for item in storage.list_datasets()
+                     if is_daily_dataset(item, bound_dataset.symbol)),
+                    None,
+                )
                 index_dataset = next((
                     item for item in storage.list_datasets()
                     if item.timeframe == "daily" and item.symbol in {"sh.000688", "sz.399006"}
@@ -1066,7 +1425,11 @@ def create_app() -> FastAPI:
             bar = bars[account.cursor]
             next_bar = bars[account.cursor + 1] if account.cursor + 1 < len(bars) else None
             daily_close = next_bar is None or next_bar.date != bar.date
-            recent = bars[max(0, account.cursor - 239):account.cursor + 1]
+            # 盘中上下文只取当日 K 线，与回测引擎逐日回放的 recent 口径一致。
+            session_start = account.cursor
+            while session_start > 0 and bars[session_start - 1].date == bar.date:
+                session_start -= 1
+            recent = bars[session_start:account.cursor + 1]
             apply_bar(
                 account, bar, daily_history=daily_history, index_history=index_history,
                 recent_bars=recent, daily_close=daily_close,

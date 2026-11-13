@@ -1,0 +1,65 @@
+# layer-lab 项目记忆（跨会话约定）
+
+本文件是给 AI agent 的持久项目记忆，跨会话读取。改动代码前先看这里的约定。
+
+## 部署铁律：本地改完必须同步部署到服务器
+
+**每一次代码改动（后端 / 前端 / 配置）都要同时做两件事：**
+
+1. **改本地**：在工作区 `D:\Sanchez\AI\GithubProjects\layer-lab` 改代码、跑测试。
+2. **部署到服务器**：本地验证通过后，部署到阿里云 ECS，让线上生效。
+
+不要只改本地就收工——用户的实际使用环境是服务器，本地和服务器必须保持一致。
+用户明确说「只改本地先验证」时才可暂缓部署，否则默认每次都部署。
+
+### 服务器信息
+
+- 阿里云 ECS：实例 `i-wz95p1n73tl4oraq1xmi`，公网 IP `47.119.50.139`（cn-shenzhen）
+- 远程执行：`python deploy/ecs_run.py run "<命令>"`（读取本机 `C:\Users\zsq23\.workbench\config.json` 的 AK，不在日志回显 secret）
+- 上传文件：`python deploy/ecs_run.py upload <本地> <远端>`
+- 应用跑在 Docker 容器 `layer-lab` 内，SQLite 数据库在容器 `/data/app.db`（命名卷 `layerlab-data`）
+- 一键部署脚本：`bash deploy/deploy_aliyun.sh`（详见 `deploy/README.md`）
+
+### 增量部署速查（每次改完代码）
+
+前提：本机 `C:\Users\zsq23\.workbench\config.json` 已配好阿里云 AK（`ecs_run.py` / `oss_upload.py` 依赖）。
+
+1. 本地验证通过后打包：`python deploy/pack_deploy.py`（产出 `layer-lab-deploy.tar.gz`）
+2. OSS 中转上传：`python deploy/oss_upload.py layer-lab-deploy.tar.gz layer-lab-deploy.tar.gz`
+3. ECS 下载解包：`python deploy/ecs_run.py run "mkdir -p /root/layer-lab && tar -xzf /root/layer-lab.tar.gz -C /root/layer-lab"`
+4. 一键部署（幂等，重建镜像 + 重启容器）：`python deploy/ecs_run.py run "cd /root/layer-lab && bash deploy/deploy_aliyun.sh"`
+
+- 改后端/前端代码走上面全量重打包；只改配置/脚本可直接 `python deploy/ecs_run.py upload <本地> <远端>` 覆盖单个文件再重启容器。
+- 部署后自检：`docker compose -f deploy/compose.server.yaml ps` + `docker logs layer-lab --tail 50`；访问 `https://47.119.50.139:3444`。
+- 完整手册（端口/证书/Basic 认证/排错）：`deploy/README.md`。
+
+### 提交 / 推送 / 版本号
+
+每次改完功能（本地验证通过后）：
+
+1. **及时 commit 并 push 到 GitHub**：`origin` = `https://github.com/sanchez0623/layer-lab.git`。不要攒一堆改动不推。
+2. **推送应触发 GitHub CI**（目前仓库还没有 `.github/workflows/`，CI 待补；补上后 push 即触发）。
+3. **同步 bump 版本号（semver）**，三处一起改，保持一致：
+   - `backend/app/__init__.py` 的 `__version__`
+   - `frontend/package.json` 的 `version`
+   - `backend/app/main.py` 里 FastAPI(app, version=...) 的版本
+   - 改完 `grep -rn "1\.0\.0\|version="` 复核，别漏。
+4. **版本号升降规则**：
+   - 小改动（调 UI、修 bug）：patch +1，如 `1.0.0 → 1.0.1`
+   - 新增大功能：minor +1，如 `1.0.0 → 1.1.0`
+   - 重构级/不兼容改动：major +1，如 `1.2.3 → 2.0.0`
+   - **拿不准属于哪级就先问我**，别自己拍。
+
+### 数据库改动注意
+
+- 服务器真实数据在容器内 `/data/app.db`，查询/修正要走 `docker exec layer-lab python ...`。
+- 费率等全局设置存在 `app_settings` 表（key=`fee_config_v1`，万分之口径）。
+- 已存在模拟账户会把创建时的费率/配置**快照**进自己的 `config`，改全局不会回填老账户。
+- 持仓「买入费用」列来自 `_positions_internal` 的 `permanent_fee`（已含在 `permanent_cost` 内），重算手续费时别漏改，也别重复扣成本。
+
+## 领域要点（避免重复踩坑）
+
+- **T+1 可卖**：`broker.new_day` 只在真正跨交易日时清零 `today_*_buy_qty`，撮合每根 K 线都调它，别无条件 reset。
+- **分板块申报口径**：股数计算必须走 `trading_rules.rules_for(symbol)` 的 `min_qty`/`step`（科创板 200/1，创业板·主板 100/100），不要写死 100 股整手。
+- **16 笔序列**：高价股按「方案 2」——金额不足最小申报也按最小申报建仓（`board_buy_quantity`），宁可略微透支该笔预算也不跳过。
+- **止盈**：价格轨/账户轨各 15% 立即清；10%~15% 进 Armed 区间，内含量价背离、VWAP 回撤 4% 两个辅助清仓点。做 T 目标价差 `t_target_spread` 已可配置（模拟盘 config 面板）。

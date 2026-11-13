@@ -34,3 +34,11 @@ backend/data/uploads/
 Thumbs.db
 .idea/
 .vscode/
+
+# AI agent / tooling scratch dirs（临时产物、部署私钥、助手记忆，绝不入库）
+.tmp/
+.workbuddy/
+.dsh/
+*.tar.gz
+deploy_key
+deploy_key.pub
