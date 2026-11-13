@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .domain import Bar, utc_now
-from .market import MarketDataService, normalize_symbol
+from .market import BAOSTOCK_LOCK, MarketDataService, normalize_symbol
 from .universe import (
     BOARD_GEM,
     BOARD_INDEX,
@@ -317,12 +317,14 @@ class FundamentalService:
 
     def _fetch_once(self, code: str) -> dict:
         payload = dict(FUNDAMENTAL_UNAVAILABLE)
-        self._ensure_session()
-        assert self._bs is not None
-        profit_row = self._latest_profit_row(self._bs, code)
-        balance_row = None
-        if profit_row is not None:
-            balance_row = self._balance_row(self._bs, code, str(profit_row[2]))
+        # baostock 禁止并发：会话管理 + 季度查询整体持锁，避免与 market 回落链路撞车被拉黑。
+        with BAOSTOCK_LOCK:
+            self._ensure_session()
+            assert self._bs is not None
+            profit_row = self._latest_profit_row(self._bs, code)
+            balance_row = None
+            if profit_row is not None:
+                balance_row = self._balance_row(self._bs, code, str(profit_row[2]))
         if profit_row is None:
             return payload
         net_profit = _opt_float(profit_row[6] if len(profit_row) > 6 else None)
@@ -512,7 +514,14 @@ def run_screener(
     *,
     as_of: str | None = None,
     include_realtime: bool = False,
+    index_history: dict[str, list[Bar]] | None = None,
 ) -> ScreeningResult:
+    """``index_history``：按板块名预加载的指数日线（升序，截至最新交易日）。
+
+    回测时间旅行场景必须传入：store.load_index(max_rows=260) 只回「截至最新日」
+    的最近 260 根，回测 early as_of 一切窗口就不足 21 根（误报 L0 降级）。
+    传入后 L0 直接复用，_bar_window(as_of) 切出的是 as_of 往前 260 根。
+    """
     started = time.perf_counter()
     cfg = config or ScreenerConfig()
     warnings: list[str] = []
@@ -535,7 +544,11 @@ def run_screener(
     gate_boards: dict[str, dict] = {}
     for board in boards:
         index_code = BOARD_INDEX[board]
-        index_bars = _bar_window(store.load_index(index_code, max_rows=260), as_of_text)
+        if index_history is not None and board in index_history:
+            index_all = index_history[board]
+        else:
+            index_all = store.load_index(index_code, max_rows=260)
+        index_bars = _bar_window(index_all, as_of_text)
         entry: dict[str, Any] = {
             "index": index_code,
             "ret20": None,

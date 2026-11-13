@@ -528,17 +528,28 @@ class UniverseStore:
             )
         return len(payload)
 
-    def load_index(self, index_code: str, max_rows: int = 260) -> list[Bar]:
+    def load_index(
+        self, index_code: str, max_rows: int = 260,
+        *, start: str | None = None, end: str | None = None,
+    ) -> list[Bar]:
         limit = max(1, int(max_rows))
+        # start/end 必须在子查询内先过滤，rn 才是「过滤后」的序号；否则 end 截断后
+        # rn<=limit 会取到错误的行集（末尾缺最新、开头多出区间外行）。
+        inner = "SELECT *, ROW_NUMBER() OVER (ORDER BY date DESC) AS rn FROM universe_index WHERE code=?"
+        params: list[Any] = [str(index_code)]
+        if start:
+            inner += " AND date >= ?"
+            params.append(str(start)[:10])
+        if end:
+            inner += " AND date <= ?"
+            params.append(str(end)[:10])
+        sql = (
+            "SELECT date, open, high, low, close, prev_close, volume, amount "
+            f"FROM ({inner}) WHERE rn <= ? ORDER BY date"
+        )
+        params.append(limit)
         with self._lock, self._connection() as connection:
-            rows = connection.execute(
-                "SELECT date, open, high, low, close, prev_close, volume, amount "
-                "FROM ("
-                "  SELECT *, ROW_NUMBER() OVER (ORDER BY date DESC) AS rn"
-                "  FROM universe_index WHERE code=?"
-                ") WHERE rn <= ? ORDER BY date",
-                (str(index_code), limit),
-            ).fetchall()
+            rows = connection.execute(sql, params).fetchall()
         return [
             Bar(
                 timestamp=_to_date(str(row["date"])),

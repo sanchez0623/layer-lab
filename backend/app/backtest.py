@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from statistics import mean, stdev
 from typing import Any
 
@@ -12,6 +12,9 @@ from .domain import Bar, Fill, StrategyConfig, money, utc_now
 from .screener import ScreenerConfig, run_screener
 from .strategy import LayeredTStrategy
 from .universe import BOARD_INDEX, UniverseStore
+
+# 回测指数加载：start 前推的日历天缓冲，保证回测首日往前 ≥21 根（L0 ret20 + 策略大盘门）。
+_INDEX_LOOKBACK_BUFFER_DAYS = 45
 
 
 def performance_metrics(
@@ -368,11 +371,6 @@ class FunnelRotationBacktest:
         self.name_by_code = {row.code: row.name for row in self.candidates}
         self.board_by_code = {row.code: row.board for row in self.candidates}
         codes = [row.code for row in self.candidates]
-        # 板块指数（L0 门 + 策略大盘门）
-        self.index_history: dict[str, list[Bar]] = {}
-        for board in self.screener_config.boards:
-            index_code = BOARD_INDEX[board]
-            self.index_history[board] = self.store.load_index(index_code, max_rows=260)
         # 全局交易日时间线：候选出现过日线的 distinct 日期 ∩ [start_date, end_date]
         # （轻量：只查日期列，不构建 Bar 对象）。
         timeline = self.store.list_trade_dates(
@@ -384,6 +382,21 @@ class FunnelRotationBacktest:
         self.codes_with_daily = self.store.count_codes_with_daily(codes)
         if not self.codes_with_daily or not self.timeline:
             raise ValueError("universe 日线缓存为空，请先在选股页刷新数据")
+        # 板块指数（L0 门 + 策略大盘门）：锚定回测区间，start 前推缓冲天数字段
+        # 保证回测首日往前 ≥21 根（否则 load_index「截至最新日最近 260 根」会让
+        # 首日 L0 误判「不足 21 根」降级）。end 用回测区间末，避免引入未来数据。
+        index_start = (
+            datetime.fromisoformat(self.timeline[0]).date()
+            - timedelta(days=_INDEX_LOOKBACK_BUFFER_DAYS)
+        ).isoformat()
+        index_end = self.timeline[-1]
+        self.index_history: dict[str, list[Bar]] = {}
+        for board in self.screener_config.boards:
+            index_code = BOARD_INDEX[board]
+            self.index_history[board] = self.store.load_index(
+                index_code, max_rows=4000,
+                start=index_start, end=index_end,
+            )
         # 持仓标的日线惰性缓存：任意时刻最多驻留一只标的的历史。
         self._held_code: str | None = None
         self._held_bars: list[Bar] = []
@@ -511,6 +524,7 @@ class FunnelRotationBacktest:
         result = run_screener(
             self.store, self.market, self.screener_config,
             as_of=as_of, include_realtime=False,
+            index_history=self.index_history,
         )
         first = result.first
         snapshot = {

@@ -40,7 +40,7 @@ import requests
 
 DEFAULT_QUAN_DATA_DIR = r"D:\Sanchez\AI\TraeProjects\quan_quant\data"
 DEFAULT_INDEX_KEYS = ("399006", "000688")
-TENCENT_INDEX_DAILY_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,,,{count},qfq"
+TENCENT_INDEX_DAILY_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,{start},{end},{count},qfq"
 HTTP_TIMEOUT = 20.0
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LayerLab/1.0"
 
@@ -66,10 +66,17 @@ def tencent_index_symbol(index_key: str) -> str:
     return f"sh{key}"
 
 
-def fetch_index_daily(index_key: str, count: int = 2000) -> list[dict[str, Any]]:
-    """腾讯指数日线（前复权=原始点位，指数无除权）。返回升序行。"""
+def fetch_index_daily(
+    index_key: str, count: int = 2000, start: str = "", end: str = "",
+) -> list[dict[str, Any]]:
+    """腾讯指数日线（前复权=原始点位，指数无除权）。返回升序行。
+
+    ``start``/``end`` 为 YYYY-MM-DD，可分段拉取更早历史（绕开「最近 count 根」上限）。
+    """
     symbol = tencent_index_symbol(index_key)
-    url = TENCENT_INDEX_DAILY_URL.format(symbol=symbol, count=max(1, min(int(count), 2000)))
+    url = TENCENT_INDEX_DAILY_URL.format(
+        symbol=symbol, start=start, end=end, count=max(1, min(int(count), 2000)),
+    )
     response = requests.get(url, timeout=HTTP_TIMEOUT, headers={"User-Agent": USER_AGENT})
     response.raise_for_status()
     payload = response.json()
@@ -141,8 +148,12 @@ def merge_append_only(existing: Any, incoming: Any, pl: Any) -> tuple[Any, int, 
 
 def migrate_index(
     data_dir: Path, keys: list[str], *, count: int = 2000, dry_run: bool = False,
+    start: str = "", end: str = "",
 ) -> dict[str, Any]:
-    """把指数新行增量并入 ``index_daily.parquet``（不覆盖已有行）。"""
+    """把指数新行增量并入 ``index_daily.parquet``（不覆盖已有行）。
+
+    ``start``/``end`` 透传给腾讯接口，可分段拉取更早历史（如补 5 年）。
+    """
     try:
         import polars as pl
     except ImportError as exc:  # pragma: no cover - 环境缺 polars
@@ -157,7 +168,9 @@ def migrate_index(
     errors: list[str] = []
     for key in dict.fromkeys(keys):
         try:
-            rows = _drop_unfinished_today(fetch_index_daily(key, count=count))
+            rows = _drop_unfinished_today(
+                fetch_index_daily(key, count=count, start=start, end=end),
+            )
             incoming_frames.append(rows)
         except Exception as exc:  # noqa: BLE001 - 单指数失败不阻塞其他指数
             errors.append(f"{key}: {exc}")
@@ -235,13 +248,18 @@ def main(argv: list[str] | None = None) -> int:
     index_parser.add_argument("--data-dir", default=None, help="quan 数据目录；默认 WB_QUAN_DATA_DIR")
     index_parser.add_argument("--keys", default=",".join(DEFAULT_INDEX_KEYS), help="逗号分隔的 6 位指数代码")
     index_parser.add_argument("--count", type=int, default=2000, help="腾讯返回的最大 bar 数")
+    index_parser.add_argument("--start", default="", help="起始日期 YYYY-MM-DD；分段拉更早历史（如补 5 年）")
+    index_parser.add_argument("--end", default="", help="结束日期 YYYY-MM-DD；默认到最新")
     index_parser.add_argument("--dry-run", action="store_true", help="只计算新增量，不写盘")
 
     args = parser.parse_args(argv)
     if args.command == "index":
         data_dir = resolve_data_dir(args.data_dir)
         keys = [item.strip() for item in str(args.keys).split(",") if item.strip()]
-        summary = migrate_index(data_dir, keys, count=args.count, dry_run=args.dry_run)
+        summary = migrate_index(
+            data_dir, keys, count=args.count, dry_run=args.dry_run,
+            start=args.start, end=args.end,
+        )
         print(json.dumps(summary, ensure_ascii=False, indent=2))
         return 0 if not summary.get("errors") else 1
     parser.error("未知子命令")
