@@ -487,7 +487,9 @@ class LayeredTStrategy(Strategy):
             execution_mode="NEXT_BAR", reason=signal,
         )]
 
-    def _t_eligible(self, history: list[Bar], bar: Bar, account: BrokerAccount) -> bool:
+    def _t_eligible(self, history: list[Bar], bar: Bar, account: BrokerAccount,
+                    live_turnover: float | None = None,
+                    live_bid: float | None = None, live_ask: float | None = None) -> bool:
         position = account.position(bar.symbol)
         if (
             not self.config.enable_t or account.sequence_index < 4 or self.armed
@@ -499,12 +501,19 @@ class LayeredTStrategy(Strategy):
         average_amplitude = mean(
             (item.high - item.low) / (item.prev_close or item.open) for item in recent
         )
+        # 换手率取「当日实时快照」优先（live_turnover，腾讯快照字段[38]，做T是当日盘中决策）；
+        # 历史日线 bar 无换手字段（quan 源 turnover_rate 恒 None），缺失时回落实时值。
         turnover = recent[-1].turnover_rate
+        if turnover is None and live_turnover is not None:
+            turnover = live_turnover
         if average_amplitude < self.config.t_min_amplitude or turnover is None:
             return False
         if not self.config.t_min_turnover <= turnover <= self.config.t_max_turnover:
             return False
-        if bar.bid is None or bar.ask is None or bar.ask <= bar.bid or bar.volume < 100:
+        # 盘口同理：历史 5 分钟 bar 无盘口（腾讯只挂在当前快照 bar），缺失时用实时快照兜底。
+        bid = bar.bid if bar.bid is not None else live_bid
+        ask = bar.ask if bar.ask is not None else live_ask
+        if bid is None or ask is None or ask <= bid or bar.volume < 100:
             return False
         # 一次完整 T 往返：四项双边费率各计两次、印花税仅卖出计一次，滑点买卖各一次。
         estimated_cost = (
@@ -527,6 +536,8 @@ class LayeredTStrategy(Strategy):
         self, history: list[Bar], recent_bars: list[Bar], bar: Bar,
         account: BrokerAccount, index_history: list[Bar] | None = None,
         session_index: int | None = None,
+        live_turnover: float | None = None,
+        live_bid: float | None = None, live_ask: float | None = None,
     ) -> list[OrderRequest]:
         # 同一根已收盘 5 分钟 K 线只评估一次：live-tick 重试/同一 5 分钟窗口内多次
         # 轮询时，不能把「连续 3 根 5 分钟 K 线」的确认计数重复累加。
@@ -569,7 +580,8 @@ class LayeredTStrategy(Strategy):
             return []
         if current_time < datetime.strptime("09:35", "%H:%M").time() or current_time >= datetime.strptime("14:00", "%H:%M").time():
             return []
-        if not self._t_eligible(history, bar, account):
+        if not self._t_eligible(history, bar, account, live_turnover=live_turnover,
+                                live_bid=live_bid, live_ask=live_ask):
             return []
         # T 仓按板块口径取股数：目标金额与可用资金分别折算后取小，
         # 再用可卖永久仓数量封顶（做T不超过底仓，避免裸卖）。
