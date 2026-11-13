@@ -38,7 +38,7 @@
 每次改完功能（本地验证通过后）：
 
 1. **及时 commit 并 push 到 GitHub**：`origin` = `https://github.com/sanchez0623/layer-lab.git`。不要攒一堆改动不推。
-2. **推送应触发 GitHub CI**（目前仓库还没有 `.github/workflows/`，CI 待补；补上后 push 即触发）。
+2. **推送会触发 GitHub CI**：`.github/workflows/ci.yml` 已配置，push 即触发（后端 pytest + 前端 build）。CI 红了先修再继续。
 3. **同步 bump 版本号（semver）**，三处一起改，保持一致：
    - `backend/app/__init__.py` 的 `__version__`
    - `frontend/package.json` 的 `version`
