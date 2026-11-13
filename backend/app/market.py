@@ -5,17 +5,31 @@ import re
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 import requests
 
 from .data import dataset_from_bars, write_bars_csv
 from .domain import Bar, Dataset, money, price
 
+if TYPE_CHECKING:  # 避免与 quan_data -> universe -> market 的导入环
+    from .quan_data import QuanStore
+
+
+QUAN_DAILY_SOURCE = "quan_parquet"
+QUAN_INDEX_SOURCE = "quan_index"
+
 
 TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbol}"
-TENCENT_MINUTE_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline?param={symbol},m1,,{count}"
+# 盘中检测口径：5 分钟 K 线（腾讯 mkline 周期 m5），不再使用 1 分钟。
+TENCENT_INTRADAY_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline?param={symbol},{period},,{count}"
+TENCENT_INTRADAY_PERIOD = "m5"
 TENCENT_DAILY_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,,,{count},qfq"
+INTRADAY_TIMEFRAME = "5m"
+INTRADAY_BAR_MINUTES = 5
+REALTIME_INTERVAL_SECONDS = 300
+# 腾讯 m5 接口实测单次最多返回 320 根（约 6~7 个交易日），请求更大的 count 也不会更多。
+TENCENT_INTRADAY_MAX_BARS = 320
 HTTP_TIMEOUT = 15.0
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) LayerLab/1.0"
 
@@ -160,23 +174,38 @@ def _parse_tencent_batch(text: str) -> dict[str, dict[str, Any]]:
 
 
 class MarketDataService:
-    """baostock 历史日线 + 腾讯实时/1分钟数据适配层。
+    """历史行情 + 腾讯实时/5分钟数据适配层。
+
+    - 历史日线/指数/5分钟：``quan`` 数据源（quan_quant parquet，只读）优先；
+      未注入 ``quan`` 时回落 baostock + 腾讯日线兜底（旧链路）。
+    - 实时快照与盘中 5 分钟 K 线：始终来自腾讯行情。
 
     输出统一为 Bar；真实来源在 Dataset.source / data_info 中保留可追溯字段。
     """
 
-    def __init__(self, cache_dir: str | Path) -> None:
+    def __init__(self, cache_dir: str | Path, *, quan: "QuanStore | None" = None) -> None:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.quan = quan
 
-    @staticmethod
-    def source_status() -> dict[str, Any]:
-        return {
-            "baostock": {"role": "历史日线（前复权）", "status": "installed"},
-            "tencent": {"role": "实时快照与1分钟K线", "status": "configured"},
-            "realtime_interval_seconds": 60,
-            "note": "系统只读取行情，不向任何券商或交易接口发送委托。",
-        }
+    def source_status(self) -> dict[str, Any]:
+        sources: dict[str, Any] = {}
+        if self.quan is not None:
+            sources["quan_parquet"] = {
+                "role": "历史日线（前复权）/ 指数 / 5分钟K线（只读 parquet）",
+                "status": "active",
+                "path": str(self.quan.path),
+            }
+        else:
+            sources["baostock"] = {"role": "历史日线（前复权）", "status": "installed"}
+        sources["tencent"] = {"role": "实时快照与5分钟K线", "status": "configured"}
+        sources["realtime_interval_seconds"] = REALTIME_INTERVAL_SECONDS
+        sources["intraday_timeframe"] = INTRADAY_TIMEFRAME
+        sources["note"] = (
+            "系统只读取行情，不向任何券商或交易接口发送委托。"
+            + ("历史数据来自 quan_quant 的 parquet 数据目录。" if self.quan is not None else "")
+        )
+        return sources
 
     def fetch_quote(self, raw_symbol: str) -> tuple[dict[str, Any], Bar]:
         symbol = normalize_symbol(raw_symbol)
@@ -211,7 +240,9 @@ class MarketDataService:
         bar = Bar(
             timestamp=timestamp, symbol=symbol.standard, open=price(open_), high=price(high),
             low=price(low), close=price(close), volume=volume, amount=money(amount),
-            timeframe="1m", turnover_rate=turnover, prev_close=price(prev_close),
+            # 快照 bar 标记为盘中检测粒度 5m；其 OHLC/volume 是全天口径，
+            # 只用于策略信号与展示，撮合前必须经 snapshot_execution_bar 转换。
+            timeframe=INTRADAY_TIMEFRAME, turnover_rate=turnover, prev_close=price(prev_close),
             bid=price(bid) if bid else None, ask=price(ask) if ask else None,
         )
         quote = {
@@ -267,6 +298,11 @@ class MarketDataService:
             raise ValueError(f"指数代码不合法: {index_code}")
         standard = f"{exchange}.{code}"
         tencent_symbol = f"{exchange}{code}"
+
+        if self.quan is not None:
+            bars = self.quan.load_index(standard, max_rows=4000, start=start_date, end=end_date)
+            if bars:
+                return bars, QUAN_INDEX_SOURCE
 
         if standard == "sh.000688":
             bars = self.fetch_tencent_daily(tencent_symbol, start_date, end_date)
@@ -486,17 +522,28 @@ class MarketDataService:
             raise ValueError(f"腾讯没有返回指数 {tencent_symbol} 在指定区间的日线")
         return bars
 
-    def fetch_tencent_minutes(self, raw_symbol: str, count: int = 1200) -> tuple[list[Bar], dict[str, Any]]:
+    def fetch_tencent_intraday(
+        self, raw_symbol: str, count: int = TENCENT_INTRADAY_MAX_BARS,
+    ) -> tuple[list[Bar], dict[str, Any]]:
+        """盘中 5 分钟 K 线（腾讯 mkline ``m5``）。
+
+        腾讯该接口单次最多返回 320 根 5 分钟 K 线（约 6~7 个交易日），
+        请求更大的 ``count`` 也不会返回更多，长周期回测需以日线为主并明示覆盖范围。
+        """
         symbol = normalize_symbol(raw_symbol)
         quote, current = self.fetch_quote(symbol.standard)
-        url = TENCENT_MINUTE_URL.format(symbol=symbol.tencent, count=max(1, min(count, 2400)))
+        url = TENCENT_INTRADAY_URL.format(
+            symbol=symbol.tencent,
+            period=TENCENT_INTRADAY_PERIOD,
+            count=max(1, min(count, TENCENT_INTRADAY_MAX_BARS)),
+        )
         payload = _get_json(url)
         if payload.get("code") != 0:
-            raise ValueError(f"腾讯1分钟K线返回错误: {payload.get('msg')}")
+            raise ValueError(f"腾讯5分钟K线返回错误: {payload.get('msg')}")
         node = payload.get("data", {}).get(symbol.tencent, {})
-        rows = node.get("m1", [])
+        rows = node.get(TENCENT_INTRADAY_PERIOD, [])
         if not rows:
-            raise ValueError(f"腾讯没有返回 {symbol.standard} 的1分钟K线")
+            raise ValueError(f"腾讯没有返回 {symbol.standard} 的5分钟K线")
 
         bars: list[Bar] = []
         for row in rows:
@@ -516,15 +563,15 @@ class MarketDataService:
             bars.append(Bar(
                 timestamp=timestamp, symbol=symbol.standard, open=price(open_),
                 high=price(high), low=price(low), close=price(close), volume=volume,
-                amount=money(amount), timeframe="1m",
+                amount=money(amount), timeframe=INTRADAY_TIMEFRAME,
                 turnover_rate=quote.get("turnover_rate") if is_last else None,
                 prev_close=price(quote.get("prev_close") or close),
                 bid=price(quote.get("bid")) if is_last and quote.get("bid") else None,
                 ask=price(quote.get("ask")) if is_last and quote.get("ask") else None,
             ))
         if not bars:
-            raise ValueError(f"腾讯1分钟K线解析后没有有效数据: {symbol.standard}")
-        # 腾讯分钟接口不带逐分钟盘口；仅把当前快照的盘口/换手挂在最后一根bar，
+            raise ValueError(f"腾讯5分钟K线解析后没有有效数据: {symbol.standard}")
+        # 腾讯分钟接口不带逐 bar 盘口；仅把当前快照的盘口/换手挂在最后一根 bar，
         # 供模拟盘实时撮合和做T准入使用，不伪造成历史盘口。
         bars[-1].turnover_rate = quote.get("turnover_rate")
         if quote.get("bid"):
@@ -551,6 +598,78 @@ class MarketDataService:
         dataset.id = f"ds_{digest}"
         return dataset
 
+    def _fetch_quan_bundle(
+        self, symbol: SymbolInfo, start_text: str, end_text: str, include_intraday: bool,
+    ) -> dict[str, Any]:
+        """quan_parquet 只读历史数据 → 与旧链路一致的数据集 bundle。"""
+        assert self.quan is not None
+        name = self.quan.stock_name(symbol.standard) or symbol.standard
+        daily = self.quan.load_series(symbol.standard, start=start_text, end=end_text)
+        if not daily:
+            raise ValueError(
+                f"quan_parquet 在 {start_text}~{end_text} 没有 {symbol.standard} 的日线"
+            )
+        daily_path = self._cache_path("quan_daily", symbol, start_text, end_text)
+        write_bars_csv(daily_path, daily)
+        daily_dataset = self._dataset(
+            daily, f"{name} {symbol.standard} 日线", symbol.standard, "daily",
+            QUAN_DAILY_SOURCE, daily_path,
+        )
+
+        index_bars = self.quan.load_index(
+            symbol.index_baostock, max_rows=4000, start=start_text, end=end_text,
+        )
+        if not index_bars:
+            raise ValueError(
+                f"quan_parquet 缺少指数 {symbol.index_baostock} 的日线；"
+                "请先运行 backend/scripts/quan_migrate.py index 回填 399006/000688"
+            )
+        index_path = self._cache_path("quan_index", symbol, start_text, end_text)
+        write_bars_csv(index_path, index_bars)
+        index_dataset = self._dataset(
+            index_bars, f"对应指数 {symbol.index_baostock} 日线", symbol.index_baostock,
+            "daily", QUAN_INDEX_SOURCE, index_path,
+        )
+
+        intraday_dataset: Dataset | None = None
+        intraday_source: str | None = None
+        if include_intraday:
+            minutes = self.quan.load_minute5(symbol.standard, max_rows=2400)
+            source = QUAN_DAILY_SOURCE
+            path_prefix = "quan_m5"
+            if not minutes:
+                # 服务器上 quan 的 minute5 可能尚未同步；5 分钟数据回落到腾讯 m5，
+                # 仍带真实来源标记，不伪称来自 quan。
+                try:
+                    minutes, _ = self.fetch_tencent_intraday(symbol.standard)
+                    source = "tencent"
+                    path_prefix = "tencent_m5"
+                except (ValueError, requests.RequestException):
+                    minutes = []
+            if minutes:
+                intraday_path = self._cache_path(path_prefix, symbol, start_text, end_text)
+                write_bars_csv(intraday_path, minutes)
+                intraday_dataset = self._dataset(
+                    minutes, f"{name} {symbol.standard} 5分钟", symbol.standard,
+                    "5m", source, intraday_path,
+                )
+                intraday_source = source
+
+        quote, _ = self.fetch_quote(symbol.standard)
+        return {
+            "symbol": symbol.standard, "code": symbol.code,
+            "exchange": symbol.exchange, "board": symbol.board,
+            "name": quote.get("name") or name,
+            "index_symbol": symbol.index_baostock, "daily": daily_dataset,
+            "index": index_dataset, "intraday": intraday_dataset, "quote": quote,
+            "source_info": {
+                "daily_source": QUAN_DAILY_SOURCE,
+                "intraday_source": intraday_source,
+                "index_source": QUAN_INDEX_SOURCE,
+                "realtime_interval_seconds": REALTIME_INTERVAL_SECONDS,
+            },
+        }
+
     def fetch_history_bundle(
         self, raw_symbol: str, start_date: str | None = None, end_date: str | None = None,
         include_intraday: bool = True,
@@ -562,6 +681,9 @@ class MarketDataService:
             raise ValueError("开始日期不能晚于结束日期")
         start_text = start.isoformat()
         end_text = end.isoformat()
+
+        if self.quan is not None:
+            return self._fetch_quan_bundle(symbol, start_text, end_text, include_intraday)
 
         quote, _ = self.fetch_quote(symbol.standard)
         daily = self.fetch_baostock_daily(symbol.standard, start_text, end_text)
@@ -582,12 +704,12 @@ class MarketDataService:
 
         intraday_dataset: Dataset | None = None
         if include_intraday:
-            minutes, _ = self.fetch_tencent_minutes(symbol.standard, count=1200)
-            intraday_path = self._cache_path("tencent_m1", symbol, start_text, end_text)
+            minutes, _ = self.fetch_tencent_intraday(symbol.standard, count=TENCENT_INTRADAY_MAX_BARS)
+            intraday_path = self._cache_path("tencent_m5", symbol, start_text, end_text)
             write_bars_csv(intraday_path, minutes)
             intraday_dataset = self._dataset(
-                minutes, f"{quote.get('name', symbol.standard)} 腾讯1分钟",
-                symbol.standard, "1m", "tencent", intraday_path,
+                minutes, f"{quote.get('name', symbol.standard)} 腾讯5分钟",
+                symbol.standard, INTRADAY_TIMEFRAME, "tencent", intraday_path,
             )
 
         return {
@@ -598,6 +720,7 @@ class MarketDataService:
             "index": index_dataset, "intraday": intraday_dataset, "quote": quote,
             "source_info": {
                 "daily_source": "baostock", "intraday_source": "tencent",
-                "index_source": index_source, "realtime_interval_seconds": 60,
+                "index_source": index_source,
+                "realtime_interval_seconds": REALTIME_INTERVAL_SECONDS,
             },
         }

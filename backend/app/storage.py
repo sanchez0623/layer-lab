@@ -154,6 +154,14 @@ class SQLiteStorage:
             ).fetchone()
         return json.loads(row["payload"]) if row else None
 
+    def list_paper(self) -> list[dict[str, Any]]:
+        """全部模拟账户（后端定时器据此驱动所有开启自动策略的账户）。"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT payload FROM paper_accounts ORDER BY updated_at DESC,id DESC"
+            ).fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
     def save_screener_run(self, payload: dict[str, Any]) -> None:
         """保存一次完整的选股结果（payload 即 ScreeningResult.to_dict()）。"""
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False)

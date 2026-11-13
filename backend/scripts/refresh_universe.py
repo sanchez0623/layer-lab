@@ -26,6 +26,7 @@ if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
 from app.market import MarketDataService  # noqa: E402
+from app.quan_data import quan_data_dir  # noqa: E402
 from app.universe import (  # noqa: E402
     SUPPORTED_BOARDS,
     UniverseRefresher,
@@ -69,6 +70,14 @@ def main(argv: list[str] | None = None) -> int:
         pass
 
     args = _build_parser().parse_args(argv)
+    active_quan = quan_data_dir()
+    if active_quan is not None:
+        print(
+            f"[refresh] 注意：服务当前默认数据源是 quan_parquet（{active_quan}），"
+            "本 CLI 只写旧 universe.db，不会被选股/回测使用；"
+            "如需回补旧链路请先设置 WB_QUAN_DATA_DIR=''。",
+            flush=True,
+        )
     db_path = Path(args.db) if args.db else default_universe_db()
     store = UniverseStore(db_path)
     market = MarketDataService(BACKEND_DIR / "data" / "cache")

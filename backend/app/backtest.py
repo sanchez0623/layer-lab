@@ -244,7 +244,10 @@ class BacktestEngine:
                         self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
                     self.account.mark(bar.symbol, bar.close)
                     recent.append(bar)
-                    requests = self.strategy.on_intraday(previous_daily, recent, bar, self.account)
+                    requests = self.strategy.on_intraday(
+                        previous_daily, recent, bar, self.account,
+                        index_history=index_history, session_index=session_index,
+                    )
                     self._submit(requests, bar.timestamp)
                 self.account.cancel_open_orders("日内订单日终取消", modes={"NEXT_BAR"})
             else:
@@ -267,7 +270,7 @@ class BacktestEngine:
 
         if missing_intraday_dates:
             self.warnings.append(
-                f"{len(missing_intraday_dates)}个交易日无1分钟数据（{missing_intraday_dates[0]}起）；"
+                f"{len(missing_intraday_dates)}个交易日无5分钟数据（{missing_intraday_dates[0]}起）；"
                 "这些日期仅执行既有次日开盘订单，不做盘中信号。"
             )
         if self.current_round:
@@ -320,7 +323,7 @@ class FunnelRotationBacktest:
     """选股漏斗轮动回测：每次清仓后重新跑 L0→L4，取当时第一名换票。
 
     与模拟盘 rotation v2 语义对齐（清仓→重筛→次日建仓），但全程日线口径：
-    无 1 分钟数据，T 交易与 tick 级风控降级。数据只读 universe.db 缓存，不联网。
+    无 5 分钟数据，T 交易与 tick 级风控降级。数据只读 universe.db 缓存，不联网。
     """
 
     def __init__(
@@ -509,7 +512,7 @@ class FunnelRotationBacktest:
         return snapshot
 
     def run(self) -> dict[str, Any]:
-        self.warnings.append("漏斗轮动回测为日线口径，1分钟做T与tick级风控降级")
+        self.warnings.append("漏斗轮动回测为日线口径，5分钟做T与tick级风控降级")
         self.warnings.append("财务深筛已强制关闭（enable_fundamental_veto=False）：避免联网财务与未来数据")
         self._chg20d_at_select: dict[str, float | None] = {}
         self._screen_by_symbol: dict[str, dict] = {}

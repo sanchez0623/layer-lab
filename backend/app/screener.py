@@ -413,28 +413,58 @@ class ScreenerService:
         data_dir: str | Path,
         market: MarketDataService,
         *,
+        store: Any | None = None,
+        refresher: Any | None = None,
         sleep_seconds: float = 0.0,
     ) -> None:
+        """``store``/``refresher`` 可由 create_app 注入（quan_parquet 只读源）；
+        未注入时回落本地 universe.db + baostock 旧链路。"""
         self.data_dir = Path(data_dir)
         self.market = market
-        override = os.environ.get("WB_UNIVERSE_DB")
-        db_path = Path(override) if override else self.data_dir / "universe.db"
-        self.store = UniverseStore(db_path)
         self.sleep_seconds = max(0.0, float(sleep_seconds))
-        self.refresher = UniverseRefresher(self.store, market)
+        if store is not None:
+            self.store = store
+            if refresher is not None:
+                self.refresher = refresher
+            elif getattr(store, "provider", "") == "quan_parquet":
+                from .quan_data import QuanRefresher
+
+                self.refresher = QuanRefresher(store)
+            else:
+                self.refresher = UniverseRefresher(store, market)
+        else:
+            override = os.environ.get("WB_UNIVERSE_DB")
+            db_path = Path(override) if override else self.data_dir / "universe.db"
+            self.store = UniverseStore(db_path)
+            self.refresher = refresher or UniverseRefresher(self.store, market)
+
+    def _is_quan(self) -> bool:
+        return getattr(self.store, "provider", "") == "quan_parquet"
 
     def defaults(self) -> dict:
-        return {
-            "config": ScreenerConfig().to_dict(),
-            "boards": list(SUPPORTED_BOARDS),
-            "coverage": self.store.coverage(),
-            "sources": {
+        if self._is_quan():
+            sources = {
+                "provider": "quan_parquet",
+                "quan_data_dir": str(self.store.path),
+                "daily": "quan_quant daily.parquet + adj_factor.parquet（前复权，不复权原始价 × 因子 ÷ 最新因子）",
+                "index": "quan_quant index_daily.parquet（399006/000688 由 scripts/quan_migrate.py 增量回填）",
+                "realtime": "腾讯 qt.gtimg.cn 批量快照（GBK，≤80/批）",
+                "fundamental": "baostock query_profit_data / query_balance_data（本地缓存，quan 数据无财务字段）",
+                "turnover": "quan 数据无换手率字段，turnover 显示为空",
+            }
+        else:
+            sources = {
                 "universe_db": str(self.store.path),
                 "daily": "baostock query_history_k_data_plus（前复权 adjustflag=2）",
                 "index": "baostock 指数日线；sh.000688 用腾讯兜底",
                 "realtime": "腾讯 qt.gtimg.cn 批量快照（GBK，≤80/批）",
                 "fundamental": "baostock query_profit_data / query_balance_data 季度财务",
-            },
+            }
+        return {
+            "config": ScreenerConfig().to_dict(),
+            "boards": list(SUPPORTED_BOARDS),
+            "coverage": self.store.coverage(),
+            "sources": sources,
             "notes": [
                 "L0 大盘同步门：板块指数近20日收益 < 0 才开门；指数缺失按开门降级处理。",
                 "L1 A1 超跌：20日跌幅 < -15% 且距52周高回撤 ≥ 30%。",
@@ -592,6 +622,8 @@ def run_screener(
                     vetoed_by=None,
                 )
             )
+        # 只保留通过 L1 的 Bar（bars_by_code），其余全量 Bar 立即释放，降低后续阶段峰值。
+        history = None
     funnel["after_l1"] = len(candidates)
 
     # -- 实时快照叠加（仅对通过 L1 的票） --------------------------------

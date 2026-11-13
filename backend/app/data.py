@@ -213,17 +213,17 @@ def generate_demo_data(seed: int = 20261111) -> tuple[list[Bar], list[Bar], list
     intraday: list[Bar] = []
     for day_index in range(len(days) - 48, len(days)):
         daily = stock[day_index]
-        minutes = [time(9, 30)] * 240
-        del minutes
+        # 演示行情使用 5 分钟 K 线（bar timestamp 为区间结束时间，与腾讯 m5 一致）：
+        # 上午 09:35~11:30、下午 13:05~15:00，各 24 根，合计 48 根/日。
         timestamps: list[datetime] = []
-        cursor = datetime.combine(daily.timestamp.date(), time(9, 30))
-        for _ in range(120):
+        cursor = datetime.combine(daily.timestamp.date(), time(9, 35))
+        for _ in range(24):
             timestamps.append(cursor)
-            cursor += timedelta(minutes=1)
-        cursor = datetime.combine(daily.timestamp.date(), time(13, 0))
-        for _ in range(120):
+            cursor += timedelta(minutes=5)
+        cursor = datetime.combine(daily.timestamp.date(), time(13, 5))
+        for _ in range(24):
             timestamps.append(cursor)
-            cursor += timedelta(minutes=1)
+            cursor += timedelta(minutes=5)
         last = daily.open
         for j, timestamp in enumerate(timestamps):
             progress = (j + 1) / len(timestamps)
@@ -233,11 +233,11 @@ def generate_demo_data(seed: int = 20261111) -> tuple[list[Bar], list[Bar], list
             open_ = last
             high = max(open_, close) * 1.0018
             low = min(open_, close) * 0.9982
-            volume = max(1000.0, daily.volume / 240 * (0.7 + 0.6 * rng.random()))
+            volume = max(1000.0, daily.volume / len(timestamps) * (0.7 + 0.6 * rng.random()))
             intraday.append(Bar(
                 timestamp=timestamp, symbol=daily.symbol, open=price(open_), high=price(high),
                 low=price(low), close=price(close), volume=volume,
-                amount=money(volume * (open_ + close) / 2), timeframe="1m",
+                amount=money(volume * (open_ + close) / 2), timeframe="5m",
                 turnover_rate=daily.turnover_rate, prev_close=daily.prev_close,
                 bid=price(close - 0.01), ask=price(close + 0.01),
             ))
@@ -252,7 +252,7 @@ def save_demo_datasets(directory: str | Path) -> tuple[Dataset, Dataset, Dataset
     result: list[Dataset] = []
     for bars, name, symbol, timeframe, filename in (
         (daily, "synthetic_demo_daily_320", "SYNTH001", "daily", "synthetic_demo_daily.csv"),
-        (intraday, "synthetic_demo_intraday_1m_48d", "SYNTH001", "1m", "synthetic_demo_intraday_1m.csv"),
+        (intraday, "synthetic_demo_intraday_5m_48d", "SYNTH001", "5m", "synthetic_demo_intraday_5m.csv"),
         (index, "synthetic_demo_index_daily", "SYNTH_INDEX", "daily", "synthetic_demo_index_daily.csv"),
     ):
         path = target / filename
