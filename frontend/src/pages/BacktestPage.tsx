@@ -103,7 +103,7 @@ export default function BacktestPage() {
         setDatasetId((current) => current || daily.id);
         setStartDate((current) => current || daily.start?.slice(0, 10));
         setEndDate((current) => current || daily.end?.slice(0, 10));
-        const minute = datasetResult.find((item) => item.timeframe === '1m' && item.symbol === daily.symbol);
+        const minute = datasetResult.find((item) => item.timeframe === '5m' && item.symbol === daily.symbol);
         if (minute) setIntradayId((current) => current || minute.id);
         const index = datasetResult.find((item) => item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
         if (index) setIndexId((current) => current || index.id);
@@ -164,7 +164,7 @@ export default function BacktestPage() {
   useEffect(() => { void loadInitial(); }, []);
 
   const selectedDataset = datasets.find((item) => item.id === datasetId);
-  const intradayOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === '1m');
+  const intradayOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === '5m');
   const indexOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
 
   const run = async () => {
@@ -278,21 +278,21 @@ export default function BacktestPage() {
               <Layers3 size={15} />
               <span>
                 漏斗轮动回测：<strong>不再锁定单一标的</strong>，而是每次清仓后按下方选股漏斗（L0→L4）重跑、取当时第一名换票，与模拟盘「清仓后重新选股」口径一致；
-                行情取自本地 universe.db 缓存（双创日线），为日线口径（1 分钟做 T 与 tick 级风控降级）。
+                行情取自本地 universe.db 缓存（双创日线），为日线口径（5 分钟做 T 与 tick 级风控降级）。
               </span>
             </div>
           )}
-          <div className="form-grid backtest-form-grid">
-            <Field label="实验名称" className="span-2"><input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" /></Field>
+          <div className={`form-grid ${mode === 'funnel' ? 'backtest-basics-grid' : 'backtest-form-grid'}`}>
+            <Field label="实验名称" className={mode === 'funnel' ? 'backtest-name-field' : 'span-2'}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" /></Field>
             {mode === 'single' && (
-              <Field label="主数据集" hint="baostock 日线" className="span-2">
+              <Field label="主数据集" hint="quan_parquet / baostock 日线" className="span-2">
                 <select value={datasetId} onChange={(event) => {
                   const next = datasets.find((item) => item.id === event.target.value);
                   setDatasetId(event.target.value);
                   if (next) {
                     setStartDate(next.start?.slice(0, 10));
                     setEndDate(next.end?.slice(0, 10));
-                    const minute = datasets.find((item) => item.timeframe === '1m' && item.symbol === next.symbol);
+                    const minute = datasets.find((item) => item.timeframe === '5m' && item.symbol === next.symbol);
                     if (minute) setIntradayId(minute.id);
                   }
                 }} required>
@@ -301,17 +301,17 @@ export default function BacktestPage() {
                 </select>
               </Field>
             )}
-            {mode === 'funnel' && <div className="span-2"><ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff /></div>}
             <Field label="开始日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={startDate} min={mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined} max={endDate || (mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined)} onChange={(event) => setStartDate(event.target.value)} /></div></Field>
             <Field label="结束日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={endDate} min={startDate || (mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined)} max={mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined} onChange={(event) => setEndDate(event.target.value)} /></div></Field>
-            <Field label="初始资金"><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => setInitialCash(Number(event.target.value))} required /><span>CNY</span></div></Field>
+            <Field label="初始资金" className={mode === 'funnel' ? 'backtest-cash-field' : ''}><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => setInitialCash(Number(event.target.value))} required /><span>CNY</span></div></Field>
             {mode === 'single' && (
               <>
-                <Field label="分钟数据集" hint="腾讯 1 分钟"><select value={intradayId} onChange={(event) => setIntradayId(event.target.value)}><option value="">不使用（日线降级）</option>{intradayOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.timeframe} · {item.source}</option>)}</select></Field>
-                <Field label="指数数据集" hint="baostock 大盘门"><select value={indexId} onChange={(event) => setIndexId(event.target.value)}><option value="">不使用</option>{indexOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)}</option>)}</select></Field>
+                <Field label="5 分钟数据集" hint="腾讯 / quan_parquet 5 分钟"><select value={intradayId} onChange={(event) => setIntradayId(event.target.value)}><option value="">不使用（日线降级）</option>{intradayOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.timeframe} · {item.source}</option>)}</select></Field>
+                <Field label="指数数据集" hint="大盘门（日线）"><select value={indexId} onChange={(event) => setIndexId(event.target.value)}><option value="">不使用</option>{indexOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)}</option>)}</select></Field>
               </>
             )}
           </div>
+          {mode === 'funnel' && <ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff />}
           <button type="button" className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
             <span><Gauge size={15} />交易摩擦与撮合参数</span>{advanced ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
@@ -403,7 +403,7 @@ export default function BacktestPage() {
           <Panel className="data-lineage-panel">
             <div className="data-lineage">
               <div className="lineage-title"><Layers3 size={17} /><div><strong>数据血缘与口径</strong><span>本报告基于后端实际返回的数据元信息</span></div></div>
-              <div className="lineage-tags"><Badge>{String(report.data_info.daily_source || selectedDataset?.source || 'baostock')} 日线</Badge>{intradayId && <Badge tone="indigo">{String(report.data_info.intraday_source || 'tencent')} 1分钟</Badge>}{indexId && <Badge tone="green">指数大盘门</Badge>}{selectedDataset?.is_synthetic && <SyntheticNotice compact />}</div>
+              <div className="lineage-tags"><Badge>{String(report.data_info.daily_source || selectedDataset?.source || 'baostock')} 日线</Badge>{intradayId && <Badge tone="indigo">{String(report.data_info.intraday_source || 'tencent')} 5分钟</Badge>}{indexId && <Badge tone="green">指数大盘门</Badge>}{selectedDataset?.is_synthetic && <SyntheticNotice compact />}</div>
             </div>
             {Object.keys(report.data_info || {}).length > 0 && <div className="data-info-grid">{Object.entries(report.data_info).map(([key, value]) => <div key={key}><span>{key}</span><strong title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
             {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}

@@ -12,6 +12,7 @@ import type {
 } from '../types';
 
 const BOARD_OPTIONS = ['创业板', '科创板'] as const;
+const LIST_PREVIEW_LIMIT = 10;
 
 const defaultConfig: ScreenerConfig = {
   boards: ['创业板', '科创板'],
@@ -66,6 +67,8 @@ export default function ScreenerPage() {
   const [preparing, setPreparing] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
+  const [poolExpanded, setPoolExpanded] = useState(false);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const pollRef = useRef<number | null>(null);
   const pollBusyRef = useRef(false);
 
@@ -554,7 +557,7 @@ export default function ScreenerPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {run.pool.length === 0 ? <TableEmpty colSpan={12} message="本轮无候选：L0 关门或 L1/L2/L3 全部被过滤" /> : run.pool.map((candidate, index) => (
+                  {run.pool.length === 0 ? <TableEmpty colSpan={12} message="本轮无候选：L0 关门或 L1/L2/L3 全部被过滤" /> : (poolExpanded ? run.pool : run.pool.slice(0, LIST_PREVIEW_LIMIT)).map((candidate, index) => (
                     <tr key={candidate.code} className={candidate.vetoed_by ? 'screener-row-vetoed' : ''}>
                       <td><strong className="round-id">{String(index + 1).padStart(2, '0')}</strong></td>
                       <td><strong title={candidate.code}>{displaySymbol(candidate.code)}</strong></td>
@@ -600,6 +603,14 @@ export default function ScreenerPage() {
                 </tbody>
               </table>
             </div>
+            {run.pool.length > LIST_PREVIEW_LIMIT && (
+              <div className="screener-pool-more">
+                <span>候选池共 {run.pool.length} 只，默认展示前 {LIST_PREVIEW_LIMIT} 只</span>
+                <button className="text-button" onClick={() => setPoolExpanded(!poolExpanded)}>
+                  {poolExpanded ? '收起列表' : `展开全部 ${run.pool.length} 只`}
+                </button>
+              </div>
+            )}
             <div className="screener-pool-footnote">
               <span><i className="screener-dot green" />可用 = 已通过 L4 财务深筛，可进入轮动池</span>
               <span><i className="screener-dot red" />被否 = L4 财务深筛否决（原因见状态列）</span>
@@ -620,7 +631,7 @@ export default function ScreenerPage() {
           <table>
             <thead><tr><th>运行时间</th><th>as_of</th><th>L0 门</th><th className="num">可用数</th><th>第一名</th><th>操作</th></tr></thead>
             <tbody>
-              {history.length === 0 ? <TableEmpty colSpan={6} message="暂无历史运行，点击「运行选股」开始第一轮" /> : history.map((item) => (
+              {history.length === 0 ? <TableEmpty colSpan={6} message="暂无历史运行，点击「运行选股」开始第一轮" /> : (historyExpanded ? history : history.slice(0, LIST_PREVIEW_LIMIT)).map((item) => (
                 <tr key={item.id} className={run?.id === item.id ? 'screener-history-current' : ''}>
                   <td><strong>{dateTime(item.created_at)}</strong><small className="cell-code">{item.id}</small></td>
                   <td>{shortDate(item.as_of)}</td>
@@ -648,6 +659,14 @@ export default function ScreenerPage() {
             </tbody>
           </table>
         </div>
+        {history.length > LIST_PREVIEW_LIMIT && (
+          <div className="screener-pool-more">
+            <span>历史运行共 {history.length} 次，默认展示最近 {LIST_PREVIEW_LIMIT} 次</span>
+            <button className="text-button" onClick={() => setHistoryExpanded(!historyExpanded)}>
+              {historyExpanded ? '收起列表' : `展开全部 ${history.length} 次`}
+            </button>
+          </div>
+        )}
       </Panel>
 
       <div className="screener-disclosure">

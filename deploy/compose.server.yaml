@@ -15,13 +15,21 @@ services:
     ports:
       - "${HOST_PORT:-3011}:3000"
     environment:
-      # 后端数据落卷；行情缓存随卷持久化，避免重启重复拉取 baostock/腾讯
+      # 后端数据落卷；行情缓存随卷持久化，避免重启重复拉取行情
       WB_DATA_DIR: /data
       WB_DB_PATH: /data/app.db
+      # 历史日线/指数/5分钟从 quan_quant parquet 只读目录读取（服务器已同步 /srv/data/quan/history）
+      WB_QUAN_DATA_DIR: /data/quan/history
+      # 交易日历（同花顺 fuyao，含未来交易日）：判断周末/节假日是否轮询。
+      # 也可把 key 写到数据卷 /data/fuyao_api_key（无需重建容器即可生效）。
+      FUYAO_API_KEY: ${FUYAO_API_KEY:-}
+      TZ: Asia/Shanghai
       UVICORN_HOST: 127.0.0.1
       UVICORN_PORT: 8010
     volumes:
       - layerlab-data:/data
+      # quan_quant 只读数据（daily/adj_factor/index_daily/5分钟），不写回
+      - /srv/data/quan:/data/quan:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
       interval: 30s
