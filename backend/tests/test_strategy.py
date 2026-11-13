@@ -104,6 +104,23 @@ def test_account_track_includes_t_net_spread():
     assert requests[0].side == "SELL"
 
 
+def test_same_intraday_bar_is_only_evaluated_once():
+    """live-tick 在同一根已收盘 5 分钟 K 线上重复轮询时，不能重复累加确认计数。"""
+    account = funded_account()
+    strategy = LayeredTStrategy(account.config)
+    history = [daily(i, 11.2, low=10.64, volume=1_000) for i in range(5)]
+    bar = daily(6, 11.2)
+    bar.timestamp = bar.timestamp.replace(hour=10, minute=5)
+    calls: list[Bar] = []
+    strategy._risk_requests = lambda *args, **kwargs: calls.append(args[1]) or []  # type: ignore[method-assign]
+
+    strategy.on_intraday(history, [bar], bar, account)
+    strategy.on_intraday(history, [bar], bar, account)
+
+    assert calls == [bar]
+    assert strategy.last_intraday_timestamp == bar.timestamp
+
+
 def test_armed_disables_t_entry():
     account = funded_account()
     strategy = LayeredTStrategy(account.config)
@@ -119,3 +136,240 @@ def test_armed_disables_t_entry():
     tick.ask = 11.21
     tick.timestamp = tick.timestamp.replace(hour=10, minute=0)
     assert strategy.on_intraday(history, [tick], tick, account) == []
+
+
+# ---------------------------------------------------------------------------
+# 尾盘首仓（14:30–14:50，下一根 5 分钟 K 撮合）
+# ---------------------------------------------------------------------------
+
+
+def intraday_bar(hour: int, minute: int, close: float = 10.0, day: int = 6) -> Bar:
+    bar = daily(day, close)
+    return bar.__class__(
+        timestamp=bar.timestamp.replace(hour=hour, minute=minute), symbol=bar.symbol,
+        open=bar.open, high=bar.high, low=bar.low, close=bar.close,
+        volume=bar.volume, amount=bar.amount, prev_close=bar.prev_close,
+    )
+
+
+def index_series(*, falling: bool = True, count: int = 21) -> list[Bar]:
+    """21 根严格早于当日的指数日线；falling 时 20 日收益 < 0（大盘门开门）。"""
+    start = datetime(2024, 12, 1)
+    closes = [110.0 - index for index in range(count)] if falling else [
+        100.0 + index for index in range(count)
+    ]
+    return [
+        Bar(timestamp=start + timedelta(days=index), symbol="INDEX",
+            open=close, high=close + 1, low=close - 1, close=close,
+            volume=1_000, amount=100_000)
+        for index, close in enumerate(closes)
+    ]
+
+
+def flat_account() -> BrokerAccount:
+    return BrokerAccount(4_000_000, StrategyConfig(slippage_bps=0, volume_participation=1.0))
+
+
+def test_tail_entry_buys_between_1430_and_1450():
+    account = flat_account()
+    strategy = LayeredTStrategy(account.config)
+    bar = intraday_bar(14, 35)
+    requests = strategy.on_intraday(
+        [daily(1, 10.0)], [bar], bar, account, index_history=index_series(),
+    )
+    assert len(requests) == 1
+    assert requests[0].side == "BUY" and requests[0].purpose == "PERMANENT"
+    assert requests[0].reason == "尾盘首笔"
+    assert requests[0].execution_mode == "NEXT_BAR"
+    assert requests[0].quantity == 10_000  # 10万 / 10元 / 100 * 100
+    assert strategy.entry_submitted_date == bar.date
+
+
+def test_tail_entry_window_is_1430_inclusive_1450_exclusive():
+    for hour, minute in ((14, 0), (14, 29), (14, 50), (14, 55), (15, 0)):
+        account = flat_account()
+        strategy = LayeredTStrategy(account.config)
+        bar = intraday_bar(hour, minute)
+        assert strategy.on_intraday(
+            [daily(1, 10.0)], [bar], bar, account, index_history=index_series(),
+        ) == [], f"{hour:02d}:{minute:02d} 不应发尾盘首仓"
+        assert strategy.entry_submitted_date is None
+
+    account = flat_account()
+    strategy = LayeredTStrategy(account.config)
+    bar = intraday_bar(14, 30)
+    assert len(strategy.on_intraday(
+        [daily(1, 10.0)], [bar], bar, account, index_history=index_series(),
+    )) == 1
+
+
+def test_tail_entry_respects_index_gate():
+    account = flat_account()
+    strategy = LayeredTStrategy(account.config)
+    bar = intraday_bar(14, 35)
+    # 指数 20 日收益 > 0 → 大盘门关门，不发首仓
+    assert strategy.on_intraday(
+        [daily(1, 10.0)], [bar], bar, account, index_history=index_series(falling=False),
+    ) == []
+    assert strategy.entry_submitted_date is None
+
+
+def test_tail_entry_uses_only_prior_day_index_bars():
+    """盘中不能用当日尚未收盘的指数日线（避免未来函数）。"""
+    account = flat_account()
+    strategy = LayeredTStrategy(account.config)
+    bar = intraday_bar(14, 35)
+    same_day = Bar(timestamp=bar.timestamp.replace(hour=0, minute=0), symbol="INDEX",
+                   open=50, high=51, low=49, close=50, volume=1_000, amount=100_000)
+    history = index_series(falling=True) + [same_day]
+    assert len(strategy.on_intraday(
+        [daily(1, 10.0)], [bar], bar, account, index_history=history,
+    )) == 1
+
+
+def test_tail_entry_submitted_once_per_day():
+    account = flat_account()
+    strategy = LayeredTStrategy(account.config)
+    first = intraday_bar(14, 35)
+    second = intraday_bar(14, 40)
+    assert len(strategy.on_intraday(
+        [daily(1, 10.0)], [first], first, account, index_history=index_series(),
+    )) == 1
+    assert strategy.on_intraday(
+        [daily(1, 10.0)], [second], second, account, index_history=index_series(),
+    ) == []
+
+
+def test_daily_signal_does_not_repeat_first_buy_after_tail_entry():
+    """同日尾盘已发首仓后，15:00 日终信号不能再发一笔首仓。"""
+    account = flat_account()
+    strategy = LayeredTStrategy(account.config)
+    bar = intraday_bar(14, 35)
+    assert len(strategy.on_intraday(
+        [daily(1, 10.0)], [bar], bar, account, index_history=index_series(),
+    )) == 1
+    assert strategy.on_daily(
+        [daily(6, 10.0)], index_series(), account, 6, True,
+    ) == []
+
+
+def test_tail_entry_does_not_touch_t_orders_after_sequence_started():
+    """序列已开（≥1 笔）时尾盘不建首仓，做 T 逻辑口径不变。"""
+    account = funded_account()  # sequence_index = 4
+    strategy = LayeredTStrategy(account.config)
+    bar = intraday_bar(14, 35, close=11.2)
+    bar.turnover_rate = 0.05
+    bar.bid = 11.19
+    bar.ask = 11.21
+    requests = strategy.on_intraday(
+        [daily(index, 11.2) for index in range(5)], [bar], bar, account,
+        index_history=index_series(),
+    )
+    assert all(item.reason != "尾盘首笔" for item in requests)
+
+
+# ---------------------------------------------------------------------------
+# 尾盘加仓（14:30–14:50，与日线加仓共用信号口径）
+# ---------------------------------------------------------------------------
+
+
+def held_account(price: float = 10.0, quantity: int = 1_000) -> BrokerAccount:
+    """已建首仓的账户：永久仓 1000 股 @10，sequence_index=1。"""
+    account = BrokerAccount(4_000_000, StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    account.new_day("2025-01-06")
+    account.submit(OrderRequest(symbol="TEST", side="BUY", quantity=quantity, execution_mode="NEXT_BAR"))
+    fill_bar = daily(5, price)
+    fill_bar.timestamp = fill_bar.timestamp.replace(hour=9, minute=35)
+    account.process_bar(fill_bar, modes={"NEXT_BAR"})
+    assert account.sequence_index == 1
+    return account
+
+
+def add_history() -> list[Bar]:
+    """前 5 根日线：低位横盘，其中一根高点 12（用于触发浮盈右侧回撤）。"""
+    history = [daily(index, 10.0, low=10.4) for index in range(1, 6)]
+    history[2].high = 12.0
+    return history
+
+
+def tail_add_bar(hour: int = 14, minute: int = 35, close: float = 10.9) -> Bar:
+    bar = intraday_bar(hour, minute, close=close)
+    bar.open = close
+    bar.high = close
+    bar.low = close
+    return bar
+
+
+def make_add_strategy(account: BrokerAccount) -> LayeredTStrategy:
+    strategy = LayeredTStrategy(account.config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    return strategy
+
+
+def test_tail_add_buys_between_1430_and_1450():
+    account = held_account()
+    strategy = make_add_strategy(account)
+    bar = tail_add_bar()
+    requests = strategy.on_intraday(
+        add_history(), [bar], bar, account, index_history=index_series(), session_index=1,
+    )
+    assert len(requests) == 1
+    assert requests[0].side == "BUY" and requests[0].purpose == "PERMANENT"
+    assert requests[0].reason == "浮盈右侧回撤5%"
+    assert requests[0].execution_mode == "NEXT_BAR"
+    assert requests[0].quantity == 9_100  # 10万 / 10.9 / 100 * 100
+    assert strategy.add_submitted_date == bar.date
+
+
+def test_tail_add_requires_one_session_gap():
+    account = held_account()
+    strategy = make_add_strategy(account)
+    bar = tail_add_bar()
+    assert strategy.on_intraday(
+        add_history(), [bar], bar, account, session_index=0,
+    ) == []
+    assert strategy.add_submitted_date is None
+
+
+def test_tail_add_window_is_1430_inclusive_1450_exclusive():
+    for hour, minute in ((14, 0), (14, 29), (14, 50), (15, 0)):
+        account = held_account()
+        strategy = make_add_strategy(account)
+        bar = tail_add_bar(hour, minute)
+        assert strategy.on_intraday(
+            add_history(), [bar], bar, account, session_index=1,
+        ) == [], f"{hour:02d}:{minute:02d} 不应发尾盘加仓"
+        assert strategy.add_submitted_date is None
+
+
+def test_tail_add_submitted_once_per_day():
+    account = held_account()
+    strategy = make_add_strategy(account)
+    first = tail_add_bar(14, 35)
+    assert len(strategy.on_intraday(add_history(), [first], first, account, session_index=1)) == 1
+    second = tail_add_bar(14, 40)
+    assert strategy.on_intraday(add_history(), [second], second, account, session_index=1) == []
+
+
+def test_daily_signal_does_not_repeat_add_after_tail_add():
+    """同日尾盘已发加仓后，15:00 日终信号不能再发一笔加仓。"""
+    account = held_account()
+    strategy = make_add_strategy(account)
+    bar = tail_add_bar()
+    assert len(strategy.on_intraday(add_history(), [bar], bar, account, session_index=1)) == 1
+    today_daily = daily(6, 10.9, low=10.9)
+    today_daily.high = 10.9
+    assert strategy.on_daily(add_history() + [today_daily], [], account, 1, True) == []
+
+
+def test_daily_add_still_works_without_intraday():
+    """无盘中数据时，日线加仓路径保持原有 NEXT_OPEN 口径。"""
+    account = held_account()
+    strategy = make_add_strategy(account)
+    today_daily = daily(6, 10.9, low=10.9)
+    today_daily.high = 10.9
+    requests = strategy.on_daily(add_history() + [today_daily], [], account, 1, False)
+    assert len(requests) == 1
+    assert requests[0].reason == "浮盈右侧回撤5%"
+    assert requests[0].execution_mode == "NEXT_OPEN"

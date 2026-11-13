@@ -94,6 +94,45 @@ def test_zero_fee_config_produces_no_fees():
     assert account.total_fees == 0.0
 
 
+def test_position_buy_fee_is_tracked_and_average_cost_includes_it():
+    """持仓成本含买入手续费；buy_fee 随卖出按比例递减，清仓归零。"""
+    account = BrokerAccount(100_000, config())
+    account.new_day("2025-01-01")
+    account.submit(request(quantity=200))
+    buy = account.process_bar(make_bar(1, 10))[0]
+    fee = buy.total_fee
+    data = account.position("TEST").public_dict()
+    assert data["total_cost"] == pytest.approx(2000 + fee)
+    assert data["average_cost"] == pytest.approx(round((2000 + fee) / 200, 2))
+    assert data["buy_fee"] == fee
+
+    account.new_day("2025-01-02")
+    account.submit(request("SELL", 100))
+    account.process_bar(make_bar(2, 10))
+    half = account.position("TEST").public_dict()
+    assert half["buy_fee"] == pytest.approx(round(fee / 2, 2))   # 按剩余股数分摊
+    assert half["average_cost"] == pytest.approx(round((2000 + fee) / 200, 2))
+
+    account.new_day("2025-01-03")
+    account.submit(request("SELL", 100))
+    account.process_bar(make_bar(3, 10))
+    assert account.position("TEST").public_dict()["buy_fee"] == 0.0
+
+
+def test_legacy_position_without_fee_fields_backfills_buy_fee():
+    """旧账户 _positions_internal 没有 permanent_fee/t_fee 时，按成交重放补齐。"""
+    account = BrokerAccount(100_000, config())
+    account.new_day("2025-01-01")
+    account.submit(request(quantity=100))
+    account.process_bar(make_bar(1, 10))
+    state = account.to_dict(include_internal=True)
+    for raw in state["_positions_internal"].values():
+        raw.pop("permanent_fee", None)
+        raw.pop("t_fee", None)
+    restored = BrokerAccount.from_dict(state)
+    assert restored.position("TEST").public_dict()["buy_fee"] == 5.06
+
+
 def test_legacy_orders_and_fills_without_new_fee_fields_can_be_restored():
     """旧的落库成交/委托没有经手费、证管费字段，恢复账户时不能报错。"""
     account = BrokerAccount(100_000, config())
@@ -182,6 +221,39 @@ def test_limit_up_buy_cannot_fill():
     account.new_day("2025-01-01")
     account.submit(request())
     assert account.process_bar(make_bar(1, 12)) == []
+
+
+def test_quote_only_symbol_is_not_reported_as_position():
+    """只收到行情、没有任何委托/成交时，账户不能报告持仓；最新价归入 quotes。"""
+    account = BrokerAccount(100_000, config())
+    account.mark("sh.688200", 245.58)
+    state = account.to_dict()
+    assert state["positions"] == []
+    assert state["quotes"] == [{"symbol": "sh.688200", "last_price": 245.58}]
+    assert state["market_value"] == 0.0
+    assert state["equity"] == state["cash"] == 100_000.0
+
+    # 行情缓存随账户持久化：重新加载后仍能显示最新价，但仍不算持仓。
+    restored = BrokerAccount.from_dict(account.to_dict(include_internal=True))
+    restored_state = restored.to_dict()
+    assert restored_state["positions"] == []
+    assert restored_state["quotes"] == [{"symbol": "sh.688200", "last_price": 245.58}]
+
+
+def test_cleared_position_disappears_from_positions_but_keeps_quote():
+    """清仓后持仓行必须消失（不能因残留 last_price 继续显示 0 股持仓）。"""
+    account = BrokerAccount(100_000, config())
+    account.new_day("2025-01-01")
+    account.submit(request(quantity=100))
+    account.process_bar(make_bar(1, 10))
+    assert [item["total_qty"] for item in account.to_dict()["positions"]] == [100]
+
+    account.new_day("2025-01-02")
+    account.submit(request("SELL", 100))
+    account.process_bar(make_bar(2, 11))
+    state = account.to_dict()
+    assert state["positions"] == []
+    assert state["quotes"] == [{"symbol": "TEST", "last_price": 11.0}]
 
 
 def test_position_public_dict_exposes_exact_float_pnl():

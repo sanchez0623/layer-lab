@@ -264,6 +264,10 @@ class Position:
     today_permanent_buy_qty: int = 0
     today_t_buy_qty: int = 0
     last_price: float = 0.0
+    # 当前持仓成本中仍包含的买入手续费（按成本分配口径随卖出递减）。
+    # 新增字段放末尾并带默认值，兼容旧账户的 _positions_internal 反序列化。
+    permanent_fee: float = 0.0
+    t_fee: float = 0.0
 
     @property
     def total_qty(self) -> int:
@@ -287,6 +291,11 @@ class Position:
             return 0.0
         return money((self.permanent_cost + self.t_cost) / self.total_qty)
 
+    @property
+    def buy_fee_in_cost(self) -> float:
+        """当前持仓成本中包含的买入手续费（卖出费用不在此列）。"""
+        return money(self.permanent_fee + self.t_fee)
+
     def public_dict(self) -> dict[str, Any]:
         # 平均成本已按「分」四舍五入，用它反算市值/浮盈会产生系统性误差
         # （如 400 股 × 0.0036 元 = 1.44 元），因此单独给出未除股数的精确成本。
@@ -300,6 +309,7 @@ class Position:
             "permanent_cost": money(self.permanent_cost),
             "total_cost": total_cost,
             "average_cost": self.average_cost,
+            "buy_fee": self.buy_fee_in_cost,
             "t_active_qty": self.t_qty,
             "last_price": price(self.last_price),
             "market_value": market_value,
@@ -335,11 +345,12 @@ STRATEGY_RULES = [
     "浮盈右侧加仓：近期小高点回撤≥5%、不破前三天低点、间隔≥1交易日。",
     "浮亏超跌加仓：曾创新低后出现A3，T日信号，T+1开盘执行，每日最多一笔。",
     "换票日检查指数20日收益；20日跌幅<0时不建立新永久仓。",
+    "首仓：有5分钟数据时在尾盘14:30–14:50发NEXT_BAR市价单（下一根5分钟K撮合，当日仅一笔）；无盘中数据或非尾盘时按收盘信号次日开盘执行。",
     "永久仓价格轨收益≥15%立即清；10%-15%进入Armed，<9.5%解除。",
     "账户轨：(永久仓浮盈+本轮T净价差)≥永久投入成本15%立即清。",
-    "Armed内20日新高且量价背离三选二，连续3根1分钟K线确认后清仓。",
-    "VWAP下方且窗口账户收益回撤4%，连续3根1分钟K线确认后兜底清仓。",
+    "Armed内20日新高且量价背离三选二，连续3根5分钟K线确认后清仓。",
+    "VWAP下方且窗口账户收益回撤4%，连续3根5分钟K线确认后兜底清仓。",
     "止损默认不启用；事件熔断接口保留。",
     "日线无intraday时仅用上一收盘及更早信号，次日开盘执行并明确降级。",
-    "行情接入：baostock历史日线（前复权）+腾讯实时快照/1分钟K线；模拟撮合只读行情，不连接券商。",
+    "行情接入：quan_quant历史日线（前复权）+腾讯实时快照/5分钟K线；模拟撮合只读行情，不连接券商。",
 ]

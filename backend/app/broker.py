@@ -13,6 +13,42 @@ from .trading_rules import (
 )
 
 
+def _replay_buy_fees(fills: Iterable[Fill]) -> tuple[float, float]:
+    """按成交顺序重放，推算当前仍留在持仓成本内的买入手续费。
+
+    仅用于兼容新增 buy_fee 字段之前的旧账户（其 _positions_internal 里没有
+    permanent_fee/t_fee）；新成交会直接累加/分摊，不依赖此函数。
+    """
+    permanent_qty = 0
+    t_qty = 0
+    permanent_fee = 0.0
+    t_fee = 0.0
+    for fill in fills:
+        if fill.side == "BUY":
+            if fill.purpose == "PERMANENT":
+                permanent_qty += fill.quantity
+                permanent_fee += fill.total_fee
+            else:
+                t_qty += fill.quantity
+                t_fee += fill.total_fee
+            continue
+        if fill.purpose == "PERMANENT":
+            if permanent_qty <= 0:
+                continue
+            sold = min(fill.quantity, permanent_qty)
+            allocated = permanent_fee * sold / permanent_qty
+            permanent_qty -= sold
+            permanent_fee = max(0.0, permanent_fee - allocated)
+        else:
+            if t_qty <= 0:
+                continue
+            sold = min(fill.quantity, t_qty)
+            allocated = t_fee * sold / t_qty
+            t_qty -= sold
+            t_fee = max(0.0, t_fee - allocated)
+    return money(permanent_fee), money(t_fee)
+
+
 class BrokerAccount:
     """本地确定性撮合账户，不包含任何行情或券商网络连接。"""
 
@@ -99,12 +135,17 @@ class BrokerAccount:
         return self.positions[symbol]
 
     def new_day(self, date: str, cancel_previous: bool = True) -> None:
-        if cancel_previous and self.current_date and self.current_date != date:
+        is_new_date = self.current_date != date
+        if cancel_previous and self.current_date and is_new_date:
             self.cancel_open_orders("DAY_END")
         self.current_date = date
-        for position in self.positions.values():
-            position.today_permanent_buy_qty = 0
-            position.today_t_buy_qty = 0
+        # 只有真正跨交易日才清零「今日买入」锁定计数。撮合路径每根 K 线都会调用
+        # new_day，若无条件 reset，当日成交后的下一根同日 K 线就会把 T+1 锁定
+        # 抹掉，导致当日买入立刻变为可卖（可卖数量虚高）。
+        if is_new_date:
+            for position in self.positions.values():
+                position.today_permanent_buy_qty = 0
+                position.today_t_buy_qty = 0
 
     def board_rules(self, symbol: str) -> BoardRules:
         """标的对应板块的交易规则；合成标的回退旧口径。"""
@@ -334,10 +375,12 @@ class BrokerAccount:
             if order.purpose == "PERMANENT":
                 position.permanent_qty += quantity
                 position.permanent_cost = money(position.permanent_cost + amount + total_fee)
+                position.permanent_fee = money(position.permanent_fee + total_fee)
                 position.today_permanent_buy_qty += quantity
             else:
                 position.t_qty += quantity
                 position.t_cost = money(position.t_cost + amount + total_fee)
+                position.t_fee = money(position.t_fee + total_fee)
                 position.today_t_buy_qty += quantity
             return 0.0
 
@@ -347,18 +390,22 @@ class BrokerAccount:
             if position.permanent_qty < quantity:
                 raise RuntimeError("永久仓账本可卖数量校验失败")
             cost_allocated = money(position.permanent_cost * quantity / position.permanent_qty)
+            fee_allocated = money(position.permanent_fee * quantity / position.permanent_qty)
             position.permanent_qty -= quantity
             position.permanent_cost = money(max(0.0, position.permanent_cost - cost_allocated))
+            position.permanent_fee = money(max(0.0, position.permanent_fee - fee_allocated))
             realized = money(net_proceeds - cost_allocated)
         else:
             if position.t_qty < quantity or position.permanent_sellable_qty < quantity:
                 raise RuntimeError("T账本或旧仓可卖数量校验失败")
             t_cost_allocated = money(position.t_cost * quantity / position.t_qty)
+            t_fee_allocated = money(position.t_fee * quantity / position.t_qty)
             permanent_cost_before = position.permanent_cost
             # 正T卖出旧仓，同时把等量当日T买入转入永久仓；永久仓原始成本不变。
             position.permanent_qty -= quantity
             position.t_qty -= quantity
             position.t_cost = money(max(0.0, position.t_cost - t_cost_allocated))
+            position.t_fee = money(max(0.0, position.t_fee - t_fee_allocated))
             position.permanent_qty += quantity
             position.permanent_cost = permanent_cost_before
             realized = money(net_proceeds - t_cost_allocated)
@@ -367,6 +414,8 @@ class BrokerAccount:
         if position.total_qty == 0:
             position.permanent_cost = 0.0
             position.t_cost = 0.0
+            position.permanent_fee = 0.0
+            position.t_fee = 0.0
         return realized
 
     def mark(self, symbol: str, last_price: float) -> None:
@@ -375,12 +424,22 @@ class BrokerAccount:
     def to_dict(self, include_internal: bool = False) -> dict:
         from .rotation import rotation_summary  # 延迟导入，避免 broker ↔ rotation 循环依赖
 
+        # positions 只返回**真实持仓**：仅收到行情/挂过被拒委托但未成交时，
+        # 内部 Position 只缓存 last_price，不能算持仓，否则 UI 会出现
+        # 「没订单没成交却有持仓」的幽灵行。行情缓存单独放 quotes。
+        positions = [position for position in self.positions.values() if position.total_qty > 0]
+        quotes = [
+            {"symbol": position.symbol, "last_price": price(position.last_price)}
+            for position in self.positions.values() if position.last_price > 0
+        ]
+
         result = {
             "id": self.id, "name": self.name, "initial_cash": self.initial_cash,
             "cash": self.cash, "available_cash": self.available_cash,
             "equity": self.equity, "market_value": self.market_value,
             "realized_pnl": self.realized_pnl, "total_fees": self.total_fees,
-            "positions": [position.public_dict() for position in self.positions.values() if position.total_qty or position.last_price],
+            "positions": [position.public_dict() for position in positions],
+            "quotes": quotes,
             "orders": [order.to_dict() for order in self.orders],
             "trades": [fill.to_dict() for fill in self.trades],
             "t_net_profit": self.t_net_profit, "sequence_index": self.sequence_index,
@@ -439,6 +498,19 @@ class BrokerAccount:
         }
         account.orders = [Order(**item) for item in data.get("orders", [])]
         account.trades = [Fill(**item) for item in data.get("trades", [])]
+        # 兼容旧账户：_positions_internal 里没有 permanent_fee/t_fee 时按成交重放补齐。
+        raw_positions = data.get("_positions_internal", {})
+        for symbol, raw in raw_positions.items():
+            if "permanent_fee" in raw or "t_fee" in raw:
+                continue
+            position = account.positions.get(symbol)
+            if position is None:
+                continue
+            permanent_fee, t_fee = _replay_buy_fees(
+                fill for fill in account.trades if fill.symbol == symbol
+            )
+            position.permanent_fee = permanent_fee
+            position.t_fee = t_fee
         account._next_order_number = data.get("_next_order_number", len(account.orders) + 1)
         account._next_fill_number = data.get("_next_fill_number", len(account.trades) + 1)
         return account

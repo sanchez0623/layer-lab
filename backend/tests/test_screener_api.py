@@ -172,11 +172,13 @@ def seed_daily(application, tmp_path, symbol: str, closes: list[float]) -> Datas
     return dataset
 
 
-def snapshot_bar(symbol: str = "sh.688200", minute: int = 0, close: float = 245.58) -> Bar:
+def snapshot_bar(
+    symbol: str = "sh.688200", minute: int = 0, close: float = 245.58, hour: int = 10,
+) -> Bar:
     return Bar(
-        timestamp=datetime(2026, 11, 12, 10, minute), symbol=symbol,
+        timestamp=datetime(2026, 11, 12, hour, minute), symbol=symbol,
         open=close, high=close, low=close, close=close,
-        volume=1_000_000.0, amount=close * 1_000_000.0, timeframe="1m",
+        volume=1_000_000.0, amount=close * 1_000_000.0, timeframe="5m",
         prev_close=240.0, bid=close - 0.05, ask=close,
     )
 
@@ -191,7 +193,7 @@ def patch_quotes(monkeypatch, application, *bars: Bar) -> None:
 
     monkeypatch.setattr(application.state.market_service, "fetch_quote", fake_fetch_quote)
     monkeypatch.setattr(
-        application.state.market_service, "fetch_tencent_minutes",
+        application.state.market_service, "fetch_tencent_intraday",
         lambda symbol, count=320: ([], {}),
     )
 
@@ -633,6 +635,173 @@ def test_live_tick_non_current_symbol_does_not_rescreen(api, tmp_path, monkeypat
     rotation = response.json()["rotation"]
     assert rotation["current_symbol"] == "sh.688200"
     assert rotation["last_attempt_date"] is None
+
+
+def test_live_tick_tail_entry_fills_first_position(api, tmp_path, monkeypatch):
+    """尾盘首仓接线：14:30–14:50 的已收盘 5 分钟 K 发 NEXT_BAR 市价单，下一 tick 成交。"""
+    application, client, service = api
+    account = client.post("/api/paper/accounts", json={
+        "name": "尾盘首仓", "initial_cash": 4_000_000, "auto_strategy": True,
+    }).json()
+    seed_live_tick_inputs(application, tmp_path, "sh.688200")
+    intraday = [
+        Bar(timestamp=datetime(2026, 11, 12, 14, 35), symbol="sh.688200",
+            open=245.5, high=245.6, low=245.4, close=245.5,
+            volume=10_000.0, amount=2_455_000.0, timeframe="5m", prev_close=240.0),
+        Bar(timestamp=datetime(2026, 11, 12, 14, 40), symbol="sh.688200",
+            open=245.5, high=245.7, low=245.5, close=245.6,
+            volume=10_000.0, amount=2_456_000.0, timeframe="5m", prev_close=240.0),
+    ]
+    patch_quotes(
+        monkeypatch, application,
+        snapshot_bar(hour=14, minute=40), snapshot_bar(hour=14, minute=45),
+    )
+    monkeypatch.setattr(
+        application.state.market_service, "fetch_tencent_intraday",
+        lambda symbol, count=320: (list(intraday), {}),
+    )
+
+    first = client.post(f"/api/paper/accounts/{account['id']}/live-tick", json={"symbol": "688200"})
+    assert first.status_code == 200, first.text
+    state = first.json()
+    entries = [order for order in state["orders"] if order["reason"] == "尾盘首笔"]
+    assert len(entries) == 1
+    assert entries[0]["execution_mode"] == "NEXT_BAR"
+    assert entries[0]["status"] == "PENDING"
+    assert not [position for position in state["positions"] if position["total_qty"] > 0]
+
+    second = client.post(f"/api/paper/accounts/{account['id']}/live-tick", json={"symbol": "688200"})
+    assert second.status_code == 200, second.text
+    filled = second.json()
+    assert len(filled["trades"]) == 1
+    assert filled["trades"][0]["side"] == "BUY"
+    position = next(item for item in filled["positions"] if item["total_qty"] > 0)
+    # 科创板 step=1：10万 / 245.58 = 407 股（板块感知取整，非旧版 100 股整手）
+    assert position["permanent_qty"] == 407
+    stored = application.state.storage.get_paper(account["id"])
+    assert stored["strategy_state"]["entry_submitted_date"] == "2026-11-12"
+    assert stored["sequence_index"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 后端定时器（替代前端 5 分钟定时器）
+# ---------------------------------------------------------------------------
+
+
+def _today_quote(
+    minute: int = 35, hour: int = 14, close: float = 245.58, symbol: str = "sh.688200",
+) -> Bar:
+    now = datetime.now()
+    return Bar(
+        timestamp=now.replace(hour=hour, minute=minute, second=0, microsecond=0),
+        symbol=symbol, open=close, high=close, low=close, close=close,
+        volume=1_000_000.0, amount=close * 1_000_000.0, timeframe="5m",
+        prev_close=240.0, bid=close - 0.05, ask=close,
+    )
+
+
+def test_paper_scheduler_disabled_in_tests(api):
+    _, client, _ = api
+    payload = client.get("/api/paper/scheduler").json()
+    assert payload["enabled"] is False
+    assert payload["running"] is False
+    assert payload["interval_seconds"] == 300
+    assert payload["trading"]["today"] == datetime.now().date().isoformat()
+
+
+def test_trading_session_prefers_fuyao_calendar(api, monkeypatch):
+    """配置了 fuyao 日历时，交易日判定优先走它（含未来交易日/节假日）。"""
+    application, client, _ = api
+    provider = application.state.fuyao_calendar
+    monkeypatch.setattr(provider, "api_key", "sk-test")
+    monkeypatch.setattr(provider, "_days", None)
+    monkeypatch.setattr(provider, "_day_set", None)
+    today = datetime.now().date().isoformat()
+    next_day = (datetime.now().date() + timedelta(days=3)).isoformat()
+    monkeypatch.setattr(provider, "_fetch", lambda: [today, next_day])
+
+    payload = client.get("/api/trading/session").json()
+    assert payload["source"] == "fuyao_calendar"
+    assert payload["is_trading_day"] is True
+    assert payload["next_trading_day"] == next_day
+
+
+def test_trading_session_endpoint_weekday_fallback(api):
+    """未接入 quan 日历时回落工作日启发式，并给出下一个交易日。"""
+    _, client, _ = api
+    payload = client.get("/api/trading/session").json()
+    today = datetime.now().date()
+    assert payload["today"] == today.isoformat()
+    assert payload["source"] == "weekday_fallback"
+    assert payload["is_trading_day"] == (today.weekday() < 5)
+    next_day = datetime.strptime(payload["next_trading_day"], "%Y-%m-%d").date()
+    assert next_day > today
+    assert next_day.weekday() < 5
+    assert "in_session" in payload
+
+
+def test_scheduler_run_once_drives_auto_account(api, tmp_path, monkeypatch):
+    application, client, service = api
+    datasets = seed_live_tick_inputs(application, tmp_path, "sh.688200")
+    account = client.post("/api/paper/accounts", json={
+        "name": "定时账户", "initial_cash": 4_000_000, "auto_strategy": True,
+        "dataset_id": datasets["sh.688200"].id,
+    }).json()
+    quote = _today_quote()
+    intraday = [_today_quote(minute=30)]
+    monkeypatch.setattr(application.state.market_service, "fetch_quote", lambda symbol: ({}, quote))
+    monkeypatch.setattr(
+        application.state.market_service, "fetch_tencent_intraday",
+        lambda symbol, count=320: (intraday, {}),
+    )
+    # 日线落后于当日的刷新走网络；用异常让它静默降级，保证测试不联网。
+    monkeypatch.setattr(
+        application.state.market_service, "fetch_history_bundle",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("offline")),
+    )
+
+    result = client.post("/api/paper/scheduler/run").json()
+    assert any(account["id"] in item for item in result["ticked"]), result
+    stored = application.state.storage.get_paper(account["id"])
+    assert stored["strategy_state"]["entry_submitted_date"] == datetime.now().date().isoformat()
+
+    # 休市/节假日腾讯返回上一交易日快照 → 定时器必须跳过，不推进账户。
+    stale = _today_quote()
+    stale.timestamp = stale.timestamp.replace(year=2026, month=11, day=12)
+    monkeypatch.setattr(application.state.market_service, "fetch_quote", lambda symbol: ({}, stale))
+    result = client.post("/api/paper/scheduler/run").json()
+    assert any(item.endswith("not-today") for item in result["skipped"]), result
+    assert "ticked" in result and result["ticked"] == []
+
+
+def test_stale_daily_dataset_refreshed_once_per_day(api, tmp_path, monkeypatch):
+    """日线数据集落后于当日时，每个标的每天只刷新一次（session_index 依赖它推进）。"""
+    application, client, service = api
+    datasets = seed_live_tick_inputs(application, tmp_path, "sh.688200")
+    stored = {item.symbol: item for item in application.state.storage.list_datasets()}
+    account = client.post("/api/paper/accounts", json={
+        "name": "刷新账户", "initial_cash": 4_000_000, "auto_strategy": True,
+        "dataset_id": datasets["sh.688200"].id,
+    }).json()
+    calls: list[str] = []
+
+    def fake_bundle(symbol, start_date=None, end_date=None, include_intraday=True):
+        calls.append(symbol)
+        return {"daily": stored["sh.688200"], "index": stored["sz.399006"]}
+
+    monkeypatch.setattr(application.state.market_service, "fetch_history_bundle", fake_bundle)
+    monkeypatch.setattr(
+        application.state.market_service, "fetch_quote",
+        lambda symbol: ({}, _today_quote()),
+    )
+    monkeypatch.setattr(
+        application.state.market_service, "fetch_tencent_intraday",
+        lambda symbol, count=320: ([], {}),
+    )
+
+    client.post("/api/paper/scheduler/run")
+    client.post("/api/paper/scheduler/run")
+    assert calls == ["sh.688200"], calls
 
 
 def test_fresh_rotation_account_does_not_rescreen_before_first_round(api, tmp_path, monkeypatch):
