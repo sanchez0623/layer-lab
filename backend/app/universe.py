@@ -441,6 +441,44 @@ class UniverseStore:
                     result[str(row["code"])].append(self._bar_from_payload(row, str(row["code"])))
         return result
 
+    def list_trade_dates(
+        self, codes: Sequence[str], *, start: str | None = None, end: str | None = None,
+    ) -> list[str]:
+        """窗口内这些代码出现过日线的 distinct 交易日（升序）。
+
+        与 QuanStore.list_trade_dates 同名同语义：漏斗轮动回测构建交易日时间线用，
+        只查 distinct 日期，不构建 Bar 对象，避免全池日线驻留内存。
+        """
+        unique = [str(code) for code in dict.fromkeys(codes or [])]
+        if not unique:
+            return []
+        placeholders = ",".join("?" for _ in unique)
+        sql = f"SELECT DISTINCT date FROM universe_daily WHERE code IN ({placeholders})"
+        params: list[Any] = list(unique)
+        if start:
+            sql += " AND date >= ?"
+            params.append(str(start)[:10])
+        if end:
+            sql += " AND date <= ?"
+            params.append(str(end)[:10])
+        sql += " ORDER BY date"
+        with self._lock, self._connection() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [str(row["date"]) for row in rows if row["date"]]
+
+    def count_codes_with_daily(self, codes: Sequence[str]) -> int:
+        """这些代码里在日线表中至少有一根 K 线的数量（仅计数，不驻留 Bar）。"""
+        unique = [str(code) for code in dict.fromkeys(codes or [])]
+        if not unique:
+            return 0
+        placeholders = ",".join("?" for _ in unique)
+        with self._lock, self._connection() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(DISTINCT code) FROM universe_daily WHERE code IN ({placeholders})",
+                unique,
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     @staticmethod
     def _bar_from_payload(row: Any, code: str) -> Bar:
         return Bar(

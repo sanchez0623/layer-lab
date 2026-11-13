@@ -567,6 +567,50 @@ class QuanStore:
     def load_history(self, codes: Sequence[str], max_rows: int = 260) -> dict[str, list[Bar]]:
         return self.load_bars(codes, max_rows=max_rows)
 
+    def list_trade_dates(
+        self, codes: Sequence[str], *, start: str | None = None, end: str | None = None,
+    ) -> list[str]:
+        """窗口内这些代码出现过日线的 distinct 交易日（升序）。
+
+        只 select 日期列并下推 code/date 过滤，避免把全量日线读进内存构建 Bar 对象
+        （2G ECS 上全池 52 万根 Bar 会 OOM）。供漏斗轮动回测构建交易日时间线。
+        """
+        pure_codes: list[str] = []
+        for raw in codes or []:
+            try:
+                pure_codes.append(pure_code(raw))
+            except ValueError:
+                continue
+        if not pure_codes:
+            return []
+        pl = self._pl
+        lf = pl.scan_parquet(self.daily_path).filter(pl.col("code").is_in(pure_codes))
+        if start:
+            lf = lf.filter(pl.col("date") >= str(start)[:10])
+        if end:
+            lf = lf.filter(pl.col("date") <= str(end)[:10])
+        frame = lf.select(pl.col("date")).unique().sort("date").collect()
+        return [str(value)[:10] for value in frame["date"].to_list() if value]
+
+    def count_codes_with_daily(self, codes: Sequence[str]) -> int:
+        """这些代码里在日线库中至少有一根 K 线的数量（仅计数，不驻留 Bar）。"""
+        pure_codes: list[str] = []
+        for raw in codes or []:
+            try:
+                pure_codes.append(pure_code(raw))
+            except ValueError:
+                continue
+        if not pure_codes:
+            return 0
+        pl = self._pl
+        frame = (
+            pl.scan_parquet(self.daily_path)
+            .filter(pl.col("code").is_in(pure_codes))
+            .select(pl.col("code").unique())
+            .collect()
+        )
+        return int(frame.height)
+
     def load_series(
         self,
         code: str,

@@ -355,36 +355,57 @@ class FunnelRotationBacktest:
     # -- 数据准备 ---------------------------------------------------------
 
     def _prepare_data(self) -> None:
-        """一次性读入 universe.db 缓存（不联网、不打 baostock）。"""
+        """读入候选清单、板块指数与交易日时间线（不联网、不打 baostock）。
+
+        内存关键：不再一次性把全池候选的日线读进 self.history（2G ECS 上全池
+        52 万根 Bar 会 OOM）。选股由 run_screener 自己按需 load；持仓标的与
+        buy_hold 参照改为用时单标的 load（见 _bars_for / _load_bars）。这里只
+        保留候选元数据、指数日线与 distinct 交易日时间线，均为轻量对象。
+        """
         if self.store.latest_trade_date() is None:
             raise ValueError("universe 日线缓存为空，请先在选股页刷新数据")
         self.candidates = self.store.list_codes(self.screener_config.boards)
         self.name_by_code = {row.code: row.name for row in self.candidates}
         self.board_by_code = {row.code: row.board for row in self.candidates}
         codes = [row.code for row in self.candidates]
-        self.history: dict[str, list[Bar]] = (
-            self.store.load_history(codes, max_rows=260) if codes else {}
-        )
-        self.codes_with_daily = [code for code in codes if self.history.get(code)]
-        if not self.codes_with_daily:
-            raise ValueError("universe 日线缓存为空，请先在选股页刷新数据")
         # 板块指数（L0 门 + 策略大盘门）
         self.index_history: dict[str, list[Bar]] = {}
         for board in self.screener_config.boards:
             index_code = BOARD_INDEX[board]
             self.index_history[board] = self.store.load_index(index_code, max_rows=260)
-        # 全局交易日时间线：所有候选日线日期的并集 ∩ [start_date, end_date]
-        dates: set[str] = set()
-        for code in self.codes_with_daily:
-            for bar in self.history[code]:
-                if self.start_date and bar.timestamp.date() < self.start_date:
-                    continue
-                if self.end_date and bar.timestamp.date() > self.end_date:
-                    continue
-                dates.add(bar.date)
-        self.timeline = sorted(dates)
-        if not self.timeline:
-            raise ValueError("指定日期范围内没有日线")
+        # 全局交易日时间线：候选出现过日线的 distinct 日期 ∩ [start_date, end_date]
+        # （轻量：只查日期列，不构建 Bar 对象）。
+        timeline = self.store.list_trade_dates(
+            codes, start=self.start_date.isoformat() if self.start_date else None,
+            end=self.end_date.isoformat() if self.end_date else None,
+        )
+        self.timeline = sorted(set(timeline))
+        # 有日线的候选数（供报告展示；仅计数，不驻留 Bar）。
+        self.codes_with_daily = self.store.count_codes_with_daily(codes)
+        if not self.codes_with_daily or not self.timeline:
+            raise ValueError("universe 日线缓存为空，请先在选股页刷新数据")
+        # 持仓标的日线惰性缓存：任意时刻最多驻留一只标的的历史。
+        self._held_code: str | None = None
+        self._held_bars: list[Bar] = []
+
+    def _load_bars(self, code: str) -> list[Bar]:
+        """单标的日线（最近 260 根）；供持仓回放与 buy_hold 参照按需加载。
+
+        与改造前一致取 max_rows=260（tail 最近 N 根），窗口裁剪由 timeline 与
+        buy_hold 处的日期过滤负责，这里不额外按 start/end 截断。
+        """
+        return self.store.load_history([code], max_rows=260).get(code, [])
+
+    def _bars_for(self, code: str | None) -> list[Bar]:
+        """当前持仓标的的日线，带单条目缓存（换票时自然替换）。"""
+        if not code:
+            return []
+        if self._held_code == code:
+            return self._held_bars
+        bars = self._load_bars(code)
+        self._held_code = code
+        self._held_bars = bars
+        return bars
 
     # -- 与 BacktestEngine 一致的轮次记账 --------------------------------
 
@@ -538,7 +559,7 @@ class FunnelRotationBacktest:
                 self._round_just_closed = False
             if current_symbol is not None:
                 self.strategy.start_day(False)
-                bars = self.history.get(current_symbol, [])
+                bars = self._bars_for(current_symbol)
                 bar = next((item for item in bars if item.date == date_str), None)
                 if bar is not None:
                     fills = self.account.process_bar(bar, modes={"NEXT_OPEN"})
@@ -655,9 +676,10 @@ class FunnelRotationBacktest:
         reference = self.rounds[0]["symbol"] if self.rounds else None
         buy_hold_return = 0.0
         reference_symbol = None
-        if reference and self.history.get(reference):
+        reference_bars = self._bars_for(reference) if reference else []
+        if reference and reference_bars:
             bars = [
-                item for item in self.history[reference]
+                item for item in reference_bars
                 if self.timeline[0] <= item.date <= self.timeline[-1]
             ]
             if bars:
@@ -682,7 +704,7 @@ class FunnelRotationBacktest:
         screening_count = len(self._trail)
         data_info = {
             "mode": "funnel_rotation", "boards": list(self.screener_config.boards),
-            "universe_codes": len(self.candidates), "codes_with_daily": len(self.codes_with_daily),
+            "universe_codes": len(self.candidates), "codes_with_daily": self.codes_with_daily,
             "daily_timeframe": "daily", "intraday_rows": 0, "index_rows": sum(
                 len(item) for item in self.index_history.values()
             ),
