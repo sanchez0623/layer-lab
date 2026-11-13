@@ -8,7 +8,53 @@ import { cleanSymbolInput, dateTime, displaySymbol, integer, lower, money, numbe
 import FeeConfigPanel from '../components/FeeConfigPanel';
 import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { AccountState, BoardRules, Dataset, FeeConfig, OrderSide, OrderType, RotationPoolItem, StrategyConfig, TradingRulesResponse } from '../types';
+import type { AccountState, BoardRules, Dataset, FeeConfig, OrderPurpose, OrderSide, OrderType, PositionQuote, RotationPoolItem, SchedulerStatus, StrategyConfig, TradingRulesResponse, TradingSession } from '../types';
+
+const POOL_PREVIEW_LIMIT = 10;
+
+// 自动同步窗口（本地时间）：09:25 起、15:30 停（收盘后不再轮询）。
+// 后端定时器本身只在 09:30–11:30 / 13:00–15:00 成交推进；15:30 留出收尾观察期。
+const AUTO_SYNC_START_MINUTES = 9 * 60 + 25;
+const AUTO_SYNC_END_MINUTES = 15 * 60 + 30;
+const AUTO_SYNC_INTERVAL_MS = 15000;
+
+const minutesOfDay = (date: Date): number => date.getHours() * 60 + date.getMinutes();
+
+const localDateText = (date: Date): string =>
+  `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+
+/** 当前是否处于「页面自动同步」时段：必须是交易日（后端日历判定）且 09:25–15:30。 */
+const isAutoSyncWindow = (date: Date, isTradingDay: boolean): boolean =>
+  isTradingDay
+  && minutesOfDay(date) >= AUTO_SYNC_START_MINUTES
+  && minutesOfDay(date) < AUTO_SYNC_END_MINUTES;
+
+/**
+ * 到下一次自动同步窗口开始的毫秒数。
+ * 优先用后端给出的 next_trading_day（能跳过节假日）；拿不到时回落到「下一个工作日」。
+ */
+const msUntilAutoSyncResume = (
+  date: Date, isTradingDay: boolean, nextTradingDay: string | null,
+): number => {
+  if (isTradingDay && minutesOfDay(date) < AUTO_SYNC_START_MINUTES) {
+    const todayOpen = new Date(date);
+    todayOpen.setHours(9, 25, 0, 0);
+    return Math.max(1000, todayOpen.getTime() - date.getTime());
+  }
+  if (nextTradingDay) {
+    const target = new Date(`${nextTradingDay}T09:25:00`);
+    if (!Number.isNaN(target.getTime())) {
+      return Math.max(1000, target.getTime() - date.getTime());
+    }
+  }
+  const next = new Date(date);
+  do {
+    next.setDate(next.getDate() + 1);
+  } while (next.getDay() === 0 || next.getDay() === 6);
+  next.setHours(9, 25, 0, 0);
+  return Math.max(1000, next.getTime() - date.getTime());
+};
+const AMOUNT_TIERS = [100_000, 200_000, 300_000, 400_000] as const;
 
 const defaultConfig: StrategyConfig = {
   enable_t: true, commission_rate: 0.00005, min_commission: 5, stamp_tax_rate: 0.0005,
@@ -35,8 +81,17 @@ export default function PaperPage() {
   const [playing, setPlaying] = useState(false);
   const advancingRef = useRef(false);
   const [liveLoading, setLiveLoading] = useState(false);
-  const [livePlaying, setLivePlaying] = useState(false);
+  // 后端定时器状态 + 最近一次页面同步时间：让「成交已发生」在页面上可见。
+  const [scheduler, setScheduler] = useState<SchedulerStatus | null>(null);
+  const [lastSync, setLastSync] = useState('');
+  /** 收盘/非交易时段：自动同步已暂停（不再发起轮询请求）。 */
+  const [autoSyncPaused, setAutoSyncPaused] = useState(false);
+  /** 后端交易日历判定：周末/节假日不轮询。 */
+  const [tradingSession, setTradingSession] = useState<TradingSession | null>(null);
+  // 记录已知成交笔数：轮询发现新增成交时给一条提示，避免「成交了但页面没反应」。
+  const knownTradeCountRef = useRef<number | null>(null);
   const [side, setSide] = useState<OrderSide>('buy');
+  const [purpose, setPurpose] = useState<OrderPurpose>('PERMANENT');
   const [orderType, setOrderType] = useState<OrderType>('market');
   const [symbol, setSymbol] = useState('');
   const [quantity, setQuantity] = useState(100);
@@ -52,6 +107,11 @@ export default function PaperPage() {
   const [rulesLoading, setRulesLoading] = useState(false);
   const [rulesOpen, setRulesOpen] = useState(false);
   const [qtyError, setQtyError] = useState('');
+  const [tierAmount, setTierAmount] = useState<number | null>(null);
+  const [tierNote, setTierNote] = useState('');
+  const [tierError, setTierError] = useState(false);
+  const [tierPicking, setTierPicking] = useState<number | null>(null);
+  const [showAllPool, setShowAllPool] = useState(false);
 
   // 池内轮动（v2）：清仓后重新跑五层选股取当时第一名；live-tick 优先使用当前标的。
   const rotation = account?.rotation ?? null;
@@ -67,6 +127,26 @@ export default function PaperPage() {
       ? [{ symbol: lastScreenFirst.code, name: lastScreenFirst.name, chg20d: lastScreenFirst.chg20d ?? undefined }]
       : [];
 
+  // 持仓表只认真实持仓：后端 positions 已过滤零持仓，这里再兜底一次，
+  // 避免旧后端把「只有最新价」的行情缓存也塞进 positions 时出现 0 股幽灵持仓行。
+  const holdingPositions = useMemo(
+    () => (account?.positions ?? []).filter((position) => position.total_qty > 0),
+    [account],
+  );
+  const heldQtyBySymbol = useMemo(
+    () => new Map(holdingPositions.map((position) => [position.symbol, position.total_qty])),
+    [holdingPositions],
+  );
+  // 行情列表 = 后端 quotes + 仍持仓但旧后端未返回 quotes 的兜底标的。
+  const quoteRows = useMemo<PositionQuote[]>(() => {
+    const rows: PositionQuote[] = [...(account?.quotes ?? [])];
+    const seen = new Set(rows.map((quote) => quote.symbol));
+    for (const position of account?.positions ?? []) {
+      if (!seen.has(position.symbol)) rows.push({ symbol: position.symbol, last_price: position.last_price });
+    }
+    return rows;
+  }, [account]);
+
   const load = async () => {
     setLoading(true);
     setError('');
@@ -77,7 +157,7 @@ export default function PaperPage() {
       setConfig((current) => ({ ...current, ...defaultConfigFromApi }));
       setFees(defaults.fees || strategyToFeeConfig(defaultConfigFromApi));
       const daily = datasetResult.find((item) => item.timeframe === 'daily') || datasetResult[0];
-      if (daily) { setDatasetId((current) => current || daily.id); setSymbol((current) => current || cleanSymbolInput(daily.symbol)); }
+      if (daily) { setDatasetId((current) => current || daily.id); }
       try {
         const current = await api.currentAccount();
         setAccount(current);
@@ -137,16 +217,77 @@ export default function PaperPage() {
     return () => { cancelled = true; };
   }, [rulesCode]);
 
-  // 快捷档位随板块变：科创板按股（200/500/1,000/5,000），创业板/主板按手（1/5/10/50 手）。
-  const quickTiers = useMemo(() => {
-    const rules: BoardRules | null = tradingRules?.rules ?? null;
-    if (!rules) return [];
-    if (rules.board === '科创板') {
-      return [200, 500, 1000, 5000].map((qty) => ({ label: `${integer(qty)}股`, qty }));
+  // 快捷档位改为「金额」：按参考价与板块规则换算成股数，并校验最小申报/递增/单笔上限。
+  const resetTier = () => {
+    setTierAmount(null);
+    setTierNote('');
+    setTierError(false);
+  };
+
+  const applySymbol = (next: string) => {
+    setSymbol(next);
+    resetTier();
+  };
+
+  const referencePriceFor = (code: string) => {
+    const quote = quoteRows.find((item) => cleanSymbolInput(item.symbol) === code && item.last_price > 0);
+    return quote?.last_price ?? 0;
+  };
+
+  const applyAmountTier = async (amount: number) => {
+    const code = cleanSymbolInput(symbol);
+    if (!code) {
+      setTierAmount(null);
+      setTierError(true);
+      setTierNote('请先填写标的代码，再选择快捷金额。');
+      return;
+    }
+    const rules = tradingRules?.rules;
+    if (!rules) {
+      setTierError(true);
+      setTierNote(rulesLoading ? '正在加载交易规则，请稍候再试。' : '交易规则尚未加载，请重新输入 6 位代码。');
+      return;
+    }
+    let reference = 0;
+    if (orderType === 'limit') {
+      reference = Number(limitPrice);
+      if (!Number.isFinite(reference) || reference <= 0) {
+        setTierError(true);
+        setTierNote('限价委托请先填写委托价格，再选择快捷金额。');
+        return;
+      }
+    } else {
+      reference = referencePriceFor(code);
+      if (!reference) {
+        setTierPicking(amount);
+        try {
+          const quote = await api.marketQuote(code);
+          reference = Number(quote.price);
+        } catch {
+          setTierError(true);
+          setTierNote('未获取到最新价：请先拉取实时快照，或切到「限价」填写委托价。');
+          return;
+        } finally {
+          setTierPicking(null);
+        }
+      }
+    }
+    if (!Number.isFinite(reference) || reference <= 0) {
+      setTierError(true);
+      setTierNote('参考价无效，请先拉取实时快照或填写委托价。');
+      return;
     }
     const step = Math.max(1, rules.step);
-    return [1, 5, 10, 50].map((lots) => ({ label: `${lots}手`, qty: lots * step }));
-  }, [tradingRules]);
+    const cap = orderType === 'limit' ? rules.limit_order_cap : rules.market_order_cap;
+    let qty = Math.floor(amount / reference / step) * step;
+    if (qty < rules.min_qty) qty = rules.min_qty;
+    if (cap > 0) qty = Math.min(qty, Math.max(rules.min_qty, Math.floor(cap / step) * step));
+    qty = Math.max(rules.min_qty, Math.floor(qty / step) * step);
+    setQuantity(qty);
+    setTierAmount(amount);
+    setTierError(false);
+    setTierNote(`${amount / 10_000} 万 ≈ ${integer(qty)} 股 · 参考价 ¥${reference.toFixed(2)}${cap > 0 && qty >= cap ? '（已按单笔上限截断）' : ''}`);
+  };
 
   // 实时校验：数量符合板块口径才允许提交，并把具体原因直接展示。
   useEffect(() => {
@@ -202,10 +343,10 @@ export default function PaperPage() {
     return () => window.clearInterval(timer);
   }, [playing, account?.id]);
 
-  const liveTick = async (fromTimer = false) => {
+  const liveTick = async () => {
     const code = liveCode;
     if (!account || code.length !== 6) return;
-    if (!fromTimer) setLiveLoading(true);
+    setLiveLoading(true);
     setError('');
     try {
       const next = await api.liveTick(account.id, code);
@@ -213,17 +354,108 @@ export default function PaperPage() {
       setSuccess('已按腾讯实时快照刷新本地撮合账户。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '腾讯实时行情刷新失败。');
-      if (fromTimer) setLivePlaying(false);
     } finally {
-      if (!fromTimer) setLiveLoading(false);
+      setLiveLoading(false);
     }
   };
 
+  // 成交推进由后端定时器负责（/api/paper/scheduler，交易时段每 5 分钟一轮）；
+  // 页面只负责把结果同步上来，不参与撮合。
+  //
+  // 自动同步窗口：**交易日**（后端 quan 交易日历判定，周末/节假日不轮询）09:25–15:30；
+  // 15:30 收盘后停止发请求，下一个交易日 09:25 自动恢复；标签页隐藏时同样暂停。
+  // 只更新账户数据（委托/成交/持仓/轮动状态），不碰表单与回放等本地状态。
+  const accountId = account?.id;
   useEffect(() => {
-    if (!livePlaying || !account) return;
-    const timer = window.setInterval(() => void liveTick(true), 60000);
-    return () => window.clearInterval(timer);
-  }, [livePlaying, account?.id, liveCode]);
+    if (!accountId) return;
+    let cancelled = false;
+    let inFlight = false;
+    let timer: number | undefined;
+    let session: TradingSession | null = null;
+    let sessionAt = 0;
+    knownTradeCountRef.current = null;
+    // quan 日历是权威数据，当天内可一直用；工作日回落/行情探测可能随开盘变化，
+    // 只缓存 5 分钟（例如节假日 09:25 醒来时还探测不到，09:35 后要重新确认）。
+    const SESSION_TTL_MS = 5 * 60 * 1000;
+
+    const scheduleNext = (delay: number) => {
+      if (cancelled) return;
+      timer = window.setTimeout(() => void run(), delay);
+    };
+
+    const sync = async () => {
+      if (cancelled || inFlight || document.hidden || advancingRef.current) return;
+      inFlight = true;
+      try {
+        const [next, status] = await Promise.all([
+          api.account(accountId),
+          api.scheduler().catch(() => null),
+        ]);
+        if (cancelled) return;
+        const tradeCount = next.trades.length;
+        const known = knownTradeCountRef.current;
+        if (known !== null && tradeCount > known) {
+          const latest = next.trades[tradeCount - 1];
+          setSuccess(`后端已自动成交：${sideLabel(latest.side)} ${integer(latest.quantity)} 股 @ ${money(latest.price)}（${dateTime(latest.timestamp)}），页面已同步。`);
+        }
+        knownTradeCountRef.current = tradeCount;
+        // 内容没变就不 setState，避免 15 秒一次的整页重渲染。
+        setAccount((prev) => (prev && JSON.stringify(prev) === JSON.stringify(next) ? prev : next));
+        if (status) {
+          setScheduler(status);
+          if (status.last_tick_at) setLastSync(status.last_tick_at.slice(11, 19));
+        }
+      } catch {
+        /* 轮询失败静默：下一轮再试，不打断用户操作 */
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    /** 交易日判定：后端 quan 日历优先（能识别节假日），接口失败才回落「周一到周五」。 */
+    const loadSession = async (now: Date): Promise<TradingSession | null> => {
+      const day = localDateText(now);
+      const ttl = session?.source?.includes('calendar') ? Number.POSITIVE_INFINITY : SESSION_TTL_MS;
+      if (session && session.today === day && now.getTime() - sessionAt < ttl) return session;
+      try {
+        session = await api.tradingSession();
+        sessionAt = now.getTime();
+        if (!cancelled) setTradingSession(session);
+      } catch {
+        session = null;
+      }
+      return session;
+    };
+
+    const run = async () => {
+      if (cancelled) return;
+      const now = new Date();
+      const info = await loadSession(now);
+      const tradingNow = info ? info.is_trading_day : now.getDay() >= 1 && now.getDay() <= 5;
+      if (!isAutoSyncWindow(now, tradingNow)) {
+        // 收盘 / 周末 / 节假日：不发任何行情请求，直接睡到下一个交易日 09:25。
+        setAutoSyncPaused(true);
+        scheduleNext(msUntilAutoSyncResume(now, tradingNow, info?.next_trading_day ?? null));
+        return;
+      }
+      setAutoSyncPaused(false);
+      await sync();
+      scheduleNext(AUTO_SYNC_INTERVAL_MS);
+    };
+
+    const onVisible = () => {
+      if (document.hidden) return;
+      if (timer !== undefined) window.clearTimeout(timer);
+      void run();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    void run();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [accountId]);
 
   const createAccount = async () => {
     if (!accountName.trim() || initialCash <= 0) { setError('请填写账户名称，并确保初始资金大于 0。'); return; }
@@ -258,6 +490,28 @@ export default function PaperPage() {
     }
   };
 
+  // 做T目标价差：改完立刻 PATCH 账户 config，下一根K线起的新操作即用新值。
+  const [tSpreadInput, setTSpreadInput] = useState('');
+  const [savingTSpread, setSavingTSpread] = useState(false);
+  const tTargetSpread = account?.config?.t_target_spread ?? defaultConfig.t_target_spread ?? 0.015;
+
+  const saveTTargetSpread = async () => {
+    if (!account) return;
+    const pct = Number(tSpreadInput);
+    if (!Number.isFinite(pct) || pct < 0 || pct > 100) { setError('做T目标价差需为 0–100 之间的百分数。'); return; }
+    setSavingTSpread(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { t_target_spread: pct / 100 });
+      setAccount(next);
+      setTSpreadInput('');
+      setSuccess(`做T目标价差已更新为 ${number(pct, 2)}%，下一根K线起生效。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '做T目标价差更新失败。');
+    } finally {
+      setSavingTSpread(false);
+    }
+  };
+
   const toggleRotation = async () => {
     if (!account) return;
     setTogglingRotation(true);
@@ -284,6 +538,7 @@ export default function PaperPage() {
       const result = await api.placeOrder(account.id, {
         symbol: code, side, order_type: orderType, quantity,
         limit_price: orderType === 'limit' ? Number(limitPrice) : undefined,
+        purpose,
       });
       setAccount(result.account);
       setSuccess(`${sideLabel(side)}委托已提交，状态：${statusLabel(result.order.status)}。`);
@@ -315,7 +570,7 @@ export default function PaperPage() {
       <PageHeader
         eyebrow="EXECUTION / PAPER"
         title="模拟交易"
-        description="接入腾讯 1 分钟实时快照，观察委托、T+1 可卖约束与双账本状态。"
+        description="接入腾讯 5 分钟实时快照，观察委托、T+1 可卖约束与双账本状态。"
         actions={account ? <button className="button secondary" onClick={() => void refreshAccount(account.id)} disabled={loading}><RefreshCw size={15} className={loading ? 'spin' : ''} />刷新账户</button> : undefined}
       />
       {error && <ErrorBanner message={error} onClose={() => setError('')} onRetry={() => void load()} />}
@@ -344,6 +599,39 @@ export default function PaperPage() {
             <Metric label="持仓市值" value={money(account.market_value)} sub={`敞口 ${account.equity ? number(account.market_value / account.equity * 100, 1) : '0.0'}%`} />
             <Metric label="已实现盈亏" value={signedMoney(account.realized_pnl)} tone={account.realized_pnl >= 0 ? 'positive' : 'negative'} sub={`做 T 净贡献 ${signedMoney(account.t_net_profit)}`} />
           </div>
+
+          {account.auto_strategy && (
+            <Panel
+              className="t-config-panel"
+              title="做 T 目标价差"
+              description="T 仓均价上浮该幅度即触发平 T；改动保存后下一根 K 线起的新操作立刻生效，已开仓的 T 仓按新价差重新判定"
+              action={<Badge tone="indigo">即时生效</Badge>}
+            >
+              <div className="t-config-row">
+                <Field label="目标价差（%）" hint={`当前 ${number(tTargetSpread * 100, 2)}%`} className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="0" max="100" step="0.1"
+                      placeholder={number(tTargetSpread * 100, 2)}
+                      value={tSpreadInput}
+                      onChange={(event) => setTSpreadInput(event.target.value)}
+                      disabled={savingTSpread}
+                    />
+                    <span>%</span>
+                  </div>
+                </Field>
+                <button
+                  className="button primary t-spread-save"
+                  onClick={() => void saveTTargetSpread()}
+                  disabled={savingTSpread || tSpreadInput === ''}
+                >
+                  {savingTSpread ? <span className="button-spinner" /> : <Repeat2 size={15} />}
+                  {savingTSpread ? '正在保存' : '保存价差'}
+                </button>
+              </div>
+              <p className="t-config-note">留空表示沿用当前值 {number(tTargetSpread * 100, 2)}%；填入新百分数后点保存。费率等摩擦参数请在费率面板调整。</p>
+            </Panel>
+          )}
 
           <Panel
             className="rotation-panel"
@@ -396,26 +684,14 @@ export default function PaperPage() {
                 )}
                 <div className="rotation-section">
                   <div className="rotation-section-head">
-                    <div>
-                      <strong>最近一次选股结果</strong>
-                      <span className="rotation-section-hint">第 1 名高亮</span>
-                    </div>
+                    <strong>最近一次选股结果</strong>
                     <span className="rotation-section-run">
                       {lastRunId ? `run ${lastRunId}` : '暂无运行'}
                       {typeof lastScreen?.eligible_count === 'number' ? ` · 符合条件 ${integer(lastScreen.eligible_count)} 只` : ''}
                     </span>
                   </div>
-                  {lastScreenFirst && (
-                    <div className="rotation-first">
-                      <span className="rotation-first-rank">第 1 名</span>
-                      <strong>{displaySymbol(lastScreenFirst.code)} <small>{lastScreenFirst.name}</small></strong>
-                      <span className={`rotation-first-chg ${(lastScreenFirst.chg20d ?? 0) >= 0 ? 'positive' : 'negative'}`}>
-                        Chg20D {signedPercent(lastScreenFirst.chg20d)}
-                      </span>
-                    </div>
-                  )}
                   <ol className="rotation-pool-list">
-                    {rotationCandidates.map((item, index) => {
+                    {(showAllPool ? rotationCandidates : rotationCandidates.slice(0, POOL_PREVIEW_LIMIT)).map((item, index) => {
                       const isFirst = index === 0 || item.symbol === lastScreenFirst?.code;
                       return (
                         <li key={item.symbol} className={isFirst ? 'current' : ''}>
@@ -429,6 +705,14 @@ export default function PaperPage() {
                       );
                     })}
                   </ol>
+                  {rotationCandidates.length > POOL_PREVIEW_LIMIT && (
+                    <div className="rotation-pool-more">
+                      <span>共 {integer(rotationCandidates.length)} 只候选，默认仅展示前 {POOL_PREVIEW_LIMIT} 只</span>
+                      <button className="text-button" onClick={() => setShowAllPool(!showAllPool)}>
+                        {showAllPool ? '收起列表' : `展开全部 ${integer(rotationCandidates.length)} 只`}
+                      </button>
+                    </div>
+                  )}
                   {lastScreen?.warnings && lastScreen.warnings.length > 0 && (
                     <div className="rotation-warnings">
                       <AlertTriangle size={13} />
@@ -441,50 +725,99 @@ export default function PaperPage() {
           </Panel>
 
           <div className="paper-top-grid">
-            <Panel className="quote-panel" title="腾讯实时行情" description={currentDataset ? `${currentDataset.name} · ${displaySymbol(currentDataset.symbol)} · ${currentDataset.timeframe}` : '直接读取腾讯快照，无需绑定缓存数据集'} action={<Badge tone="indigo">1 MIN</Badge>}>
+            <Panel className="quote-panel" title="腾讯实时行情" description={currentDataset ? `${currentDataset.name} · ${displaySymbol(currentDataset.symbol)} · ${currentDataset.timeframe}` : '直接读取腾讯快照，无需绑定缓存数据集'} action={<Badge tone="indigo">5 MIN</Badge>}>
               <div className="quote-list">
-                {account.positions.length === 0 ? <EmptyState compact icon={<Activity size={22} />} title="等待实时快照" description="输入标的并拉取腾讯行情后，本地账户会显示最新价；不会用前端行情替代后端状态。" /> : account.positions.map((position) => (
-                  <div className="quote-row" key={position.symbol}><div><strong title={position.symbol}>{displaySymbol(position.symbol)}</strong><span>{position.total_qty > 0 ? `持仓 ${integer(position.total_qty)}` : '最新行情'}</span></div><div><strong>{money(position.last_price)}</strong><span>后端最新价</span></div></div>
-                ))}
+                {quoteRows.length === 0 ? <EmptyState compact icon={<Activity size={22} />} title="等待实时快照" description="输入标的并拉取腾讯行情后，本地账户会显示最新价；不会用前端行情替代后端状态。" /> : quoteRows.map((quote) => {
+                  const heldQty = heldQtyBySymbol.get(quote.symbol) ?? 0;
+                  return (
+                    <div className="quote-row" key={quote.symbol}><div><strong title={quote.symbol}>{displaySymbol(quote.symbol)}</strong><span>{heldQty > 0 ? `持仓 ${integer(heldQty)}` : '最新行情'}</span></div><div><strong>{money(quote.last_price)}</strong><span>后端最新价</span></div></div>
+                  );
+                })}
               </div>
-              <div className="live-controls">
-                <button className="button secondary" disabled={liveLoading || livePlaying || liveCode.length !== 6} onClick={() => void liveTick()}>
-                  {liveLoading ? <span className="button-spinner" /> : <Radio size={16} />}拉取实时快照
-                </button>
-                <button className={`button ${livePlaying ? 'danger-soft' : 'primary'}`} disabled={liveCode.length !== 6} onClick={() => setLivePlaying(!livePlaying)}>
-                  {livePlaying ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}{livePlaying ? '暂停自动刷新' : '每60秒自动刷新'}
-                </button>
+              <div className="quote-controls">
+                <div className="quote-control-group">
+                  <div className="quote-control-head"><strong><Radio size={15} />实时快照</strong><small>腾讯 · 5 分钟</small></div>
+                  <div className="live-controls">
+                    <button className="button secondary" disabled={liveLoading || liveCode.length !== 6} onClick={() => void liveTick()}>
+                      {liveLoading ? <span className="button-spinner" /> : <Radio size={16} />}拉取实时快照
+                    </button>
+                    <Badge tone={autoSyncPaused ? 'neutral' : scheduler?.running ? 'green' : 'neutral'}>
+                      {autoSyncPaused ? '后端自动·已暂停' : scheduler?.running ? '后端自动·运行中' : '后端自动'}
+                    </Badge>
+                  </div>
+                  <div className="quote-control-note">
+                    <Timer size={13} className="note-icon" />
+                    {rotationCurrent ? `轮动当前标的 ${displaySymbol(rotationCurrent)}；` : ''}
+                    {scheduler && !scheduler.enabled
+                      ? '后端定时器未启用，需手动拉取快照'
+                      : autoSyncPaused
+                        ? `${tradingSession && !tradingSession.is_trading_day ? '今日休市' : '已收盘'}，自动同步已暂停${lastSync ? `（最后同步 ${lastSync}）` : ''}${tradingSession?.next_trading_day ? `，${tradingSession.next_trading_day} 09:25 恢复` : '，下一交易日 09:25 恢复'}`
+                        : `成交由后端定时器每 5 分钟推进${lastSync ? `（最近 ${lastSync}）` : ''}，页面每 15 秒自动同步`}
+                  </div>
+                </div>
+                <div className="quote-control-group">
+                  <div className="quote-control-head"><strong><StepForward size={15} />缓存回放</strong><small>批量验证撮合与订单生命周期</small></div>
+                  <div className="playback-controls">
+                    <button className="button secondary" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(1)}><StepForward size={16} />推送 1 根</button>
+                    <button className="button secondary" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(10)}><FastForward size={16} />推送 10 根</button>
+                    <button className={`button ${playing ? 'danger-soft' : 'secondary'}`} disabled={!account.dataset_id} onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}{playing ? '暂停回放' : '加速回放'}</button>
+                  </div>
+                  <div className="quote-control-note"><span className={playing ? 'live-dot playing' : 'live-dot'} />{playing ? '回放模式：每 1.4 秒推进 1 根缓存 5 分钟K线' : advancing ? '正在推送行情并同步账户' : '回放已暂停 · 行情由后端逐根推进'}</div>
+                </div>
               </div>
-              <div className="playback-note">
-                <Timer size={13} className="note-icon" />
-                {rotationCurrent
-                  ? `轮动当前标的 ${displaySymbol(rotationCurrent)}，实时刷新优先使用该代码`
-                  : livePlaying ? '已启用腾讯实时快照，每 60 秒刷新一次' : '实时刷新已暂停 · 快照来自腾讯行情接口'}
-              </div>
-              <div className="playback-divider"><span>缓存 1 分钟回放</span><small>用于批量验证撮合与订单生命周期</small></div>
-              <div className="playback-controls">
-                <button className="button secondary" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(1)}><StepForward size={16} />推送 1 根</button>
-                <button className="button secondary" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(10)}><FastForward size={16} />推送 10 根</button>
-                <button className={`button ${playing ? 'danger-soft' : 'secondary'}`} disabled={!account.dataset_id} onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}{playing ? '暂停回放' : '加速回放'}</button>
-              </div>
-              <div className="playback-note"><span className={playing ? 'live-dot playing' : 'live-dot'} />{playing ? '回放模式：每 1.4 秒推进 1 根缓存 1 分钟K线' : advancing ? '正在推送行情并同步账户' : '回放已暂停 · 行情由后端逐根推进'}</div>
             </Panel>
 
             <Panel className="order-ticket" title="委托下单" description="订单将提交至本地仿真撮合引擎" action={<span className="ticket-label">ORDER TICKET</span>}>
               <div className="side-selector"><button className={side === 'buy' ? 'buy active' : 'buy'} onClick={() => setSide('buy')}><ArrowDownLeft size={16} />买入</button><button className={side === 'sell' ? 'sell active' : 'sell'} onClick={() => setSide('sell')}><ArrowUpRight size={16} />卖出</button></div>
-              <div className="order-type-row"><span>委托方式</span><div className="segmented"><button className={orderType === 'market' ? 'active' : ''} onClick={() => setOrderType('market')}>市价</button><button className={orderType === 'limit' ? 'active' : ''} onClick={() => setOrderType('limit')}>限价</button></div></div>
+              <div className="order-type-row"><span>仓位用途</span><div className="segmented purpose-selector"><button className={purpose === 'PERMANENT' ? 'active' : ''} onClick={() => setPurpose('PERMANENT')}>永久仓</button><button className={purpose === 'T' ? 'active' : ''} onClick={() => setPurpose('T')}>做T仓</button></div></div>
+              <p className="purpose-hint">{purpose === 'PERMANENT' ? '永久仓买入成交后推进 16 笔序列笔位；卖出为永久仓减仓。' : '做T仓不占用 16 笔金额序列，买入次日可卖，盈亏单独统计。'}</p>
+              <div className="order-type-row"><span>委托方式</span><div className="segmented"><button className={orderType === 'market' ? 'active' : ''} onClick={() => { setOrderType('market'); resetTier(); }}>市价</button><button className={orderType === 'limit' ? 'active' : ''} onClick={() => { setOrderType('limit'); resetTier(); }}>限价</button></div></div>
               <div className="ticket-fields">
-                <Field label="标的代码" hint={rotationCurrent ? `实时刷新使用轮动标的 ${displaySymbol(rotationCurrent)}` : '6 位数字，自动识别沪深'}><input value={symbol} onChange={(event) => setSymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
-                <Field label="委托数量" hint={tradingRules ? `${tradingRules.board} 最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><div className="input-with-unit"><input type="number" min="1" step={tradingRules?.rules.step || 100} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} /><span>股</span></div></Field>
-                {orderType === 'limit' && <Field label="委托价格" className="span-2"><div className="input-with-unit"><input type="number" min="0.01" step="0.01" value={limitPrice} onChange={(event) => setLimitPrice(event.target.value)} placeholder="0.00" /><span>元</span></div></Field>}
+                <Field label="标的代码" hint={rotationCurrent ? `轮动标的 ${displaySymbol(rotationCurrent)}` : '6 位代码'}><input value={symbol} onChange={(event) => applySymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
+                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><div className="input-with-unit"><input type="number" min="1" step={tradingRules?.rules.step || 100} value={quantity} onChange={(event) => { setQuantity(Number(event.target.value)); resetTier(); }} /><span>股</span></div></Field>
+                {orderType === 'limit' && <Field label="委托价格" className="span-2"><div className="input-with-unit"><input type="number" min="0.01" step="0.01" value={limitPrice} onChange={(event) => { setLimitPrice(event.target.value); resetTier(); }} placeholder="0.00" /><span>元</span></div></Field>}
               </div>
-              {quickTiers.length > 0 && (
-                <div className="quick-tiers">
-                  {quickTiers.map((tier) => (
-                    <button key={tier.label} type="button" className={`quick-tier ${quantity === tier.qty ? 'active' : ''}`} onClick={() => setQuantity(tier.qty)}>{tier.label}</button>
-                  ))}
+              {rotationCandidates.length > 0 && (
+                <div className="ticket-picks">
+                  <div className="ticket-picks-head">
+                    <strong>选股结果</strong>
+                    <small>点击快速带入标的代码 · 共 {rotationCandidates.length} 只候选</small>
+                  </div>
+                  <div className="ticket-picks-list">
+                    {rotationCandidates.slice(0, 8).map((item, index) => {
+                      const code = cleanSymbolInput(item.symbol);
+                      const active = cleanSymbolInput(symbol) === code;
+                      return (
+                        <button
+                          key={item.symbol}
+                          type="button"
+                          className={`ticket-pick ${active ? 'active' : ''}`}
+                          title={`${item.name || ''} ${displaySymbol(item.symbol)}${index === 0 ? '（选股第 1 名）' : ''}`}
+                          onClick={() => applySymbol(code)}
+                        >
+                          <strong>{displaySymbol(item.symbol)}</strong>
+                          <small>{item.name || (index === 0 ? '第 1 名' : '候选')}</small>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
+              <div className="quick-tiers">
+                {AMOUNT_TIERS.map((amount) => (
+                  <button
+                    key={amount}
+                    type="button"
+                    className={`quick-tier ${tierAmount === amount ? 'active' : ''}`}
+                    disabled={tierPicking !== null}
+                    title="按参考价与板块规则换算股数"
+                    onClick={() => void applyAmountTier(amount)}
+                  >
+                    {tierPicking === amount ? <span className="button-spinner" /> : `${amount / 10_000}万`}
+                  </button>
+                ))}
+              </div>
+              {tierNote && <div className={`tier-note ${tierError ? 'warn' : ''}`}>{tierNote}</div>}
               {qtyError && <div className="qty-warning"><AlertTriangle size={13} /><span>{qtyError}</span></div>}
               <div className="ticket-estimate"><span>可用资金 <b>{money(account.available_cash)}</b></span>{orderType === 'limit' && limitPrice && <span>委托金额约 <b>{money(Number(limitPrice) * quantity)}</b></span>}</div>
               <button className={`button order-submit ${side}`} disabled={submitting || Boolean(qtyError)} onClick={() => void placeOrder()}>{submitting ? <span className="button-spinner" /> : <Send size={16} />}{submitting ? '正在提交委托' : `提交${sideLabel(side)}委托`}</button>
@@ -538,7 +871,9 @@ export default function PaperPage() {
                 </div>
               )
             ) : !tradingRules ? (
-              <Loading label={rulesLoading ? '正在加载交易规则' : '等待有效标的代码'} />
+              rulesLoading
+                ? <Loading label="正在加载交易规则" />
+                : <div className="rules-placeholder"><ShieldCheck size={16} /><span>输入 6 位标的代码，或在「委托下单 · 选股结果」中点击候选，即自动加载所属板块的交易规则。</span></div>
             ) : (
               <div className="rules-body">
                 <div className="rules-grid">
@@ -561,11 +896,11 @@ export default function PaperPage() {
             )}
           </Panel>
 
-          <Panel className="positions-panel" title="持仓与双账本" description="永久仓和 T 仓分账记录，可卖数量遵循 T+1 约束" action={<span className="fee-note" title="佣金 + 印花税 + 经手费 + 证管费 + 过户费；滑点体现在成交价，不计入费用">累计费用 {money(account.total_fees)}（五项合计）</span>}>
-            <div className="table-scroll"><table><thead><tr><th>标的</th><th className="num">最新价</th><th className="num">总持仓</th><th className="num">可卖数量</th><th className="num">永久仓</th><th className="num">永久仓成本</th><th className="num">平均成本</th><th className="num">T 仓在途</th><th className="num">持仓市值</th><th className="num">浮动盈亏</th></tr></thead><tbody>
-              {account.positions.length === 0 ? <TableEmpty colSpan={10} message="暂无持仓，提交买入委托并推送行情后查看" /> : account.positions.map((position) => {
+          <Panel className="positions-panel" title="持仓与双账本" description="永久仓和 T 仓分账记录，可卖数量遵循 T+1 约束；平均成本已含买入手续费" action={<span className="fee-note" title="佣金 + 印花税 + 经手费 + 证管费 + 过户费；滑点体现在成交价，不计入费用">累计费用 {money(account.total_fees)}（五项合计）</span>}>
+            <div className="table-scroll"><table><thead><tr><th>标的</th><th className="num">最新价</th><th className="num">总持仓</th><th className="num">可卖数量</th><th className="num">永久仓</th><th className="num">永久仓成本</th><th className="num" title="平均成本 = 总成本 / 总持仓，已包含买入手续费">平均成本（含费）</th><th className="num" title="当前持仓成本中仍包含的买入手续费；卖出费用计入已实现盈亏">买入费用</th><th className="num">T 仓在途</th><th className="num">持仓市值</th><th className="num">浮动盈亏</th></tr></thead><tbody>
+              {holdingPositions.length === 0 ? <TableEmpty colSpan={11} message="暂无持仓，提交买入委托并推送行情后查看" /> : holdingPositions.map((position) => {
                 const floatPnl = position.float_pnl;
-                return <tr key={position.symbol}><td><strong title={position.symbol}>{displaySymbol(position.symbol)}</strong></td><td className="num">{money(position.last_price)}</td><td className="num"><strong>{integer(position.total_qty)}</strong></td><td className="num">{integer(position.sellable_qty)}</td><td className="num">{integer(position.permanent_qty)}</td><td className="num">{money(position.permanent_cost)}</td><td className="num">{money(position.average_cost)}</td><td className="num">{position.t_active_qty > 0 ? <Badge tone="indigo">{integer(position.t_active_qty)}</Badge> : '0'}</td><td className="num">{money(position.market_value)}</td><td className={`num ${floatPnl >= 0 ? 'positive' : 'negative'}`}>{signedMoney(floatPnl)}</td></tr>;
+                return <tr key={position.symbol}><td><strong title={position.symbol}>{displaySymbol(position.symbol)}</strong></td><td className="num">{money(position.last_price)}</td><td className="num"><strong>{integer(position.total_qty)}</strong></td><td className="num">{integer(position.sellable_qty)}</td><td className="num">{integer(position.permanent_qty)}</td><td className="num">{money(position.permanent_cost)}</td><td className="num">{money(position.average_cost)}</td><td className="num" title="已包含在平均成本内">{money(position.buy_fee ?? 0)}</td><td className="num">{position.t_active_qty > 0 ? <Badge tone="indigo">{integer(position.t_active_qty)}</Badge> : '0'}</td><td className="num">{money(position.market_value)}</td><td className={`num ${floatPnl >= 0 ? 'positive' : 'negative'}`}>{signedMoney(floatPnl)}</td></tr>;
               })}
             </tbody></table></div>
           </Panel>

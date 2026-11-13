@@ -27,17 +27,22 @@ import type {
   ScreenerRunRequest,
   ScreenerRunSummary,
   ScreeningRun,
+  SchedulerStatus,
+  StrategyConfig,
   StrategyDefaults,
   Timeframe,
   TradingRulesAllResponse,
   TradingRulesResponse,
+  TradingSession,
 } from '../types';
 
 // 部署可配置：
-// - 本地开发默认走 127.0.0.1:8010（Vite dev server 5180 与后端 8010 分离）。
-// - 生产/部署时用 VITE_API_BASE 注入。推荐设为 `/api`（同源反代，避免跨域与混合内容）。
+// - 默认走同源 `/api`：生产由容器内 nginx 反代到 127.0.0.1:8010；
+//   dev server 通过 vite.config.ts 的 proxy 把 `/api` 转发到 127.0.0.1:8010。
+// - 仍可用 VITE_API_BASE 覆盖（例如临时指向其他后端）。
+//   不设默认 127.0.0.1:8010，避免误构建的 dist 发到线上后所有远程用户 API 指向自己电脑。
 //   HTTPS 站点若写死 http://IP:端口 会被浏览器当 mixed content 拦截，故部署一律用同源相对路径。
-export const API_BASE = (import.meta.env.VITE_API_BASE || 'http://127.0.0.1:8010/api').replace(/\/$/, '');
+export const API_BASE = (import.meta.env.VITE_API_BASE || '/api').replace(/\/$/, '');
 
 export class ApiError extends Error {
   status: number;
@@ -123,6 +128,9 @@ export const api = {
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/fees`, { method: 'POST', body: JSON.stringify({ fees }) }),
   setAutoStrategy: (id: string, enabled: boolean) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/auto-strategy`, { method: 'POST', body: JSON.stringify({ enabled }) }),
+  /** 局部更新模拟账户策略配置（非费率）；下一根K线起的新操作立刻生效。 */
+  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_spread' | 't_order_amount'>>) =>
+    request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/config`, { method: 'POST', body: JSON.stringify(patch) }),
   // 后端 domain 枚举为大写（BUY/SELL、MARKET/LIMIT），前端 UI 状态为小写；
   // 统一在 API 边界上行归一化，避免 Pydantic Literal 校验返回 422。
   placeOrder: (accountId: string, payload: CreateOrderRequest) =>
@@ -147,6 +155,10 @@ export const api = {
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/advance`, { method: 'POST', body: JSON.stringify({ bars }) }),
   liveTick: (accountId: string, symbol: string) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/live-tick`, { method: 'POST', body: JSON.stringify({ symbol }) }),
+  // 后端定时器状态：前端轮询它来显示「最近一次自动成交推进」时间。
+  scheduler: () => request<SchedulerStatus>('/paper/scheduler'),
+  // 交易日/交易时段：周末、节假日前端不轮询。
+  tradingSession: () => request<TradingSession>('/trading/session'),
 
   /* ---------- 选股漏斗（契约 §5.4 / §6.1） ---------- */
   screenerDefaults: () => request<ScreenerDefaults>('/screener/defaults'),

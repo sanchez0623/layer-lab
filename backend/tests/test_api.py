@@ -5,7 +5,14 @@ from fastapi.testclient import TestClient
 
 from app.broker import BrokerAccount
 from app.domain import Bar, OrderRequest
-from app.main import create_app, snapshot_execution_bar, trading_minutes_elapsed
+from app.main import (
+    create_app,
+    intraday_bucket,
+    latest_closed_intraday_bar,
+    snapshot_execution_bar,
+    trading_intraday_bars_elapsed,
+    trading_minutes_elapsed,
+)
 
 
 def test_full_api_workflow(tmp_path, monkeypatch):
@@ -24,9 +31,9 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     assert demo_response.status_code == 200
     demo = demo_response.json()
     assert demo["daily"]["rows"] == 320
-    assert demo["intraday"]["rows"] == 48 * 240
+    assert demo["intraday"]["rows"] == 48 * 48
     assert demo["daily"]["is_synthetic"] is True
-    assert demo["intraday"]["timeframe"] == "1m"
+    assert demo["intraday"]["timeframe"] == "5m"
     assert "file_path" not in demo["daily"]
     assert len(client.get("/api/datasets").json()) == 3
 
@@ -74,6 +81,29 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     assert reset.json()["cash"] == 100_000
     assert reset.json()["cursor"] == 0
     assert reset.json()["positions"] == []
+
+
+def test_backtest_accepts_5m_intraday(tmp_path, monkeypatch):
+    """后续回测统一用 5 分钟线：intraday 数据集粒度原样进入报告。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    client = TestClient(create_app())
+    demo = client.post("/api/datasets/demo").json()
+    response = client.post("/api/backtests", json={
+        "name": "5分钟路径回测",
+        "dataset_id": demo["daily"]["id"],
+        "intraday_dataset_id": demo["intraday"]["id"],
+        "index_dataset_id": demo["index"]["id"],
+        "initial_cash": 4_000_000,
+        "config": {"enable_t": True},
+    })
+    assert response.status_code == 200, response.text
+    report = response.json()
+    assert report["status"] == "COMPLETED"
+    assert report["data_info"]["intraday_timeframe"] == "5m"
+    assert report["data_info"]["actual_granularity"] == "5m"
+    assert report["data_info"]["intraday_rows"] == 48 * 48
+    assert any("5m" in item for item in report["warnings"])
 
 
 def test_multiple_paper_accounts_can_reuse_local_order_ids(tmp_path, monkeypatch):
@@ -187,7 +217,7 @@ def _snapshot_bar() -> Bar:
     return Bar(
         timestamp=datetime(2026, 11, 12, 11, 18, 24), symbol="sh.688200",
         open=235.16, high=255.0, low=232.18, close=245.58,
-        volume=5_954_265.0, amount=1_460_230_000.0, timeframe="1m",
+        volume=5_954_265.0, amount=1_460_230_000.0, timeframe="5m",
         turnover_rate=0.0295, prev_close=231.2, bid=245.5, ask=245.58,
     )
 
@@ -199,7 +229,11 @@ def test_snapshot_execution_bar_uses_current_price_not_day_open():
     assert execution.low >= 245.5 and execution.high <= 245.58
     assert 0 < execution.volume < snapshot.volume
     assert execution.prev_close == 231.2
+    assert execution.timeframe == "5m"
     assert trading_minutes_elapsed(snapshot.timestamp) == 108
+    # 当日已开盘 108 分钟 → 已收盘 22 根 5 分钟 K 线（向上取整，至少 1 根）。
+    assert trading_intraday_bars_elapsed(snapshot.timestamp) == 22
+    assert execution.volume == pytest.approx(snapshot.volume / 22)
 
     account = BrokerAccount(initial_cash=4_000_000)
     account.submit(OrderRequest(
@@ -210,6 +244,18 @@ def test_snapshot_execution_bar_uses_current_price_not_day_open():
     assert len(fills) == 1
     assert abs(fills[0].price - 245.58 * 1.0001) < 0.0001
     assert fills[0].price > 240.0  # 不再按今开 235.16 成交
+
+
+def test_latest_closed_intraday_bar_ignores_forming_bar():
+    """5 分钟 bar 的 timestamp 是区间结束时间；未到结束时间不能拿来检测。"""
+    bars = [
+        Bar(timestamp=datetime(2026, 11, 12, 9, 35), symbol="sh.688200", open=1, high=1, low=1, close=1, volume=10, amount=10, timeframe="5m"),
+        Bar(timestamp=datetime(2026, 11, 12, 9, 40), symbol="sh.688200", open=1, high=1, low=1, close=1, volume=10, amount=10, timeframe="5m"),
+    ]
+    assert intraday_bucket(datetime(2026, 11, 12, 9, 42, 30)) == datetime(2026, 11, 12, 9, 40)
+    assert latest_closed_intraday_bar(bars, datetime(2026, 11, 12, 9, 42, 30)) is bars[-1]
+    assert latest_closed_intraday_bar(bars, datetime(2026, 11, 12, 9, 39, 59)) is bars[0]
+    assert latest_closed_intraday_bar(bars, datetime(2026, 11, 12, 9, 34, 0)) is None
 
 
 def test_snapshot_execution_bar_does_not_fill_limit_order_at_day_low():
@@ -305,6 +351,34 @@ def test_live_tick_fills_market_order_at_current_price(tmp_path, monkeypatch):
     assert abs(state["trades"][0]["price"] - 245.58 * 1.0001) < 0.0001
 
 
+def test_live_tick_without_orders_reports_quote_not_holding(tmp_path, monkeypatch):
+    """只拉行情、没下任何委托时，账户不能出现持仓；最新价通过 quotes 返回。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    application = create_app()
+    snapshot = _snapshot_bar()
+    monkeypatch.setattr(application.state.market_service, "fetch_quote", lambda symbol: ({}, snapshot))
+    client = TestClient(application)
+    account = client.post("/api/paper/accounts", json={
+        "name": "只看行情", "initial_cash": 4_000_000,
+    }).json()
+    assert client.get(f"/api/paper/accounts/{account['id']}").json()["positions"] == []
+
+    tick = client.post(f"/api/paper/accounts/{account['id']}/live-tick", json={"symbol": "688200"})
+    assert tick.status_code == 200, tick.text
+    state = tick.json()
+    assert state["orders"] == []
+    assert state["trades"] == []
+    assert state["positions"] == []
+    assert state["quotes"] == [{"symbol": "sh.688200", "last_price": 245.58}]
+    assert state["market_value"] == 0.0
+
+    # 重新读账户（走 SQLite 持久化/反序列化）仍是 0 持仓 + 1 条行情。
+    reloaded = client.get(f"/api/paper/accounts/{account['id']}").json()
+    assert reloaded["positions"] == []
+    assert reloaded["quotes"] == [{"symbol": "sh.688200", "last_price": 245.58}]
+
+
 def test_market_and_paper_endpoints_reject_invalid_plain_code(tmp_path, monkeypatch):
     """前端只传 6 位数字；位数不对时各入口统一返回 400，而不是 500 或联网请求。"""
     monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
@@ -317,3 +391,44 @@ def test_market_and_paper_endpoints_reject_invalid_plain_code(tmp_path, monkeypa
     }).json()
     response = client.post(f"/api/paper/accounts/{account['id']}/live-tick", json={"symbol": "68820"})
     assert response.status_code == 400
+
+
+def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeypatch):
+    """做T目标价差走 /config 局部更新：改完立即反映到账户 config，供下一根K线的新操作使用。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    client = TestClient(create_app())
+    demo = client.post("/api/datasets/demo").json()
+    account = client.post("/api/paper/accounts", json={
+        "name": "配置更新", "initial_cash": 4_000_000,
+        "dataset_id": demo["intraday"]["id"],
+    }).json()
+    base = account["config"]["t_target_spread"]
+
+    # 局部更新 t_target_spread（小数口径，0.015 → 0.02）
+    updated = client.post(f"/api/paper/accounts/{account['id']}/config",
+                          json={"t_target_spread": 0.02})
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["config"]["t_target_spread"] == 0.02
+    # 原值未被误改的其他字段保持
+    assert updated.json()["config"]["enable_t"] == account["config"]["enable_t"]
+
+    # 重读（走持久化往返）仍是新值
+    reloaded = client.get(f"/api/paper/accounts/{account['id']}").json()
+    assert reloaded["config"]["t_target_spread"] == 0.02
+
+    # 费率字段归 /fees 管，这里显式拒绝
+    rejected = client.post(f"/api/paper/accounts/{account['id']}/config",
+                           json={"commission_rate": 0.001})
+    assert rejected.status_code == 422
+
+    # 空更新 → 400
+    empty = client.post(f"/api/paper/accounts/{account['id']}/config", json={})
+    assert empty.status_code == 400
+
+    # 边界校验：负数 / 超过 1 → 422
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"t_target_spread": -0.01}).status_code == 422
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"t_target_spread": 1.5}).status_code == 422
+    assert base is not None

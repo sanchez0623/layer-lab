@@ -2,6 +2,8 @@ export type PageKey = 'backtest' | 'paper' | 'data' | 'strategy' | 'screener';
 export type Timeframe = 'daily' | 'tick' | '1m' | '5m';
 export type OrderSide = 'buy' | 'sell';
 export type OrderType = 'market' | 'limit';
+/** 委托用途：PERMANENT 计入 16 笔金额序列（买入），T 为做T仓，不占笔位。 */
+export type OrderPurpose = 'PERMANENT' | 'T';
 
 export interface Dataset {
   id: string;
@@ -45,6 +47,10 @@ export interface StrategyConfig {
   transfer_fee_rate: number;
   slippage_bps: number;
   volume_participation: number;
+  /** 做T目标价差（小数，0.015 = 均价+1.5% 平T）；可在模拟盘账户配置里改，下一根K线起生效 */
+  t_target_spread?: number;
+  /** 做T单笔金额（元），仅在 enable_t 且 sequence_index≥4 时使用 */
+  t_order_amount?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {
@@ -224,10 +230,17 @@ export interface Position {
   permanent_cost: number;
   total_cost: number;
   average_cost: number;
+  /** 当前持仓成本中包含的买入手续费（卖出费用计入已实现盈亏）。 */
+  buy_fee: number;
   t_active_qty: number;
   last_price: number;
   market_value: number;
   float_pnl: number;
+}
+
+export interface PositionQuote {
+  symbol: string;
+  last_price: number;
 }
 
 export interface AccountState {
@@ -241,6 +254,8 @@ export interface AccountState {
   realized_pnl: number;
   total_fees: number;
   positions: Position[];
+  /** 后端行情缓存（含未持仓标的的最新价）；旧后端未返回该字段时前端回退到 positions。 */
+  quotes?: PositionQuote[];
   orders: Order[];
   trades: Trade[];
   t_net_profit: number;
@@ -270,6 +285,7 @@ export interface CreateOrderRequest {
   order_type: OrderType;
   quantity: number;
   limit_price?: number;
+  purpose?: OrderPurpose;
 }
 
 export interface DemoDatasets {
@@ -631,4 +647,32 @@ export interface RotationRequest {
   enabled: boolean;
   run_id?: string;
   pool?: RotationPoolItem[];
+}
+
+/** GET /paper/scheduler：后端定时器状态（成交由它推进，前端只做展示与轮询同步）。 */
+export interface SchedulerStatus {
+  enabled: boolean;
+  running: boolean;
+  interval_seconds: number;
+  /** 最近一次触发的 5 分钟槽位（ISO）。 */
+  last_slot: string | null;
+  /** 最近一次实际 tick 完成时间（ISO）。 */
+  last_tick_at: string | null;
+  last_error: string | null;
+  ticks: number;
+  failures: number;
+  last_result: { ticked?: string[]; skipped?: string[]; errors?: string[] };
+  /** 交易日历判定（quan 日历优先，缺失回落工作日）。 */
+  trading?: TradingSession;
+}
+
+/** GET /trading/session：交易日 / 交易时段判定，用于决定前端是否自动轮询。 */
+export interface TradingSession {
+  today: string;
+  is_trading_day: boolean;
+  next_trading_day: string | null;
+  /** quan_calendar = 真实交易日历（能识别节假日）；weekday_fallback = 仅工作日启发式。 */
+  source: 'quan_calendar' | 'weekday_fallback' | string;
+  in_session?: boolean;
+  session_windows?: string[];
 }

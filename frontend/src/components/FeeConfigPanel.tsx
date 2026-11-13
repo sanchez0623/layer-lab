@@ -54,35 +54,34 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
 
   return (
     <div className="fee-config-card">
-      <div className="fee-config-head">
-        <p>费率按万分之输入，分项相加；最低佣金仅适用于佣金项。</p>
-        <span className="fee-version"><Settings2 size={12} />费用配置 v1</span>
-      </div>
-      <div className="fee-config-grid">
-        {FEE_FIELDS.map((field) => (
-          <label className="fee-field" key={field.key}>
-            <span className="fee-field-label">{field.label}</span>
-            <div className="input-with-unit">
-              <input
-                type="number"
-                min="0"
-                max={field.max}
-                step={field.step}
-                value={value[field.key]}
-                onChange={(event) => update(field.key, event.target.value)}
-                aria-label={field.label}
-              />
-              <span>{field.unit === '万分之' ? '‱' : field.unit}</span>
-            </div>
-            <small className="fee-field-note">{field.note}</small>
-          </label>
-        ))}
-      </div>
-      <div className="fee-config-summary">
-        <span>买入合计 <b>{buySide.toFixed(3)}</b> ‱</span>
-        <span>卖出合计 <b>{sellSide.toFixed(3)}</b> ‱</span>
-        <span>佣金最低 <b>{value.min_commission}</b> 元/笔</span>
-        <span className="fee-summary-note">印花税仅卖出收取；滑点不计入费用，体现在成交价。</span>
+      <div className="fee-config-layout">
+        <div className="fee-config-grid">
+          {FEE_FIELDS.map((field) => (
+            <label className="fee-field" key={field.key}>
+              <span className="fee-field-label">{field.label}</span>
+              <div className="input-with-unit">
+                <input
+                  type="number"
+                  min="0"
+                  max={field.max}
+                  step={field.step}
+                  value={value[field.key]}
+                  onChange={(event) => update(field.key, event.target.value)}
+                  aria-label={field.label}
+                />
+                <span>{field.unit === '万分之' ? '‱' : field.unit}</span>
+              </div>
+              <small className="fee-field-note">{field.note}</small>
+            </label>
+          ))}
+        </div>
+        <aside className="fee-config-side">
+          <span className="fee-version"><Settings2 size={12} />费用配置 v1</span>
+          <div className="fee-total"><span>买入合计</span><b>{buySide.toFixed(3)} <small>‱</small></b></div>
+          <div className="fee-total"><span>卖出合计</span><b>{sellSide.toFixed(3)} <small>‱</small></b></div>
+          <div className="fee-total"><span>最低佣金</span><b>{value.min_commission} <small>元/笔</small></b></div>
+          <p className="fee-config-note">费率按万分之输入、分项相加；印花税仅卖出收取；滑点不计入费用，体现在成交价。</p>
+        </aside>
       </div>
       <div className="fee-config-actions">
         <button type="button" className="button primary" onClick={() => void run('save')} disabled={busy !== null}>
