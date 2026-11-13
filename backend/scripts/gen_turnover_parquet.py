@@ -78,8 +78,13 @@ def main():
     if args.out:
         out = os.path.abspath(args.out)
     else:
-        from app.quan_data import quan_data_dir
-        out = os.path.join(quan_data_dir(), "turnover_daily.parquet")
+        # 默认写到 quan 数据目录（与 minute5 同目录），load_minute5 自动发现。
+        # 优先用 app 的 quan_data_dir()；脚本独立运行（如 /tmp）时回落实测路径。
+        try:
+            from app.quan_data import quan_data_dir
+            out = os.path.join(quan_data_dir(), "turnover_daily.parquet")
+        except Exception:
+            out = "/data/quan/history/turnover_daily.parquet"
     os.makedirs(os.path.dirname(out), exist_ok=True)
     df.write_parquet(out)
     print(f"写入 {out} ({df.height} 行)")
