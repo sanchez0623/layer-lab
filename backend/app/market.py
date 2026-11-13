@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import threading
 import unicodedata
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,13 @@ from .domain import Bar, Dataset, money, price
 
 if TYPE_CHECKING:  # 避免与 quan_data -> universe -> market 的导入环
     from .quan_data import QuanStore
+
+
+# baostock 禁止并发访问：并发会被服务端拉黑（封 IP/账号）。所有打 baostock 的
+# 函数都先用这把进程内全局锁串行化（与 universe.py 的会话锁独立，但同样保证
+# 同一时刻只有一个 baostock 会话在跑）。默认数据源是 quan_parquet（本地 parquet，
+# 不经过此锁），只有回落旧 baostock 链路时才真正竞争这把锁。
+BAOSTOCK_LOCK = threading.Lock()
 
 
 QUAN_DAILY_SOURCE = "quan_parquet"
@@ -314,22 +322,23 @@ class MarketDataService:
             import baostock as bs
         except ImportError as exc:
             raise ValueError("baostock 未安装，无法获取指数日线") from exc
-        login = bs.login()
-        if login.error_code != "0":
-            raise ValueError(f"baostock 登录失败: {login.error_msg}")
-        try:
-            fields = "date,code,open,high,low,close,preclose,volume,amount"
-            result_set = bs.query_history_k_data_plus(
-                standard, fields, start_date=start_date, end_date=end_date,
-                frequency="d", adjustflag="3",
-            )
-            if result_set.error_code != "0":
-                raise ValueError(f"baostock 指数查询失败: {result_set.error_msg}")
-            rows: list[list[str]] = []
-            while result_set.next():
-                rows.append(list(result_set.get_row_data()))
-        finally:
-            bs.logout()
+        with BAOSTOCK_LOCK:  # baostock 禁止并发，全局串行化
+            login = bs.login()
+            if login.error_code != "0":
+                raise ValueError(f"baostock 登录失败: {login.error_msg}")
+            try:
+                fields = "date,code,open,high,low,close,preclose,volume,amount"
+                result_set = bs.query_history_k_data_plus(
+                    standard, fields, start_date=start_date, end_date=end_date,
+                    frequency="d", adjustflag="3",
+                )
+                if result_set.error_code != "0":
+                    raise ValueError(f"baostock 指数查询失败: {result_set.error_msg}")
+                rows: list[list[str]] = []
+                while result_set.next():
+                    rows.append(list(result_set.get_row_data()))
+            finally:
+                bs.logout()
 
         if not rows and standard == "sh.000688":
             bars = self.fetch_tencent_daily(tencent_symbol, start_date, end_date)
@@ -375,22 +384,23 @@ class MarketDataService:
         except ImportError as exc:
             raise ValueError("baostock 未安装，无法获取历史日线") from exc
 
-        login = bs.login()
-        if login.error_code != "0":
-            raise ValueError(f"baostock 登录失败: {login.error_msg}")
-        try:
-            fields = "date,code,open,high,low,close,preclose,volume,amount,turn"
-            result_set = bs.query_history_k_data_plus(
-                symbol.baostock, fields, start_date=start_date, end_date=end_date,
-                frequency="d", adjustflag="2",
-            )
-            if result_set.error_code != "0":
-                raise ValueError(f"baostock 日线查询失败: {result_set.error_msg}")
-            rows: list[list[str]] = []
-            while result_set.next():
-                rows.append(result_set.get_row_data())
-        finally:
-            bs.logout()
+        with BAOSTOCK_LOCK:  # baostock 禁止并发，全局串行化
+            login = bs.login()
+            if login.error_code != "0":
+                raise ValueError(f"baostock 登录失败: {login.error_msg}")
+            try:
+                fields = "date,code,open,high,low,close,preclose,volume,amount,turn"
+                result_set = bs.query_history_k_data_plus(
+                    symbol.baostock, fields, start_date=start_date, end_date=end_date,
+                    frequency="d", adjustflag="2",
+                )
+                if result_set.error_code != "0":
+                    raise ValueError(f"baostock 日线查询失败: {result_set.error_msg}")
+                rows: list[list[str]] = []
+                while result_set.next():
+                    rows.append(result_set.get_row_data())
+            finally:
+                bs.logout()
 
         bars: list[Bar] = []
         previous_close: float | None = None
@@ -428,22 +438,23 @@ class MarketDataService:
             import baostock as bs
         except ImportError as exc:
             raise ValueError("baostock 未安装，无法获取指数日线") from exc
-        login = bs.login()
-        if login.error_code != "0":
-            raise ValueError(f"baostock 登录失败: {login.error_msg}")
-        try:
-            fields = "date,code,open,high,low,close,preclose,volume,amount"
-            result_set = bs.query_history_k_data_plus(
-                symbol.index_baostock, fields, start_date=start_date, end_date=end_date,
-                frequency="d", adjustflag="3",
-            )
-            if result_set.error_code != "0":
-                raise ValueError(f"baostock 指数查询失败: {result_set.error_msg}")
-            rows: list[list[str]] = []
-            while result_set.next():
-                rows.append(result_set.get_row_data())
-        finally:
-            bs.logout()
+        with BAOSTOCK_LOCK:  # baostock 禁止并发，全局串行化
+            login = bs.login()
+            if login.error_code != "0":
+                raise ValueError(f"baostock 登录失败: {login.error_msg}")
+            try:
+                fields = "date,code,open,high,low,close,preclose,volume,amount"
+                result_set = bs.query_history_k_data_plus(
+                    symbol.index_baostock, fields, start_date=start_date, end_date=end_date,
+                    frequency="d", adjustflag="3",
+                )
+                if result_set.error_code != "0":
+                    raise ValueError(f"baostock 指数查询失败: {result_set.error_msg}")
+                rows: list[list[str]] = []
+                while result_set.next():
+                    rows.append(result_set.get_row_data())
+            finally:
+                bs.logout()
 
         if not rows and symbol.index_baostock == "sh.000688":
             # baostock 当前不覆盖科创50；降级到腾讯指数日线，而不是编造数据。
