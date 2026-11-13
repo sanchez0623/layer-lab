@@ -14,6 +14,13 @@
 
 术语沿用文档：L0 大盘同步门、L1 A1 超跌信号、L2 一票否决、L3 容量、L4 排序取第一、L3' 做T准入（本轮不实现，仅文档说明）。
 
+> **数据源 v2（2026-11-12 19:40 起，用户最新指示）**：历史行情默认改读 quan_quant 的 parquet 数据目录
+> `D:\Sanchez\AI\TraeProjects\quan_quant\data`（`WB_QUAN_DATA_DIR` 覆盖，空串=关闭回落本节旧链路；
+> 环境需要 `polars`）。`QuanStore` 接口对齐 `UniverseStore`，选股/漏斗回测无需改算法；价格口径为
+> 「原始价 × 当日 adj_factor ÷ 区间末日 adj_factor」，因子回退的票自动降级原始价。
+> 指数 399006/000688 已用 `backend/scripts/quan_migrate.py index` 增量追加进 `index_daily.parquet`
+> （只追加不覆盖）。实时快照/盘中 K 线仍走腾讯。下文 §1 的 baostock 事实仅对旧链路（`WB_QUAN_DATA_DIR=''`）有效。
+
 ## 1. 数据源事实（Lead 已实测 2026-11-12，沙箱内真实网络）
 
 | 能力 | 结论 |

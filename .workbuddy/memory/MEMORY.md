@@ -2,14 +2,16 @@
 
 - 项目：A股分层加仓做T模拟交易与回测系统；仅本地仿真，不接券商。
 - 端口：后端 FastAPI `127.0.0.1:8010`；前端 Vite `127.0.0.1:5180`。不要擅自改端口。
-- 数据链路（用户 2026-11-11/12 指示）：baostock 前复权日线 + 腾讯实时快照/1分钟K线；不要把 CSV 日线导入作为主链路。
-- 盘中扫描口径：1 分钟，不用 10 秒 tick；信号去抖为连续 3 根 1 分钟 K 线。
+- 数据链路（用户 2026-11-12 19:40 最新指示）：**历史日线/指数/5分钟改读 quan_quant parquet**（`D:\Sanchez\AI\TraeProjects\quan_quant\data`，`WB_QUAN_DATA_DIR` 覆盖，设为空串=关闭并回落旧链路），**本地 backend/data 的 baostock/universe.db 行情不再使用**；实时快照与盘中 K 线仍走腾讯。quan 源只读，`python -m scripts.quan_migrate index` 只追加不覆盖地把指数新数据写回 quan 库（写前备份、写后校验，禁止覆盖已有行）。不要把 CSV 日线导入作为主链路。
+- 盘中扫描口径（2026-11-12 20:0x 用户要求实时改 5 分线）：**实时检测用 5 分钟 K 线**，刷新间隔 300 秒；信号去抖为连续 3 根 5 分钟 K 线（≈15 分钟）。不再使用 1 分钟或 10 秒 tick；回测的盘中数据集也统一用 5m（quan `minute5/` 或腾讯 m5 兜底）。
 - baostock 不覆盖 `sh.000688`；科创50指数日线使用腾讯 `fqkline/get` 兜底，来源标记 `tencent_index`。
-- 腾讯 1 分钟接口实测约 320 根；长周期回测的盘中精度有限，必须在 warnings/data_info 中明示。
+- 腾讯 m5 接口单次实测最多 320 根 5 分钟 K 线（约 6~7 个交易日，48 根/日，时间戳为区间结束 09:35~11:30/13:05~15:00）；长周期回测的盘中精度有限，必须在 warnings/data_info 中明示。
 - SQLite 中模拟账户订单/成交持久化键使用 `account_id:order_id`；本地单号跨账户复用，撤单必须带 `account_id`（`POST /api/paper/accounts/{id}/orders/{order_id}/cancel`）。
 - 后端 API 枚举为大写（`BUY/SELL`、`MARKET/LIMIT`、`FILLED`、`ACTIVE`），前端 UI 状态为小写；上行在 `api.placeOrder` 归一化，下行比较统一用 `format.ts` 的 `lower()`。
-- 腾讯实时快照 Bar 的 `open/high/low/volume` 是**全天口径**（今开/当日高低/当日累计量）；实时撮合必须经 `snapshot_execution_bar()` 转成按现价成交的 1 分钟 bar，策略信号仍用原始 bar，回测链路不变。
+- 腾讯实时快照 Bar 的 `open/high/low/volume` 是**全天口径**（今开/当日高低/当日累计量）；实时撮合必须经 `snapshot_execution_bar()` 转成按现价成交的 5 分钟 bar（量额优先用最近已收盘 5 分钟 bar，否则按当日 5 分钟当量折算）。**盘中检测只喂最近一根已收盘 5 分钟 bar**（`latest_closed_intraday_bar`，腾讯 bar 时间戳=区间结束），同一根 bar 在 strategy 内按 timestamp 去重，避免 live-tick 重试重复累加确认计数；日终信号仍用快照 bar 合成 daily bar。
+- 回测引擎原生接受 5m intraday（`intraday_dataset_id`）；quan 链路 `load_minute5` 产出 5m，腾讯兜底 `fetch_tencent_intraday`（m5）也产出 5m。`demo` 合成数据已从 1m×240 改为 5m×48/日。
 - 持仓市值/浮盈必须用后端 `total_cost`/`market_value`/`float_pnl`；`average_cost` 已按分四舍五入，只用于展示，禁止拿它反算金额。
+- 模拟盘账户契约（2026-11-13）：`to_dict().positions` **只含 `total_qty > 0` 的真实持仓**，`to_dict().quotes = [{symbol,last_price}]` 才是行情缓存；仅 `mark()`/推进行情不能算持仓，清仓后持仓行必须消失。前端持仓表用 positions，行情面板用 quotes（positions 兜底）。该修复已于 2026-11-13 13:0x 热更新到线上容器（broker sha `05b4ff04…`），源码树 `/root/layer-lab` 已同步；容器 recreate 会丢失 `docker cp`，需 `--build` 或重新 cp。
 - 模拟盘自动策略复用回测 LayeredTStrategy，状态持久化在 `strategy_state`；大盘门方向必须是指数20日跌幅<0时开门。
 - 涨红跌绿；金额 CNY；演示/真实来源必须在 UI 和报告中明确标注。
 - 交易费用口径（2026-11-12 用户截图指定）：五项分项相加 = 佣金 + 印花税(仅卖出) + 经手费 + 证管费 + 过户费，佣金/经手/证管/过户双边；费率 UI/API 单位统一「万分之」，结算内部用小数比例；最低佣金（元/笔）**只兜底佣金项**；默认值 0.5 / 5 / 0.341 / 0.2 / 0.1 万分 + 最低 5 元；滑点体现在成交价，不计入 total_fees。
@@ -20,3 +22,26 @@
 - 回补与覆盖：`python -u -m scripts.refresh_universe --boards 创业板,科创板 --lookback-days 400 --sleep 0`（增量、已回补票自动跳过）。2026-11-12 完成科创板 619 只，创业板仅 7 只（限速中断），`universe.db` 2030 代码/约 16.6 万行；选股页覆盖卡会显示 `missing_codes`。
 - prepare 一键带入**缓存优先**：本地已有覆盖最新交易日的日线+指数数据集时 0 网络直接复用（行情源限速也能用），失败才回落本地；轮动用 `rotation_pending_advance` 门控——只有「刚清仓归零」才允许推进，新账户空仓不得跳过池内首只。
 - 端口（2026-11-12 14:57 已恢复常规）：后端 `8010`、前端 `5180`。旧 WorkBuddy 会话关闭后端口释放，新系统按原命令重启回原端口；若 8010/5180 再次被旧环境占用，可临时跑 8020/5190 并用 `VITE_API_BASE` 指向 8020。
+- **阿里云 ECS**：`47.119.50.139`（实例 `i-wz95p1n73tl4oraq1xmi`，cn-shenzhen）；layer-lab 容器 3011、HTTPS 3444、数据卷 `deploy_layerlab-data`→`/data`。ssh 22 开放、root 仅公钥登录、`authorized_keys` 平时为空；运维走 `deploy/ecs_run.py`（云助手）+ 临时 SSH 公钥（传完删）。**OSS 中转已不可用（403 UserDisable）**；云助手分片上传约 4.5s/16.5KB（121MB≈10h）不可用；本机→ECS 实测约 0.88MB/s。
+- **公共数据空间 `/srv/data/quan`**（2026-11-12 全量同步完成，**两套都是 6 位纯代码**）：
+  - 顶层 `daily.parquet`/`adj_factor.parquet` = **最近 30 交易日滚动**，是 limit-lens 的只读契约（`QUAN_DATA_DIR=/data/quan`）。limit-lens 全链路 6 位纯代码（`/^\d{6}$/`），原 bs_fetch 的 `sh./sz.` 前缀码匹配不上，20:03 已改成 6 位；实测 loader 读到 30 天/5,227 码/MA5 5,217（as_of 11-09）。保留滚动而非全量只为省内存（1.8GB 机器解析 628 万行有 OOM 风险）。
+  - `history/` = **全量 6 位纯代码**：daily 6,282,388 行 / 5,276 只 / 1994-01-06~2026-11-11 + adj_factor 6,276,539 行 + stock_basic/index_daily(含 399006/000688)/trade_calendar/stock_industry。**服务器上 LayerLab 用 `WB_QUAN_DATA_DIR=/data/quan/history`**；
+  - `backup/20261112/` 原 22 天版本；`tools/verify_quan.py` 低内存校验脚本。服务器仅 1.8GB 内存，全量数据禁止 to_pylist。
+  - `history/minute5/`：**5,272 个 parquet / 2.5GB**（5 分钟线，6 位纯码，`code,date,open,high,low,close,volume,amount`，日期 `YYYY-MM-DD HH:mm`），对应 `QuanStore.minute5_dir`；顶层 `minute5` 为软链。**数据截至 2026-10-21/22**，未含最近三周。上传走临时 SSH 公钥 + paramiko SFTP（tar 整包 2.632GB，约 50 分钟，0.9MB/s），支持字节级断点续传。
+- **baostock 封禁按出口 IP**：本机 `113.108.106.159` 已被黑名单（10001011），不要再在本机拉；服务器 `47.119.50.139` 正常（4 年单票 977 根可用）。
+- `/srv/data/quan` 数据已于 2026-11-13 03:19 补齐到 **2026-11-12**：daily 6,342,599 行 / 5,276 只（5,217 只到 11-12，59 只停牌/退市）、adj 6,336,750 行（factor anomaly 降到 1,244）、trade_calendar 到 11-12、index_daily 四个指数全到 11-12、minute5 5,271 个 parquet 全到 11-12 15:00。补齐方式：服务器上复用 `quan_quant` updater（`/root/quan_quant/backend`，polars 1.44.0），daily 用 `daily_max_dates` 断点、minute5 用 200 只/块 + `/root/quan_minute5_done.txt` checkpoint；复跑 `DATA_DIR=/srv/data/quan/history python3.11 /root/run_quan_update2.py`。服务器临时加了 4G `/swapfile_quan`。
+- 顶层 30 天滚动窗口已重建（2026-09-24~11-12，156,571 行 / 5,227 只，6 位码），limit-lens loader 实测 MA5=5,217、asOf=11-12。
+- LayerLab 服务器容器已挂载 `/srv/data/quan:/data/quan:ro`、`WB_QUAN_DATA_DIR=/data/quan/history`，镜像含 polars；`/api/screener/defaults` coverage end=2026-11-12、stale=59。
+- LayerLab 服务器端原本是空库（无 universe/ datasets/backtests），且运行镜像仍是旧版（无 quan_data.py/polars、未挂载 /srv/data/quan）；接入需改 compose 挂载 + 重建镜像。
+- quan 数据源口径（2026-11-12）：parquet 内部 6 位纯代码，对外 `sh./sz.`；价格前复权 = 原始价 × 当日 adj_factor ÷ 区间末日 adj_factor（最新=原始价）；volume/amount 不复权；quan 无换手率（turnover=None）；指数不复权。quan 的 adj_factor 有 3126 票回退（后复权累计因子不应递减），`QuanStore` 对这些票自动降级原始价并在 coverage 暴露 factor_anomaly_codes，避免伪造涨跌。读 parquet 需要 polars（requirements 已加）。
+- 指数数据：quan 的 index_daily.parquet 原本只有 000300/000905，2026-11-12 已用 `scripts/quan_migrate.py index` 追加 399006（2000 行）与 000688（1663 行），原有行零修改，备份 index_daily.parquet.bak_layerlab_20261112_193913；脚本幂等，重复执行新增 0 行。
+- quan 库数据质量现状（上游待修）：多数个股日线止于 2026-11-09（仅约 200 票到 11-11，选股 as_of 用全局 11-11）；trade_calendar 只到 2026-10-23；adj_factor 回退见上条。选股/回测结果以库内最新数据为准，回补请用 quan_quant 自己的更新器。
+- 数据源判定：`quan_data_dir()`（WB_QUAN_DATA_DIR，空串关闭，默认 D 盘目录且需存在 daily.parquet）；create_app 据此注入 QuanStore/QuanRefresher，`/api/health` 的 data_sources 显示 quan_parquet。单测 conftest 强制关闭 quan 源，`tests/test_quan_data.py` 用 tmp parquet 覆盖。
+- 迁移红线：只允许追加「库里不存在」的 (code/index_key,date) 行，已存在行绝不清空/覆盖；腾讯个股日线是前复权，禁止写入 quan 的不复权 daily.parquet（只迁移指数）。
+- **线上部署（2026-11-12 20:45）**：layer-lab 已用 5 分钟口径镜像重建；`deploy/compose.server.yaml` 挂载 `/srv/data/quan:/data/quan:ro`、`WB_QUAN_DATA_DIR=/data/quan/history`、`TZ=Asia/Shanghai`。访问 `https://47.119.50.139:3444`（HTTP Basic `owner`，密码见 `/root/layer-lab-auth.txt`；401=未认证但服务正常），直连 `http://47.119.50.139:3011`。
+- **线上稳定性**：`QuanStore.coverage()` 已改聚合+流式（峰值约 370MB），修复旧实现 `daily.select(code,date).collect()` + adj 全表排序在 1.8G 服务器触发 OOM、uvicorn 被杀后 nginx 永久 502 的问题；`deploy/start.sh` 改为 uvicorn 监督循环（崩溃/被 OOM 后 2s 自动重启，已实测）。
+- 服务器没有 quan `minute5/`：`_fetch_quan_bundle` 缺 5 分钟时回落腾讯 m5（320 根≈6~7 个交易日，source=tencent，不伪称 quan）；长周期 5m 回测需先把 minute5 同步到 `/srv/data/quan/history/minute5`。
+- **首仓口径（2026-11-13 用户确认「首仓不敏感」后改为尾盘）**：有 5 分钟数据时，空仓+`sequence_index==0` 且 14:30–14:50（左闭右开）由 `on_intraday` 发 `NEXT_BAR` 市价买单（reason=`尾盘首笔`），下一根已收盘 5 分钟 K 撮合；无 5m 数据/非尾盘时仍走 `on_daily` 收盘信号、`NEXT_OPEN` 次日开盘。同日 `entry_submitted_date` 去重 + `_has_pending_entry` 守卫，防止 15:00 日终重复建仓。盘中大盘门只用 `date < 当日` 的指数日线（防未来函数）。**回测同步生效**（带 5m 数据时首仓价/时点会变）。
+- **加仓盘中成交 + 后端定时器（2026-11-13 用户要求）**：加仓信号与首仓同样在 14:30–14:50 尾盘窗口用「当日 5 分钟 K 合成日线」判定（`_tail_add_requests`，`_add_signal` 与日线共用），发 `NEXT_BAR` 当日成交；`add_submitted_date` 去重，日终不重复；`on_intraday` 需传 `session_index`（缺失不发盘中加仓）。**live-tick 改由后端进程内定时器驱动**（`scheduler_loop`，交易时段每 5 分钟 +30s，`scheduler_run_once` 遍历 `auto_strategy&&ACTIVE` 账户；`GET/POST /api/paper/scheduler[/run]`；`WB_SCHEDULER=0` 关闭，单测已关）。绑定日线 `end < 当日` 时每标的每天自动刷新一次，**否则 `session_index` 冻结会让加仓「间隔≥1交易日」永不满足**。
+- **前端自动同步（2026-11-13）**：模拟交易页每 15 秒轮询账户 + `/api/paper/scheduler`，成交变化弹提示、显示「后端自动·运行中 / 最近推进时间」；只 `setAccount` 且 JSON 相同不重渲染，标签页隐藏/回放中跳过，回前台立即同步。生产构建无 HMR，部署后需刷新页面一次。
+- **交易日历门（2026-11-13）**：自动同步只在**交易日 09:25–15:30**；收盘后不发请求，睡到下一个交易日 09:25。判定优先级：**fuyao 同花顺日历**（`backend/app/calendar_api.py`，含未来交易日到 2027-02）→ 本地 quan `trade_calendar`（只含开市日且滞后，覆盖当天才权威）→ 09:35 后 `000001` 快照探测（`WB_TRADING_PROBE=0` 关闭）→ 工作日回落。后端 `scheduler_loop` 同样先过交易日门，周末/节假日连行情请求都不发。fuyao key 来源 `FUYAO_API_KEY`/`THS_API_KEY`/`<data>/fuyao_api_key`（服务器已写 `/data/fuyao_api_key` 0600 + `/root/layer-lab/.env`），compose 预留 `FUYAO_API_KEY` 变量；端点 `GET /api/trading/session`、`/api/health.trading_calendar`。
