@@ -149,6 +149,7 @@ class QuanStore:
         self.index_path = self.path / "index_daily.parquet"
         self.calendar_path = self.path / "trade_calendar.parquet"
         self.minute5_dir = self.path / "minute5"
+        self.turnover_path = self.path / "turnover_daily.parquet"
         self._lock = threading.RLock()
         self._basic: Any = None
         self._codes: list[UniverseRow] | None = None
@@ -156,6 +157,7 @@ class QuanStore:
         self._coverage_cache: tuple[float, dict] | None = None
         self._latest_cache: tuple[float, str | None] | None = None
         self._calendar_cache: tuple[float, list[str]] | None = None
+        self._turnover_cache: dict[str, dict[str, float]] | None = None
         self._cache_db = Path(cache_db) if cache_db else None
         if self._cache_db is not None:
             self._cache_db.parent.mkdir(parents=True, exist_ok=True)
@@ -694,17 +696,46 @@ class QuanStore:
         except ValueError:
             return False
 
+    def _daily_turnover_map(self, code: str) -> dict[str, float]:
+        """某标的的 {date: 当日日线换手率}，来自同目录 turnover_daily.parquet。
+
+        懒加载 + 按 code 缓存；parquet 缺失/无该 code 返回空 dict（做 T 准入降级）。
+        """
+        if self._turnover_cache is None:
+            self._turnover_cache = {}
+            if self.turnover_path.exists():
+                pl = self._pl
+                df = pl.read_parquet(self.turnover_path)
+                for row in df.iter_rows(named=True):
+                    self._turnover_cache.setdefault(str(row["code"]), {})[
+                        str(row["date"])[:10]
+                    ] = float(row["turnover"])
+        return self._turnover_cache.get(code, {})
+
     def load_minute5(
-        self, code: str, *, max_rows: int | None = 1200, end: str | None = None,
+        self, code: str, *, max_rows: int | None = 1200, start: str | None = None,
+        end: str | None = None, daily_turnover: dict[str, float] | None = None,
     ) -> list[Bar]:
-        """5 分钟 K 线（前复权，按 bar 当日因子折算）；文件缺失返回空列表。"""
+        """5 分钟 K 线（前复权，按 bar 当日因子折算）；文件缺失返回空列表。
+
+        ``start``/``end`` 下推日期过滤（长期持仓只取持有期，避免全表扫描）。
+        ``daily_turnover``：{YYYY-MM-DD: 当日日线换手率}，用于给 5 分钟 bar 代理
+        填充 turnover_rate（分钟 parquet 无换手字段，做 T 准入需要）。
+        未传时自动从同目录 turnover_daily.parquet 加载（若存在）。
+        历史 5 分钟无真实盘口，bid/ask 用 close±0.1% 代理（真实成本由 slippage 体现），
+        仅当缺失时填充，实盘真盘口不受影响。
+        """
         path = self.minute5_path(code)
         if not path.exists():
             return []
+        if daily_turnover is None:
+            daily_turnover = self._daily_turnover_map(code)
         symbol = standard_code(code)
         pure = pure_code(code)
         pl = self._pl
         lf = pl.scan_parquet(path)
+        if start:
+            lf = lf.filter(pl.col("date") >= str(start)[:10])
         if end:
             lf = lf.filter(pl.col("date") <= end)
         frame = lf.collect().sort("date")
@@ -733,6 +764,14 @@ class QuanStore:
                 bar.high = price(bar.high * scale)
                 bar.low = price(bar.low * scale)
                 bar.close = price(bar.close * scale)
+            # 回测代理：分钟 parquet 无盘口/换手字段，做 T 准入需要它们。
+            # bid/ask 用 close±0.1% 代理（真实成本由 slippage 体现）；换手率取当日日线值。
+            if bar.bid is None:
+                bar.bid = price(bar.close * 0.999)
+            if bar.ask is None:
+                bar.ask = price(bar.close * 1.001)
+            if bar.turnover_rate is None and daily_turnover:
+                bar.turnover_rate = daily_turnover.get(str(row.get("_day") or str(row["date"])[:10]))
             bars.append(bar)
             previous = bar.close
         if max_rows and len(bars) > max_rows:

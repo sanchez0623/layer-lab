@@ -4,6 +4,7 @@ import math
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
+from pathlib import Path
 from statistics import mean, stdev
 from typing import Any
 
@@ -400,14 +401,39 @@ class FunnelRotationBacktest:
         # 持仓标的日线惰性缓存：任意时刻最多驻留一只标的的历史。
         self._held_code: str | None = None
         self._held_bars: list[Bar] = []
+        # 日线换手率缓存 {code: {date: turn}}，来自 turnover_daily.parquet（做 T 准入）。
+        self._turnover_cache: dict[str, dict[str, float]] | None = None
 
     def _load_bars(self, code: str) -> list[Bar]:
         """单标的日线（最近 260 根）；供持仓回放与 buy_hold 参照按需加载。
 
         与改造前一致取 max_rows=260（tail 最近 N 根），窗口裁剪由 timeline 与
         buy_hold 处的日期过滤负责，这里不额外按 start/end 截断。
+        做 T 准入需要日线换手率，而 quan 源日线无换手字段（turnover_rate 恒 None），
+        这里从 turnover_daily.parquet（BaoStock 日线 turn，见 gen_turnover_parquet.py）
+        按日期填充——与模拟盘实时快照换手同口径（架构原则 1）。
         """
-        return self.store.load_history([code], max_rows=260).get(code, [])
+        bars = self.store.load_history([code], max_rows=260).get(code, [])
+        turn_map = self._daily_turnover(code)
+        if turn_map:
+            for bar in bars:
+                if bar.turnover_rate is None:
+                    bar.turnover_rate = turn_map.get(bar.date)
+        return bars
+
+    def _daily_turnover(self, code: str) -> dict[str, float]:
+        """某标的的 {date: 当日日线换手率}，来自同目录 turnover_daily.parquet（懒加载）。"""
+        if self._turnover_cache is None:
+            self._turnover_cache = {}
+            turn_path = self.store.turnover_path if hasattr(self.store, "turnover_path") else None
+            if turn_path and Path(turn_path).exists():
+                pl = self.store._pl
+                df = pl.read_parquet(turn_path)
+                for row in df.iter_rows(named=True):
+                    self._turnover_cache.setdefault(str(row["code"]), {})[
+                        str(row["date"])[:10]
+                    ] = float(row["turnover"])
+        return self._turnover_cache.get(code, {})
 
     def _bars_for(self, code: str | None) -> list[Bar]:
         """当前持仓标的的日线，带单条目缓存（换票时自然替换）。"""
