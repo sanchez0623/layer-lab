@@ -630,6 +630,62 @@ class QuanStore:
         )
         return int(frame.height)
 
+    def chg20d_asof(
+        self, codes: Sequence[str], *, as_of: str, window: int = 20,
+    ) -> dict[str, float]:
+        """截至 ``as_of`` 这些代码的 20 日收益（只扫 close 列，不构建 Bar）。
+
+        L0 个股深度超跌旁路用：避免为全池 2000 只候选构建 52 万根 Bar（2G ECS OOM）。
+        返回 ``{code: chg20d}``，只有同时存在 as_of 收盘与 window 根前收盘的代码才入表。
+        口径：raw close 比值（未复权），但同一标的相邻 20 根之间复权因子近似恒定，
+        作为「深度超跌排序/旁路」足够；正式 L1 仍走 load_history 的前复权 Bar。
+        """
+        pure_codes: list[str] = []
+        pure_to_raw: dict[str, str] = {}
+        for raw in codes or []:
+            try:
+                pure = pure_code(raw)
+            except ValueError:
+                continue
+            pure_codes.append(pure)
+            pure_to_raw.setdefault(pure, str(raw))
+        if not pure_codes:
+            return {}
+        pl = self._pl
+        as_of_text = str(as_of)[:10]
+        frame = (
+            pl.scan_parquet(self.daily_path)
+            .filter(pl.col("code").is_in(pure_codes))
+            .filter(pl.col("date") <= as_of_text)
+            .sort(["code", "date"])
+            .group_by("code", maintain_order=True)
+            .tail(window + 1)
+            .select(["code", "close"])
+            .collect()
+        )
+        if frame.height == 0:
+            return {}
+        result: dict[str, float] = {}
+        # frame 已按 code 分块（maintain_order），每块最多 window+1 行
+        current_pure: str | None = None
+        block: list[float] = []
+        for code, close in frame.iter_rows():
+            if code != current_pure:
+                if (
+                    current_pure is not None and len(block) >= window + 1
+                    and block[-1 - window] > 0 and current_pure in pure_to_raw
+                ):
+                    result[pure_to_raw[current_pure]] = block[-1] / block[-1 - window] - 1
+                current_pure = code
+                block = []
+            block.append(float(close))
+        if (
+            current_pure is not None and len(block) >= window + 1
+            and block[-1 - window] > 0 and current_pure in pure_to_raw
+        ):
+            result[pure_to_raw[current_pure]] = block[-1] / block[-1 - window] - 1
+        return result
+
     def load_series(
         self,
         code: str,

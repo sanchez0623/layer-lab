@@ -282,6 +282,24 @@ def test_load_history_with_end_returns_window_before_end(quan_dir):
     assert truncated["sz.300001"][0].date < latest["sz.300001"][0].date
 
 
+def test_chg20d_asof_lightweight_window(quan_dir):
+    """chg20d_asof 只扫 close 列，返回 {code: 20日收益}；不构建 Bar（OOM 保护）。"""
+    store = QuanStore(quan_dir)
+    latest = store.load_history(["sz.300001"], max_rows=40)
+    as_of = latest["sz.300001"][-1].date
+    result = store.chg20d_asof(["sz.300001", "sz.300002", "300009"], as_of=as_of)
+    # 样本数据持续阴跌，20 日收益应为负
+    assert "sz.300001" in result
+    assert result["sz.300001"] < 0
+    # 截断到早期 as_of 时，20 日收益与 load_history 的前复权 Bar 口径接近（都是 raw close 比值）
+    early = latest["sz.300001"][25].date
+    early_result = store.chg20d_asof(["sz.300001"], as_of=early)
+    bars = store.load_history(["sz.300001"], max_rows=40, end=early)["sz.300001"]
+    if len(bars) >= 21:
+        expected = bars[-1].close / bars[-21].close - 1
+        assert early_result["sz.300001"] == pytest.approx(expected, rel=0.01)
+
+
 def test_load_index(quan_dir):
     store = QuanStore(quan_dir)
     bars = store.load_index("sz.399006", max_rows=30)

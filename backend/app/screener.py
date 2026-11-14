@@ -602,25 +602,36 @@ def run_screener(
 
     # L0 个股深度超跌旁路：即使 L0 关门，若板块内存在 Chg20D < l0_stock_bypass_chg20d
     # 的标的，把这些标的单独加入候选（其余 L0 关门板块的标的仍被排除）。
+    # 内存关键：用 QuanStore.chg20d_asof 只扫 close 列（不构建 52 万根 Bar），
+    # 否则 2G ECS 上全池 2000 只 × 260 根 ≈ 500MB 会 OOM。
     bypass_codes: set[str] = set()
     if cfg.l0_stock_bypass_chg20d is not None:
         closed_boards = {board for board, entry in gate_boards.items() if not entry["open"]}
         bypass_rows = [row for row in rows if row.board in closed_boards]
         if bypass_rows:
-            bypass_history = store.load_history(
-                [row.code for row in bypass_rows], max_rows=260, end=as_of_text,
-            )
+            chg20d_by_code: dict[str, float] = {}
+            if hasattr(store, "chg20d_asof"):
+                chg20d_by_code = store.chg20d_asof(
+                    [row.code for row in bypass_rows], as_of=as_of_text,
+                )
+            else:  # 回落：UniverseStore 无 polars，退回 load_history（仅旧链路）
+                bypass_history = store.load_history(
+                    [row.code for row in bypass_rows], max_rows=260, end=as_of_text,
+                )
+                for row in bypass_rows:
+                    bars = _bar_window(bypass_history.get(row.code, []), as_of_text)
+                    if len(bars) >= 21 and bars[-21].close > 0 and bars[-1].close > 0:
+                        chg20d_by_code[row.code] = bars[-1].close / bars[-21].close - 1
+            threshold = float(cfg.l0_stock_bypass_chg20d)
+            codes_by_board: dict[str, int] = {}
             for row in bypass_rows:
-                bars = _bar_window(bypass_history.get(row.code, []), as_of_text)
-                if len(bars) < 21 or bars[-21].close <= 0 or bars[-1].close <= 0:
-                    continue
-                chg20d = bars[-1].close / bars[-21].close - 1
-                if chg20d < float(cfg.l0_stock_bypass_chg20d):
+                chg20d = chg20d_by_code.get(row.code)
+                if chg20d is not None and chg20d < threshold:
                     bypass_codes.add(row.code)
-                    gate_boards[row.board]["bypass"] = True
-                    gate_boards[row.board]["bypass_deep_count"] = (
-                        gate_boards[row.board].get("bypass_deep_count", 0) + 1
-                    )
+                    codes_by_board[row.board] = codes_by_board.get(row.board, 0) + 1
+            for board, count in codes_by_board.items():
+                gate_boards[board]["bypass"] = True
+                gate_boards[board]["bypass_deep_count"] = count
         if bypass_codes:
             gate_open = True
             gate["open"] = True
