@@ -21,6 +21,20 @@ _INDEX_LOOKBACK_BUFFER_DAYS = 45
 _DAILY_LOOKBACK_BUFFER_DAYS = 420
 _DAILY_WINDOW_MAX_ROWS = 2000
 
+# 选股 warnings 分两类（整合进换票轨迹，见 _screen）：
+# - 全局口径声明：整轮回测不变的口径/数据边界（做T粒度、财务深筛关闭、数据源覆盖盲区），
+#   只需在报告顶部提示一次，去重后进 report.warnings。
+# - 逐轮决策日志：每次选股「当天为什么这么决策」的动态结果（大盘门开关、有无候选、
+#   深度超跌旁路几只），必须挂在对应选股日的轨迹项上，否则平铺成一串无时间戳的行、
+#   无法对应到具体哪一轮。这类不再进全局 warnings。
+_GLOBAL_WARNING_MARKERS = (
+    "enable_fundamental_veto",   # 财务深筛关闭（防未来数据口径）
+    "财务深筛已关闭",             # L4 不否决的口径重申
+    "数据源未覆盖",               # 非标审计/资金占用等盲区需人工复核
+    "漏斗轮动回测启用",           # 5分钟做T / 日线降级 口径
+    "漏斗轮动回测为日线口径",
+)
+
 
 def performance_metrics(
     equity_curve: list[dict[str, Any]], initial_cash: float,
@@ -599,6 +613,16 @@ class FunnelRotationBacktest:
             index_history=self.index_history,
         )
         first = result.first
+        # 拆分本轮 warnings：全局口径声明去重进 self.warnings；逐轮决策日志留在本轮，
+        # 由调用方挂到该选股日的轨迹项（否则平铺成无时间戳的一长串，无法对应轮次）。
+        round_warnings = [
+            warning for warning in result.warnings
+            if not any(marker in warning for marker in _GLOBAL_WARNING_MARKERS)
+        ]
+        for warning in result.warnings:
+            if any(marker in warning for marker in _GLOBAL_WARNING_MARKERS):
+                if warning not in self.warnings:
+                    self.warnings.append(warning)
         snapshot = {
             "as_of": result.as_of,
             "gate_open": bool(result.gate.get("open")),
@@ -606,15 +630,14 @@ class FunnelRotationBacktest:
             "first_code": first.code if first else "",
             "first_name": first.name if first else "",
             "first_chg20d": (first.chg20d if first else None),
+            "screen_warnings": round_warnings,
         }
-        for warning in result.warnings:
-            if warning not in self.warnings:
-                self.warnings.append(warning)
         self.events.append({
             "date": as_of, "type": "SCREEN", "as_of": result.as_of,
             "gate_open": snapshot["gate_open"], "first_code": snapshot["first_code"],
             "first_name": snapshot["first_name"], "funnel": dict(result.funnel),
             "eligible_count": len(result.eligible),
+            "screen_warnings": round_warnings,
         })
         return snapshot
 
@@ -747,6 +770,10 @@ class FunnelRotationBacktest:
                     "exit_date": None, "pnl": None,
                     "chg20d_at_select": chg20d_at_select,
                     "gate_open": snapshot["gate_open"], "status": "WAITING",
+                    # 逐轮决策日志：本轮为什么开门/关门/空仓/旁路几只，挂在对应选股日。
+                    "screen_warnings": snapshot["screen_warnings"],
+                    # 漏斗计数（universe→L0→L1→L2→L3→eligible），供展开行显示 narrowing。
+                    "funnel": snapshot["funnel"],
                 })
                 if first_code:
                     current_symbol = first_code

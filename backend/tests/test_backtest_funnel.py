@@ -243,7 +243,26 @@ def test_funnel_gate_closed_waits_flat(tmp_path):
     trail = report["data_info"]["rotation_trail"]
     assert trail and all(item["status"] == "WAITING" and item["symbol"] is None for item in trail)
     assert any(item["gate_open"] is False for item in trail)
-    assert any("L0" in item or "空仓等待" in item for item in report["warnings"])
+    # 逐轮决策日志（大盘门关闭/空仓等待）挂在对应轮次的轨迹项上，不再平铺进全局 warnings。
+    assert any(
+        any("L0" in w or "空仓等待" in w for w in item.get("screen_warnings", []))
+        for item in trail
+    )
+    assert not any("L0" in w or "空仓等待" in w for w in report["warnings"])
+
+
+def test_funnel_round_warnings_carry_select_date(tmp_path):
+    """逐轮决策日志必须带选股日上下文：挂轨迹项 + 对应 SCREEN 事件，全局不再平铺。"""
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    report = _run(store)
+
+    trail = report["data_info"]["rotation_trail"]
+    assert trail and all("screen_warnings" in item for item in trail)
+    screens = [e for e in report["events"] if e["type"] == "SCREEN"]
+    assert screens and all("screen_warnings" in e for e in screens)
+    # 全局 warnings 只剩全程不变的口径声明（含 enable_fundamental_veto），无逐轮动态行。
+    assert any("enable_fundamental_veto" in w for w in report["warnings"])
+    assert not any("旁路" in w or "大盘门关闭" in w for w in report["warnings"])
 
 
 def test_funnel_forces_fundamental_veto_off(tmp_path):

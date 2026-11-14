@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, BarChart3, CalendarDays, ChevronDown, ChevronUp,
   CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Play, RotateCcw, ShieldAlert, TrendingDown, WalletCards,
@@ -232,6 +232,15 @@ export default function BacktestPage() {
   // 主报告已瘦身不含全量 trail，改走 GET /backtests/{id}/rotation-trail 后台分页。
   const isFunnel = String(report?.data_info?.mode) === 'funnel_rotation';
   const rotationTrail = useMemo<RotationTrailItem[]>(() => trailData?.items ?? [], [trailData]);
+  // 换票轨迹行展开：查看该选股日的逐轮决策日志（为什么开门/关门/空仓/旁路几只）+ 漏斗计数。
+  const [expandedTrails, setExpandedTrails] = useState<Set<string>>(new Set());
+  const toggleTrail = (key: string) => {
+    setExpandedTrails((current) => {
+      const next = new Set(current);
+      if (next.has(key)) { next.delete(key); } else { next.add(key); }
+      return next;
+    });
+  };
 
   // 切换报告时回到第一页（同一 report 内翻页不重置）。
   useEffect(() => { setTrailPage(1); }, [report?.id]);
@@ -442,29 +451,66 @@ export default function BacktestPage() {
               <div className="lineage-tags"><Badge>{String(report.data_info.daily_source || selectedDataset?.source || 'baostock')} 日线</Badge>{intradayId && <Badge tone="indigo">{String(report.data_info.intraday_source || 'tencent')} 5分钟</Badge>}{indexId && <Badge tone="green">指数大盘门</Badge>}{selectedDataset?.is_synthetic && <SyntheticNotice compact />}</div>
             </div>
             {Object.keys(report.data_info || {}).length > 0 && <div className="data-info-grid">{Object.entries(report.data_info).map(([key, value]) => <div key={key}><span>{key}</span><strong title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
-            {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
+            {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><small>全程不变的口径 / 数据边界；逐轮决策日志见下方「换票轨迹」展开行</small><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
           </Panel>
 
           {isFunnel && trailData && trailData.total > 0 && (
-            <Panel className="rotation-trail-panel" title="换票轨迹" description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待 · 共 ${trailData.total} 次筛选`} action={<Layers3 size={18} />}>
+            <Panel className="rotation-trail-panel" title="换票轨迹" description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待 · 点行首箭头展开该轮决策日志 · 共 ${trailData.total} 次筛选`} action={<Layers3 size={18} />}>
               <div className="table-scroll">
                 <table>
-                  <thead><tr><th>轮次</th><th>选股日</th><th>标的</th><th>名称</th><th className="num">入选 Chg20D</th><th>L0 门</th><th className="num">入场</th><th className="num">出场</th><th className="num">净盈亏</th><th>状态</th></tr></thead>
+                  <thead><tr><th></th><th>轮次</th><th>选股日</th><th>标的</th><th>名称</th><th className="num">入选 Chg20D</th><th>L0 门</th><th className="num">入场</th><th className="num">出场</th><th className="num">净盈亏</th><th>状态</th></tr></thead>
                   <tbody>
-                    {rotationTrail.map((item, index) => (
-                      <tr key={`${item.round}-${(trailPage - 1) * trailPageSize + index}`} className={item.status === 'WAITING' ? 'trail-waiting' : ''}>
-                        <td><strong className="round-id">{item.round || `#${(trailPage - 1) * trailPageSize + index + 1}`}</strong></td>
-                        <td>{shortDate(item.select_date)}</td>
-                        <td>{item.symbol ? <strong title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="muted">空仓等待</span>}</td>
-                        <td>{item.name || '—'}</td>
-                        <td className={`num ${item.chg20d_at_select != null ? (item.chg20d_at_select >= 0 ? 'positive' : 'negative') : ''}`}>{item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</td>
-                        <td><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></td>
-                        <td className="num">{item.entry_date ? shortDate(item.entry_date) : '—'}</td>
-                        <td className="num">{item.exit_date ? shortDate(item.exit_date) : '—'}</td>
-                        <td className={`num ${item.pnl != null ? (item.pnl >= 0 ? 'positive' : 'negative') : ''}`}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</td>
-                        <td><Badge tone={item.status === 'CLOSED' ? 'green' : item.status === 'OPEN' ? 'indigo' : 'amber'}>{item.status === 'CLOSED' ? '已结束' : item.status === 'OPEN' ? '持仓中' : '空仓等待'}</Badge></td>
-                      </tr>
-                    ))}
+                    {rotationTrail.map((item, index) => {
+                      const trailKey = item.round || `${item.select_date}-${index}`;
+                      const expanded = expandedTrails.has(trailKey);
+                      return (
+                        <Fragment key={trailKey}>
+                          <tr className={item.status === 'WAITING' ? 'trail-waiting' : ''}>
+                            <td>
+                              <button className="trail-expand-btn" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>
+                                {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                              </button>
+                            </td>
+                            <td><strong className="round-id">{item.round || `#${(trailPage - 1) * trailPageSize + index + 1}`}</strong></td>
+                            <td>{shortDate(item.select_date)}</td>
+                            <td>{item.symbol ? <strong title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="muted">空仓等待</span>}</td>
+                            <td>{item.name || '—'}</td>
+                            <td className={`num ${item.chg20d_at_select != null ? (item.chg20d_at_select >= 0 ? 'positive' : 'negative') : ''}`}>{item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</td>
+                            <td><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></td>
+                            <td className="num">{item.entry_date ? shortDate(item.entry_date) : '—'}</td>
+                            <td className="num">{item.exit_date ? shortDate(item.exit_date) : '—'}</td>
+                            <td className={`num ${item.pnl != null ? (item.pnl >= 0 ? 'positive' : 'negative') : ''}`}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</td>
+                            <td><Badge tone={item.status === 'CLOSED' ? 'green' : item.status === 'OPEN' ? 'indigo' : 'amber'}>{item.status === 'CLOSED' ? '已结束' : item.status === 'OPEN' ? '持仓中' : '空仓等待'}</Badge></td>
+                          </tr>
+                          {expanded && (
+                            <tr className="trail-detail-row">
+                              <td></td>
+                              <td colSpan={10}>
+                                <div className="trail-detail">
+                                  <div className="trail-funnel">
+                                    {[
+                                      { tag: '全市场', value: item.funnel?.universe },
+                                      { tag: 'L0 大盘门', value: item.funnel?.after_l0 },
+                                      { tag: 'L1 超跌', value: item.funnel?.after_l1 },
+                                      { tag: 'L2 否决', value: item.funnel?.after_l2 },
+                                      { tag: 'L3 容量', value: item.funnel?.after_l3 },
+                                      { tag: '可用候选', value: item.funnel?.eligible },
+                                    ].map((stage) => (
+                                      <span className="trail-funnel-stage" key={stage.tag}><small>{stage.tag}</small><strong>{stage.value ?? '—'}</strong></span>
+                                    ))}
+                                  </div>
+                                  {item.screen_warnings && item.screen_warnings.length > 0 ? (
+                                    <ul className="trail-warnings">
+                                      {item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}
+                                    </ul>
+                                  ) : <p className="trail-no-warning">本轮选股无逐轮决策提示。</p>}
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
