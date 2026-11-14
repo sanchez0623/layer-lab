@@ -257,8 +257,9 @@ export interface Report {
   metrics: ReportMetrics;
   equity_curve: EquityPoint[];
   /**
-   * 成交 / 委托 / 轮次明细已改为后台分页下发：主报告只带 `*_total` 条数，
+   * 成交 / 委托 / 轮次 / 事件 明细已改为后台分页下发：主报告只带 `*_total` 条数，
    * 全量数组走 GET /backtests/{id}/records/{kind}。字段保留为可选以兼容旧缓存报告。
+   * events 前端当前不渲染，但同样可能上万条，主报告一并瘦身只留 events_total。
    */
   trades?: Trade[];
   orders?: Order[];
@@ -266,7 +267,8 @@ export interface Report {
   trades_total?: number;
   orders_total?: number;
   rounds_total?: number;
-  events: BacktestEvent[];
+  events?: BacktestEvent[];
+  events_total?: number;
   warnings: string[];
   data_info: Record<string, unknown>;
 }

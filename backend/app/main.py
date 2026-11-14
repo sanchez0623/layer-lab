@@ -288,16 +288,23 @@ def _slim_rotation_trail(report: dict) -> dict:
     return report
 
 
-# 主报告里随数据量变长的三大明细列表（成交 / 委托 / 轮次）。
+# 主报告里随数据量变长的大数组（成交 / 委托 / 轮次 / 事件）。
 # 读取 / 创建响应只保留条数，全量改由 /records/{kind} 分页下发，
 # 避免长回测一次性序列化 / 传输 / 渲染成千上万行导致 REPORT 卡顿。
-_RECORD_FIELDS = {"trades": "trades_total", "orders": "orders_total", "rounds": "rounds_total"}
+# 实测 4ecfe242 报告 payload 19MB：orders 13MB + events 5.9MB，其余字段均 <0.15MB。
+_RECORD_FIELDS = {
+    "trades": "trades_total",
+    "orders": "orders_total",
+    "rounds": "rounds_total",
+    "events": "events_total",
+}
 
 
 def _slim_records(report: dict) -> dict:
-    """把主报告里的全量 ``trades`` / ``orders`` / ``rounds`` 抽走，只留条数。
+    """把主报告里的全量 ``trades`` / ``orders`` / ``rounds`` / ``events`` 抽走，只留条数。
 
     全量数据仍完整落库（save_backtest 在瘦身处之前调用），分页端点从库里读全量再切片。
+    events 前端当前不渲染，但同样可能上万条，一并瘦身避免白白下发。
     """
     for field, total_key in _RECORD_FIELDS.items():
         rows = report.get(field)
@@ -1349,10 +1356,10 @@ def create_app() -> FastAPI:
     @application.get("/api/backtests/{backtest_id}/records/{kind}")
     def backtest_records(
         backtest_id: str,
-        kind: Literal["trades", "orders", "rounds"],
+        kind: Literal["trades", "orders", "rounds", "events"],
         params: tuple[int, int] = Depends(page_params),
     ):
-        """成交明细 / 委托记录 / 已结束轮次分页：后台切片返回。
+        """成交明细 / 委托记录 / 已结束轮次 / 事件 分页：后台切片返回。
 
         主报告已瘦身不含全量明细（只留 ``*_total``），这里按页下发，
         避免长回测一次性传输 / 渲染成千上万行导致 REPORT 卡顿。
