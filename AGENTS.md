@@ -91,15 +91,27 @@ commit 到该分支 → 合并回 `main`（或走 PR）→ push。**版本号 bu
 ```powershell
 # 1) 用 CredRead 从 Windows 凭据管理器读出 GitHub token（gho_... OAuth token）
 #    写一段 Add-Type P/Invoke 调 CredRead，target 用 "gh:github.com:sanchez0623"
-# 2) token 放进内存变量（勿回显到输出/日志），内嵌 URL 推送：
+# 2) blob 必须用 UTF-8 解码（见下方要点，用 Unicode 解码会认证失败）
+$tok = [System.Text.Encoding]::UTF8.GetString($bytes).Trim([char]0)
+# 3) token 放进内存变量（勿回显到输出/日志），内嵌 URL 推送：
 git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanchez0623/layer-lab.git" main
-# 3) 验证：git -c http.sslbackend=openssl ls-remote "https://x-access-token:$tok@github.com/sanchez0623/layer-lab.git" main
+# 4) 验证：git -c http.sslbackend=openssl ls-remote "https://x-access-token:$tok@github.com/sanchez0623/layer-lab.git" main
 ```
 
 要点：
 - 必须 `-c http.sslbackend=openssl`（覆盖系统默认的 schannel，否则必报 SEC_E_NO_CREDENTIALS）。
+- **token blob 是 UTF-8 编码**（解出来是 40 字符、`gho_` 开头的 OAuth token）：解码必须用
+  `[System.Text.Encoding]::UTF8.GetString($bytes).Trim([char]0)`。**别用 `Unicode`/UTF-16**——
+  会得到乱码，GitHub 报 `Invalid username or token. Password authentication is not supported`
+  （2026-11-14 实测踩坑，浪费一轮排查）。诊断法：只打印 token 的 `Length`（应为 40）和前 4 位
+  （应为 `gho_`）确认解码对不对，**别回显全文**。
+- **间歇性网络抖动要重试**：GitHub 偶发 `Connection was reset` / `Failed to connect ... port 443`。
+  push 外面包一层 3 次重试（每次间隔几秒、每轮后用 `ls-remote` 比对远端 vs 本地 HEAD），认证没问题、
+  纯网络抖动时第 2~3 次即成功，别一次失败就判定凭据有问题。
 - 已验证：远端 `refs/heads/main` 与本地 HEAD 一致即成功；`signal pipe` 那两行是 git 无害警告，不影响结果。
-- token 全程只在内存、不回显、不落盘；临时读取脚本用完即删。
+  另外 `git-credential-wincred.exe ... No such file or directory` 的 erase/store 报错同样是**无害噪音**
+  （沙箱里 helper 缺失），只要内嵌 token 的 push 最终成功就忽略。
+- token 全程只在内存、不回显、不落盘；临时读取脚本用完即删（`$tok = $null`）。
 
 ### 数据库改动注意
 
