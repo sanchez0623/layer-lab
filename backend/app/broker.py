@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import asdict
 from datetime import datetime
-from typing import Iterable
+from typing import Any, Iterable
 
 from .domain import (
     Bar, FeeBreakdown, Fill, Order, OrderRequest, Position, StrategyConfig, money, price, utc_now,
@@ -95,6 +95,46 @@ class BrokerAccount:
         self.rotation_pending_advance: bool = False
         self._next_order_number = 1
         self._next_fill_number = 1
+
+    # -- 快照 / 恢复（供回测断点续传使用） --------------------------------
+    #
+    # 目标：把账户在某个「交易日边界」的完整可变状态序列化成 JSON，之后能原样
+    # 还原，使续传后的撮合/决策与一次性跑完逐字节一致。采用「遍历 __dict__ +
+    # 对已知 dataclass 类型做 to_dict/重建」的通用做法，避免逐字段白名单
+    # （新增字段自动被覆盖，不会漏）。config 不参与快照：它由构造时传入且运行期
+    # 不变（交易进行中配置定格，见 AGENTS.md 架构原则 3），还原时保留当前 config。
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """序列化账户可变状态为 JSON 友好的 dict（不含 config）。"""
+        out: dict[str, Any] = {}
+        for key, value in self.__dict__.items():
+            if key == "config":
+                continue
+            if key == "positions" and isinstance(value, dict):
+                out[key] = {code: asdict(pos) for code, pos in value.items()}
+            elif key == "orders" and isinstance(value, list):
+                out[key] = [asdict(item) for item in value]
+            elif key == "trades" and isinstance(value, list):
+                out[key] = [asdict(item) for item in value]
+            else:
+                out[key] = value
+        return out
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """从 snapshot_state() 的输出还原账户状态（保留当前 config 对象）。"""
+        current_config = self.config
+        for key, value in state.items():
+            if key == "config":
+                continue
+            if key == "positions" and isinstance(value, dict):
+                self.positions = {code: Position(**pos) for code, pos in value.items()}
+            elif key == "orders" and isinstance(value, list):
+                self.orders = [Order(**item) for item in value]
+            elif key == "trades" and isinstance(value, list):
+                self.trades = [Fill(**item) for item in value]
+            else:
+                setattr(self, key, value)
+        self.config = current_config
 
     @property
     def reserved_cash(self) -> float:

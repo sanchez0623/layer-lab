@@ -38,3 +38,13 @@
 .page-jump input::-webkit-outer-spin-button, .page-jump input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .page-size { display: inline-flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: 12px; }
 .page-size select { padding: 5px 8px; color: var(--text); background: var(--panel); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+
+/* ---- 后台回测作业进度条（BacktestPage，配合 /api/backtests/jobs） ---- */
+.job-progress { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-soft); }
+.job-progress-topline { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.job-progress-label { font-size: 13px; font-weight: 600; color: var(--text); }
+.job-progress-actions { display: flex; align-items: center; gap: 8px; }
+.job-progress-track { height: 8px; margin-top: 10px; border-radius: 999px; background: #ececf1; overflow: hidden; }
+.job-progress-fill { height: 100%; border-radius: 999px; background: var(--indigo); transition: width .4s ease; }
+.job-progress-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; color: var(--text-soft); font-size: 12px; font-family: var(--mono); }
+.job-progress-meta .negative { color: var(--red); }

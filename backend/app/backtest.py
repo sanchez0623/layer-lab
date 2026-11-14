@@ -6,13 +6,17 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from statistics import mean, stdev
-from typing import Any
+from typing import Any, Callable
 
 from .broker import BrokerAccount
 from .domain import Bar, Fill, StrategyConfig, money, utc_now
 from .screener import ScreenerConfig, run_screener
 from .strategy import LayeredTStrategy
 from .universe import BOARD_INDEX, UniverseStore
+
+
+class BacktestCancelled(Exception):
+    """回测在交易日边界被主动取消。引擎捕获后返回部分报告（status=CANCELLED）。"""
 
 # 回测指数加载：start 前推的日历天缓冲，保证回测首日往前 ≥21 根（L0 ret20 + 策略大盘门）。
 _INDEX_LOOKBACK_BUFFER_DAYS = 45
@@ -80,6 +84,7 @@ class BacktestEngine:
         index: list[Bar] | None = None, initial_cash: float = 4_000_000.0,
         config: StrategyConfig | None = None, start_date: str | None = None,
         end_date: str | None = None, name: str = "分层加仓做T回测",
+        hooks: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
         self.daily_all = sorted(daily, key=lambda item: item.timestamp)
         if not self.daily_all:
@@ -92,12 +97,25 @@ class BacktestEngine:
         self.start_date = datetime.fromisoformat(start_date).date() if start_date else None
         self.end_date = datetime.fromisoformat(end_date).date() if end_date else None
         self.name = name
+        # 后台任务协作钩子（默认不传 = 与旧同步行为完全一致）：
+        #   on_progress(done, total, cursor_date, engine_state) 每个交易日边界回调，供任务层写检查点/进度。
+        #   should_cancel() -> bool 每个交易日开始前检查，命中则抛 BacktestCancelled。
+        self.hooks = hooks or {}
         self.events: list[dict[str, Any]] = []
         self.warnings: list[str] = []
         self.rounds: list[dict[str, Any]] = []
         self.current_round: dict[str, Any] | None = None
         self.max_invested = 0.0
         self.max_float_loss = 0.0
+
+    def restore_engine_state(self, state: dict[str, Any]) -> None:
+        """从检查点还原引擎可变状态（账户/策略状态由任务层先用各自 restore 还原）。"""
+        self.rounds = list(state.get("rounds", []))
+        self.current_round = state.get("current_round")
+        self.events = list(state.get("events", []))
+        self.warnings = list(state.get("warnings", []))
+        self.max_invested = float(state.get("max_invested", 0.0))
+        self.max_float_loss = float(state.get("max_float_loss", 0.0))
 
     def _selected_days(self) -> list[int]:
         result = []
@@ -207,7 +225,7 @@ class BacktestEngine:
                 "execution_mode": order.execution_mode,
             })
 
-    def run(self) -> dict[str, Any]:
+    def run(self, resume_state: dict[str, Any] | None = None) -> dict[str, Any]:
         selected = self._selected_days()
         intraday_by_date: dict[str, list[Bar]] = defaultdict(list)
         for bar in self.intraday_all:
@@ -215,72 +233,110 @@ class BacktestEngine:
         index_by_date: dict[str, list[Bar]] = defaultdict(list)
         for bar in self.index_all:
             index_by_date[bar.date].append(bar)
+        # 续传时这些只读告警会重复追加，先按去重口径重建，避免 warnings 膨胀。
+        base_warnings = list(self.warnings)
         if not self.intraday_all:
-            self.warnings.append("未提供intraday：T交易和tick级风控降级；仅收盘出信号，次一交易日开盘执行，不使用未来价。")
+            base_warnings.append("未提供intraday：T交易和tick级风控降级；仅收盘出信号，次一交易日开盘执行，不使用未来价。")
         else:
             actual = sorted({bar.timeframe for bar in self.intraday_all})
-            self.warnings.append(f"intraday实际粒度为{','.join(actual)}；信号在bar收盘形成，下一bar开盘撮合。")
+            base_warnings.append(f"intraday实际粒度为{','.join(actual)}；信号在bar收盘形成，下一bar开盘撮合。")
         if not self.index_all:
-            self.warnings.append("未提供指数数据：大盘门无法计算，按中性通过处理，属于降级模式。")
+            base_warnings.append("未提供指数数据：大盘门无法计算，按中性通过处理，属于降级模式。")
         if any(getattr(bar, "symbol", "").startswith("SYNTH") for bar in self.daily_all):
-            self.warnings.append("数据为确定性synthetic演示行情，不代表任何真实历史。")
+            base_warnings.append("数据为确定性synthetic演示行情，不代表任何真实历史。")
+        self.warnings = base_warnings
 
-        equity_curve: list[dict[str, Any]] = []
-        used_dates: list[str] = []
+        # 断点续传：还原引擎可变状态 + 已跑完的进度边界，跳到 cursor 之后继续。
+        start_after = -1
+        if resume_state:
+            self.restore_engine_state(resume_state)
+            start_after = int(resume_state.get("cursor_index", -1))
+        equity_curve: list[dict[str, Any]] = list(resume_state.get("equity_curve", [])) if resume_state else []
+        used_dates: list[str] = list(resume_state.get("used_dates", [])) if resume_state else []
         missing_intraday_dates: list[str] = []
         first_open = self.daily_all[selected[0]].open
-        for session_index in selected:
-            daily = self.daily_all[session_index]
-            history = self.daily_all[:session_index + 1]
-            index_history = [
-                item for item in self.index_all if item.timestamp.date() <= daily.timestamp.date()
-            ]
-            bars_today = intraday_by_date.get(daily.date, [])
-            has_intraday = bool(bars_today)
-            self.account.new_day(daily.date, cancel_previous=False)
-            self.strategy.start_day(has_intraday)
-            used_dates.append(daily.date)
+        total = len(selected)
+        try:
+            for session_index in selected:
+                if session_index <= start_after:
+                    continue
+                if self.hooks.get("should_cancel") and self.hooks["should_cancel"]():
+                    raise BacktestCancelled()
+                daily = self.daily_all[session_index]
+                history = self.daily_all[:session_index + 1]
+                index_history = [
+                    item for item in self.index_all if item.timestamp.date() <= daily.timestamp.date()
+                ]
+                bars_today = intraday_by_date.get(daily.date, [])
+                has_intraday = bool(bars_today)
+                self.account.new_day(daily.date, cancel_previous=False)
+                self.strategy.start_day(has_intraday)
+                used_dates.append(daily.date)
 
-            if has_intraday:
-                recent: list[Bar] = []
-                previous_daily = history[:-1]
-                for bar_index, bar in enumerate(bars_today):
-                    modes = {"NEXT_BAR", "NEXT_OPEN"} if bar_index == 0 else {"NEXT_BAR"}
-                    fills = self.account.process_bar(bar, modes=modes)
+                if has_intraday:
+                    recent: list[Bar] = []
+                    previous_daily = history[:-1]
+                    for bar_index, bar in enumerate(bars_today):
+                        modes = {"NEXT_BAR", "NEXT_OPEN"} if bar_index == 0 else {"NEXT_BAR"}
+                        fills = self.account.process_bar(bar, modes=modes)
+                        self._handle_fills(fills, session_index, daily)
+                        if bar_index == 0:
+                            self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
+                        self.account.mark(bar.symbol, bar.close)
+                        recent.append(bar)
+                        requests = self.strategy.on_intraday(
+                            previous_daily, recent, bar, self.account,
+                            index_history=index_history, session_index=session_index,
+                        )
+                        self._submit(requests, bar.timestamp)
+                    self.account.cancel_open_orders("日内订单日终取消", modes={"NEXT_BAR"})
+                else:
+                    fills = self.account.process_bar(daily, modes={"NEXT_OPEN"})
                     self._handle_fills(fills, session_index, daily)
-                    if bar_index == 0:
-                        self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
-                    self.account.mark(bar.symbol, bar.close)
-                    recent.append(bar)
-                    requests = self.strategy.on_intraday(
-                        previous_daily, recent, bar, self.account,
-                        index_history=index_history, session_index=session_index,
-                    )
-                    self._submit(requests, bar.timestamp)
-                self.account.cancel_open_orders("日内订单日终取消", modes={"NEXT_BAR"})
-            else:
-                fills = self.account.process_bar(daily, modes={"NEXT_OPEN"})
-                self._handle_fills(fills, session_index, daily)
-                self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
-                if self.intraday_all:
-                    missing_intraday_dates.append(daily.date)
+                    self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
+                    if self.intraday_all:
+                        missing_intraday_dates.append(daily.date)
 
-            self.account.mark(daily.symbol, daily.close)
-            self._update_round(daily, session_index)
-            requests = self.strategy.on_daily(history, index_history, self.account, session_index, has_intraday)
-            self._submit(requests, daily.timestamp)
-            position = self.account.position(daily.symbol)
-            equity_curve.append({
-                "date": daily.date, "equity": self.account.equity, "cash": self.account.cash,
-                "market_value": self.account.market_value, "invested": position.permanent_cost,
-                "drawdown": 0.0, "position_qty": position.total_qty,
-            })
+                self.account.mark(daily.symbol, daily.close)
+                self._update_round(daily, session_index)
+                requests = self.strategy.on_daily(history, index_history, self.account, session_index, has_intraday)
+                self._submit(requests, daily.timestamp)
+                position = self.account.position(daily.symbol)
+                equity_curve.append({
+                    "date": daily.date, "equity": self.account.equity, "cash": self.account.cash,
+                    "market_value": self.account.market_value, "invested": position.permanent_cost,
+                    "drawdown": 0.0, "position_qty": position.total_qty,
+                })
+                if self.hooks.get("on_progress"):
+                    done = sum(1 for idx in selected if idx <= session_index)
+                    self.hooks["on_progress"](done, total, daily.date, self._engine_snapshot(
+                        session_index, daily.date, equity_curve, used_dates,
+                    ))
+        except BacktestCancelled:
+            return self._finalize(equity_curve, used_dates, selected, first_open, status="CANCELLED")
 
         if missing_intraday_dates:
             self.warnings.append(
                 f"{len(missing_intraday_dates)}个交易日无5分钟数据（{missing_intraday_dates[0]}起）；"
                 "这些日期仅执行既有次日开盘订单，不做盘中信号。"
             )
+        return self._finalize(equity_curve, used_dates, selected, first_open, status="COMPLETED")
+
+    def _engine_snapshot(self, cursor_index: int, cursor_date: str,
+                         equity_curve: list[dict[str, Any]],
+                         used_dates: list[str]) -> dict[str, Any]:
+        return {
+            "cursor_index": cursor_index, "cursor_date": cursor_date,
+            "equity_curve": list(equity_curve), "used_dates": list(used_dates),
+            "rounds": self.rounds, "current_round": self.current_round,
+            "events": self.events, "warnings": self.warnings,
+            "max_invested": self.max_invested, "max_float_loss": self.max_float_loss,
+        }
+
+    def _finalize(self, equity_curve: list[dict[str, Any]], used_dates: list[str],
+                  selected: list[int], first_open: float, status: str) -> dict[str, Any]:
+        """收尾并生成报告。CANCELLED 时保留未闭合轮次为 OPEN、不强行结束，用于断点续传。"""
+        cancelled = status == "CANCELLED"
         if self.current_round:
             item = self.current_round
             item["pnl"] = money(self.account.equity - item["start_equity"])
@@ -288,17 +344,23 @@ class BacktestEngine:
             item.pop("_deep_loss_start_session", None)
             self.rounds.append(item)
             self.current_round = None
-        self.account.cancel_open_orders("回测结束")
-        last_close = self.daily_all[selected[-1]].close
-        metrics = performance_metrics(
-            equity_curve, self.account.initial_cash, self.rounds,
-            [item.to_dict() for item in self.account.trades], self.account.total_fees,
-            self.account.t_net_profit, self.max_invested, self.max_float_loss,
-            last_close / first_open - 1,
-        )
+        if not cancelled:
+            self.account.cancel_open_orders("回测结束")
+        last_close = self.daily_all[selected[-1]].close if used_dates else first_open
+        buy_hold = (last_close / first_open - 1) if first_open and used_dates else 0.0
+        if equity_curve:
+            metrics = performance_metrics(
+                equity_curve, self.account.initial_cash, self.rounds,
+                [item.to_dict() for item in self.account.trades], self.account.total_fees,
+                self.account.t_net_profit, self.max_invested, self.max_float_loss,
+                buy_hold,
+            )
+        else:
+            # 首日尚未跑完即取消：净值曲线为空，performance_metrics 会抛错，这里给空指标。
+            metrics = {}
         data_info = {
             "daily_timeframe": "daily", "daily_rows_total": len(self.daily_all),
-            "daily_rows_used": len(selected), "intraday_timeframe": (
+            "daily_rows_used": len(used_dates), "intraday_timeframe": (
                 self.intraday_all[0].timeframe if self.intraday_all else None
             ),
             "intraday_rows": len(self.intraday_all), "index_rows": len(self.index_all),
@@ -306,10 +368,11 @@ class BacktestEngine:
             "data_label": "synthetic" if any(bar.symbol.startswith("SYNTH") for bar in self.daily_all) else "market_source",
             "actual_granularity": self.intraday_all[0].timeframe if self.intraday_all else "daily_only",
             "execution": "T日收盘信号/T+1开盘；intraday信号下一bar；无未来价",
-            "start": used_dates[0], "end": used_dates[-1],
+            "start": used_dates[0] if used_dates else None,
+            "end": used_dates[-1] if used_dates else None,
         }
         return {
-            "id": str(uuid.uuid4()), "name": self.name, "status": "COMPLETED",
+            "id": str(uuid.uuid4()), "name": self.name, "status": status,
             "created_at": utc_now(), "config": {
                 **self.config.to_dict(), "initial_cash": self.account.initial_cash,
                 "start_date": self.start_date.isoformat() if self.start_date else None,
@@ -324,7 +387,8 @@ class BacktestEngine:
 
 
 def run_backtest(**kwargs) -> dict[str, Any]:
-    return BacktestEngine(**kwargs).run()
+    resume_state = kwargs.pop("resume_state", None)
+    return BacktestEngine(**kwargs).run(resume_state=resume_state)
 
 
 class FunnelRotationBacktest:
@@ -340,7 +404,7 @@ class FunnelRotationBacktest:
         initial_cash: float = 4_000_000.0, config: StrategyConfig | None = None,
         start_date: str | None = None, end_date: str | None = None,
         name: str = "选股漏斗轮动回测",
-        quan: Any = None,
+        quan: Any = None, hooks: dict[str, Callable[..., Any]] | None = None,
     ) -> None:
         self.store = store
         self.market = market
@@ -364,6 +428,8 @@ class FunnelRotationBacktest:
         self.current_round: dict[str, Any] | None = None
         self.max_invested = 0.0
         self.max_float_loss = 0.0
+        # 后台任务协作钩子（默认不传 = 与旧同步行为完全一致），语义同 BacktestEngine。
+        self.hooks = hooks or {}
         self._prepare_data()
 
     # -- 数据准备 ---------------------------------------------------------
@@ -618,29 +684,43 @@ class FunnelRotationBacktest:
         })
         return snapshot
 
-    def run(self) -> dict[str, Any]:
+    def run(self, resume_state: dict[str, Any] | None = None) -> dict[str, Any]:
         has_quan = self.quan is not None
         if has_quan:
             self.warnings.append("漏斗轮动回测启用5分钟做T：持仓期逐根处理5分钟bar，准入换手/盘口用日线turn+代理盘口")
         else:
             self.warnings.append("漏斗轮动回测为日线口径（无5分钟数据源），T交易与tick级风控降级")
         self.warnings.append("财务深筛已强制关闭（enable_fundamental_veto=False）：避免联网财务与未来数据")
-        self._chg20d_at_select: dict[str, float | None] = {}
-        self._screen_by_symbol: dict[str, dict] = {}
-        # 每次选股的轨迹（含空仓等待的选股），轮次闭合时回填 entry/exit/pnl
-        self._trail: list[dict[str, Any]] = []
-        current_symbol: str | None = None
-        flat_wait_days = 0
-        session_index = -1
-        self._round_just_closed = False
+        # 断点续传：还原引擎可变状态 + 已跑完的进度边界，跳到 cursor 之后继续。
+        resume_state = resume_state or {}
+        start_after = int(resume_state.get("cursor_index", -1))
+        self._chg20d_at_select = dict(resume_state.get("chg20d_at_select", {}))
+        self._screen_by_symbol = dict(resume_state.get("screen_by_symbol", {}))
+        self._trail = list(resume_state.get("trail", []))
+        self._round_just_closed = bool(resume_state.get("round_just_closed", False))
+        self.rounds = list(resume_state.get("rounds", []))
+        self.current_round = resume_state.get("current_round")
+        self.events = list(resume_state.get("events", []))
+        self.warnings = list(resume_state.get("warnings", self.warnings))
+        self.max_invested = float(resume_state.get("max_invested", 0.0))
+        self.max_float_loss = float(resume_state.get("max_float_loss", 0.0))
+        current_symbol: str | None = resume_state.get("current_symbol")
+        flat_wait_days = int(resume_state.get("flat_wait_days", 0))
+        session_index = int(resume_state.get("session_index", -1))
         # 持仓标的的 5 分钟序列（按日分组），换票时重新加载
         intraday_by_date: dict[str, list[Bar]] = {}
-        t_trade_count = 0
+        t_trade_count = int(resume_state.get("t_trade_count", 0))
 
-        equity_curve: list[dict[str, Any]] = []
-        used_dates: list[str] = []
+        equity_curve: list[dict[str, Any]] = list(resume_state.get("equity_curve", []))
+        used_dates: list[str] = list(resume_state.get("used_dates", []))
+        total = len(self.timeline)
         for date_str in self.timeline:
             session_index += 1
+            if session_index <= start_after:
+                continue
+            if self.hooks.get("should_cancel") and self.hooks["should_cancel"]():
+                session_index -= 1
+                return self._finalize(equity_curve, used_dates, status="CANCELLED")
             used_dates.append(date_str)
             # cancel_previous=False：隔夜 NEXT_OPEN 挂单要保留到次日开盘撮合（与 BacktestEngine 一致）。
             self.account.new_day(date_str, cancel_previous=False)
@@ -776,8 +856,39 @@ class FunnelRotationBacktest:
                 "position_qty": position.total_qty if position else 0,
                 "symbol": held,
             })
+            if self.hooks.get("on_progress"):
+                self.hooks["on_progress"](len(used_dates), total, date_str, self._engine_snapshot(
+                    session_index, date_str, equity_curve, used_dates,
+                    current_symbol=current_symbol, flat_wait_days=flat_wait_days,
+                    intraday_by_date_keys=list(intraday_by_date.keys()),
+                    t_trade_count=t_trade_count,
+                ))
 
-        # 收尾：未闭合的轮次按 OPEN 记录；清掉剩余挂单
+        return self._finalize(equity_curve, used_dates, status="COMPLETED")
+
+    def _engine_snapshot(self, cursor_index: int, cursor_date: str,
+                         equity_curve: list[dict[str, Any]], used_dates: list[str], *,
+                         current_symbol: str | None, flat_wait_days: int,
+                         intraday_by_date_keys: list[str], t_trade_count: int) -> dict[str, Any]:
+        """引擎可变状态快照（账户/策略状态由任务层另存）。供断点续传写检查点。"""
+        return {
+            "cursor_index": cursor_index, "cursor_date": cursor_date,
+            "equity_curve": list(equity_curve), "used_dates": list(used_dates),
+            "chg20d_at_select": self._chg20d_at_select,
+            "screen_by_symbol": self._screen_by_symbol, "trail": self._trail,
+            "round_just_closed": self._round_just_closed,
+            "rounds": self.rounds, "current_round": self.current_round,
+            "events": self.events, "warnings": self.warnings,
+            "max_invested": self.max_invested, "max_float_loss": self.max_float_loss,
+            "current_symbol": current_symbol, "flat_wait_days": flat_wait_days,
+            "intraday_by_date_keys": intraday_by_date_keys,
+            "t_trade_count": t_trade_count,
+        }
+
+    def _finalize(self, equity_curve: list[dict[str, Any]], used_dates: list[str],
+                  status: str) -> dict[str, Any]:
+        """收尾并生成报告。CANCELLED 保留未闭合轮次为 OPEN、不强行结束，用于断点续传。"""
+        cancelled = status == "CANCELLED"
         if self.current_round:
             item = self.current_round
             item["pnl"] = money(self.account.equity - item["start_equity"])
@@ -785,7 +896,8 @@ class FunnelRotationBacktest:
             item.pop("_deep_loss_start_session", None)
             self.rounds.append(item)
             self.current_round = None
-        self.account.cancel_open_orders("回测结束")
+        if not cancelled:
+            self.account.cancel_open_orders("回测结束")
 
         # 回填轨迹里的 entry/exit/pnl（按 round_id 关联）
         rounds_by_id = {item["id"]: item for item in self.rounds}
@@ -839,14 +951,14 @@ class FunnelRotationBacktest:
                 len(item) for item in self.index_history.values()
             ),
             "execution": "T日收盘选股/T+1开盘建仓；T日收盘信号/T+1开盘；无未来价",
-            "start": used_dates[0], "end": used_dates[-1],
+            "start": used_dates[0] if used_dates else None, "end": used_dates[-1] if used_dates else None,
             "date_range": [self.timeline[0], self.timeline[-1]],
             "screening_count": screening_count,
             "reference_symbol": reference_symbol,
             "rotation_trail": self._trail,
         }
         return {
-            "id": str(uuid.uuid4()), "name": self.name, "status": "COMPLETED",
+            "id": str(uuid.uuid4()), "name": self.name, "status": status,
             "created_at": utc_now(), "config": {
                 **self.config.to_dict(), "initial_cash": self.account.initial_cash,
                 "screener": self.screener_config.to_dict(),
@@ -862,4 +974,5 @@ class FunnelRotationBacktest:
 
 
 def run_funnel_backtest(**kwargs) -> dict[str, Any]:
-    return FunnelRotationBacktest(**kwargs).run()
+    resume_state = kwargs.pop("resume_state", None)
+    return FunnelRotationBacktest(**kwargs).run(resume_state=resume_state)

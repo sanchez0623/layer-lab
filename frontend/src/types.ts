@@ -86,6 +86,36 @@ export interface FunnelBacktestRequest {
   screener?: Partial<ScreenerConfig>;
 }
 
+/** 后台回测作业请求：single 模式必须带 dataset_id，funnel 模式必须带非空 screener.boards。 */
+export interface BacktestJobRequest {
+  mode: 'single' | 'funnel';
+  name: string;
+  dataset_id?: string;
+  intraday_dataset_id?: string;
+  index_dataset_id?: string;
+  initial_cash: number;
+  start_date?: string;
+  end_date?: string;
+  config: Partial<StrategyConfig>;
+  fees?: FeeConfig;
+  screener?: Partial<ScreenerConfig>;
+}
+
+/** 后台回测作业视图（GET /backtests/jobs/{id}）。progress 为 0–100 浮点，cursor_date 为最近完成的交易日。 */
+export type BacktestJobStatus = 'RUNNING' | 'COMPLETED' | 'CANCELLED' | 'INTERRUPTED' | 'FAILED';
+
+export interface BacktestJobView {
+  id: string;
+  name: string;
+  status: BacktestJobStatus;
+  progress: number;
+  cursor_date: string | null;
+  total_days: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /** 单轮换票轨迹（漏斗轮动回测 data_info.rotation_trail 元素）。 */
 export interface RotationTrailItem {
   round: string;
