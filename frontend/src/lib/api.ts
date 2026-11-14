@@ -188,7 +188,7 @@ export const api = {
   setAutoStrategy: (id: string, enabled: boolean) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/auto-strategy`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** 局部更新模拟账户策略配置（非费率）；下一根K线起的新操作立刻生效。 */
-  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_net_spread' | 't_exit_cutoff' | 'max_holding_days' | 'holding_tp_override' | 'etf_beta_enabled' | 'etf_symbol' | 'etf_position_pct' | 'etf_entry_ma_days' | 'etf_exit_ma_days' | 'etf_hard_stop_pct' | 'etf_entry_max_deviation' | 'etf_reentry_cooldown_days'>>) =>
+  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_net_spread' | 't_exit_cutoff' | 'max_holding_days' | 'holding_tp_override' | 'add_tier_strict' | 't_deep_drop_pct' | 'etf_beta_enabled' | 'etf_symbol' | 'etf_position_pct' | 'etf_entry_ma_days' | 'etf_exit_ma_days' | 'etf_hard_stop_pct' | 'etf_entry_max_deviation' | 'etf_reentry_cooldown_days'>>) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/config`, { method: 'POST', body: JSON.stringify(patch) }),
   /** 把回测配置整套应用到模拟账户（策略字段 config 已 strip 费率 + 费率 fees 万分之）；下一根K线起生效。 */
   applyAccountConfig: (id: string, payload: { config: Partial<StrategyConfig>; fees?: FeeConfig }) =>

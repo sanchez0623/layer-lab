@@ -59,6 +59,10 @@ export interface StrategyConfig {
   max_holding_days?: number | null;
   /** 超期降阈后的止盈阈值（小数，0.03 = 3%）；与 max_holding_days 必须同时配置 */
   holding_tp_override?: number | null;
+  /** 加仓按档位先松后紧：A3 浮亏信号随 16 笔序列档位逐级加严（false = 全档统一原始 A3） */
+  add_tier_strict?: boolean;
+  /** 深跌幅当日做T：日内跌幅 ≥ 该值（小数，0.10 = 10%）绕过底仓笔数门槛；null/0 = 关闭 */
+  t_deep_drop_pct?: number | null;
   /** 指数 beta 腿：空仓期间持有创业板 ETF，选到个股后卖出换股 */
   etf_beta_enabled?: boolean;
   etf_symbol?: string;

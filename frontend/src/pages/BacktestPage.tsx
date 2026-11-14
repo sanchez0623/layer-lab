@@ -45,6 +45,10 @@ const fallbackConfig: StrategyConfig = {
   t_exit_cutoff: '14:50',
   max_holding_days: 22,
   holding_tp_override: 0.03,
+  // 加仓按档位先松后紧：A3 浮亏信号逐档加严（档1 最松 → 档4 = 原始 A3）。
+  add_tier_strict: true,
+  // 深跌幅当日做T：日内跌幅 ≥ 10% 绕过底仓笔数门槛（0 = 关闭）。
+  t_deep_drop_pct: 0.10,
   // 指数 beta 腿默认开启（需求：空仓期默认用创业板 ETF 承接 beta，可手动关闭）。
   etf_beta_enabled: true,
   etf_symbol: 'sz.159915',
@@ -825,6 +829,7 @@ export default function BacktestPage() {
 
               <div className="grid gap-2">
                 <SwitchRow label="启用做 T" description="可选，不占用 16 笔序列" checked={config.enable_t} onCheckedChange={(checked) => updateConfig('enable_t', checked)} />
+                <SwitchRow label="加仓按档位先松后紧" description="A3 浮亏信号逐档加严：档1（10万）最松（浮亏+缩量），档4（40万）最严（= 原始 A3）；浮盈右侧回撤不变。关闭 = 全档统一原始 A3" checked={config.add_tier_strict ?? true} onCheckedChange={(checked) => updateConfig('add_tier_strict', checked)} />
 
                 <FormGrid>
                   {config.enable_t && (
@@ -834,6 +839,9 @@ export default function BacktestPage() {
                       </Field>
                       <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平">
                         <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
+                      </Field>
+                      <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（≥10%，20cm 板极端恐慌线）；0 = 关闭">
+                        <UnitInput unit="%" min={0} max={20} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
                       </Field>
                     </>
                   )}

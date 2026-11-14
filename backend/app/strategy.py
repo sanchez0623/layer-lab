@@ -461,9 +461,22 @@ class LayeredTStrategy(Strategy):
             had_low_before = self.had_new_low
             previous_three_low = min(item.low for item in history[-4:-1])
             previous_five_volume = mean(item.volume for item in history[-6:-1])
+            # 按档位「先松后紧」：sequence_index // 4 → 档1(0-3)/档2(4-7)/档3(8-11)/档4(12-15)。
+            # 逐档叠加条件：档1 最松（仅浮亏+缩量<5日均量），档2 +收盘站回前3日低点，
+            # 档3 +此前破过新低，档4 +缩量收紧到 oversold_volume_ratio（= 原始 A3，最严）。
+            # add_tier_strict=False 时全档统一用原始 A3（向后兼容）。
+            if self.config.add_tier_strict:
+                tier = min(account.sequence_index // 4, 3)  # 0..3
+            else:
+                tier = 3
             a3 = (
-                had_low_before and bar.close > previous_three_low
-                and bar.volume < previous_five_volume * self.config.oversold_volume_ratio
+                bar.volume < previous_five_volume
+                and (tier == 0 or bar.close > previous_three_low)
+                and (tier <= 1 or had_low_before)
+                and (
+                    tier <= 2
+                    or bar.volume < previous_five_volume * self.config.oversold_volume_ratio
+                )
             )
             if bar.low < self.last_add_price and bar.low < previous_three_low:
                 self.had_new_low = True
@@ -627,8 +640,17 @@ class LayeredTStrategy(Strategy):
                     daily_amplitude: float | None = None,
                     daily_turnover_rate: float | None = None) -> bool:
         position = account.position(bar.symbol)
+        # 深跌幅当日做T旁路：当日盘中跌幅（相对前收盘）≥ t_deep_drop_pct 时，
+        # 绕过底仓笔数门槛（sequence_index≥4）。20cm 板日内 -10% 是极端恐慌事件，
+        # 抢反弹做T，退出仍走净利止盈 + T+1 尾盘强平，风险有界。
+        deep_drop = False
+        if self.config.t_deep_drop_pct is not None and bar.prev_close and bar.prev_close > 0:
+            intraday_drop = bar.close / bar.prev_close - 1
+            deep_drop = intraday_drop <= -float(self.config.t_deep_drop_pct)
         if (
-            not self.config.enable_t or account.sequence_index < 4 or self.armed
+            not self.config.enable_t
+            or (account.sequence_index < 4 and not deep_drop)
+            or self.armed
             or self.liquidating or self.t_traded_today or self.t_order_submitted
             or position.t_qty or len(history) < 5
         ):

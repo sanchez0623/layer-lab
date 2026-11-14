@@ -224,6 +224,11 @@ class AccountConfigRequest(BaseModel):
     # （strategy._effective_take_profit 任一为 None 即维持原止盈）。
     max_holding_days: int | None = Field(default=None, ge=1, le=250)
     holding_tp_override: float | None = Field(default=None, ge=0, le=1)
+    # 加仓按档位先松后紧（A3 浮亏信号逐档加严）；false = 全档统一原始 A3。
+    add_tier_strict: bool | None = None
+    # 深跌幅当日做T：日内跌幅（相对前收）≥ 该值绕过底仓笔数门槛；传 0 = 关闭
+    # （__post_init__ 归一化为 None），开启时必须 >= 0.10（20cm 板极端恐慌线）。
+    t_deep_drop_pct: float | None = Field(default=None, ge=0, le=1)
     # 指数 beta 腿（ETF）：空仓期间用创业板 ETF 承接 beta，选到个股后卖出换股。
     etf_beta_enabled: bool | None = None
     etf_symbol: str | None = Field(default=None, pattern=r"^(sh|sz)\.\d{6}$")

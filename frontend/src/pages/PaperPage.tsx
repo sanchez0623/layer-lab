@@ -561,6 +561,50 @@ export default function PaperPage() {
   const etfStop = account?.config?.etf_hard_stop_pct ?? 0.06;
   const etfDev = account?.config?.etf_entry_max_deviation ?? 0;
   const etfCooldown = account?.config?.etf_reentry_cooldown_days ?? 0;
+  // 加仓按档位「先松后紧」：A3 浮亏信号严格度随 16 笔序列档位逐级叠加（档4 = 原始 A3）。
+  const [savingTier, setSavingTier] = useState(false);
+  const tierStrict = account?.config?.add_tier_strict ?? true;
+  const toggleTierStrict = async (checked: boolean) => {
+    if (!account) return;
+    setSavingTier(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { add_tier_strict: checked });
+      setAccount(next);
+      toast.success(checked ? '加仓档位分级已开启：A3 由松到紧逐档加严。' : '加仓档位分级已关闭：全档统一原始 A3。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '加仓档位分级更新失败。');
+    } finally {
+      setSavingTier(false);
+    }
+  };
+  // 深跌幅当日做T：日内跌幅 ≥ 阈值时绕过底仓笔数门槛（关闭传 0，后端归一化为 None）。
+  const [deepDropInput, setDeepDropInput] = useState('');
+  const [savingDeepDrop, setSavingDeepDrop] = useState(false);
+  const deepDropPct = account?.config?.t_deep_drop_pct ?? null;
+  const saveDeepDrop = async (enabled: boolean) => {
+    if (!account) return;
+    setSavingDeepDrop(true); setError('');
+    try {
+      if (!enabled) {
+        const next = await api.updateAccountConfig(account.id, { t_deep_drop_pct: 0 });
+        setAccount(next); setDeepDropInput('');
+        toast.success('深跌幅当日做T已关闭。');
+      } else {
+        const pct = Number(deepDropInput);
+        if (!Number.isFinite(pct) || pct < 10 || pct > 20) {
+          setError('深跌幅阈值需为 10–20 之间的百分数（20cm 板极端恐慌线）。');
+          return;
+        }
+        const next = await api.updateAccountConfig(account.id, { t_deep_drop_pct: pct / 100 });
+        setAccount(next); setDeepDropInput('');
+        toast.success(`深跌幅当日做T已开启：日内跌幅 ≥ ${number(pct, 1)}% 时绕过底仓笔数门槛。`);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '深跌幅当日做T更新失败。');
+    } finally {
+      setSavingDeepDrop(false);
+    }
+  };
 
   const saveTNetSpread = async () => {
     if (!account) return;
@@ -801,7 +845,34 @@ export default function PaperPage() {
                   <Button size="sm" className="mt-[24px] h-8" onClick={() => void saveTCutoff()} disabled={savingTCutoff || tCutoffInput === ''}>{savingTCutoff ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTCutoff ? '正在保存' : '保存截止'}</Button>
                 </div>
               </div>
+              <div className="mt-1 flex flex-wrap items-end gap-2 border-t pt-2">
+                <div className="flex items-center gap-2 py-1.5">
+                  <Switch checked={deepDropPct != null} onCheckedChange={(checked) => (checked ? setDeepDropInput(String(Number(((deepDropPct ?? 0.1) * 100).toFixed(1)))) : void saveDeepDrop(false))} disabled={savingDeepDrop} />
+                  <div>
+                    <strong className="block text-[12px]">深跌幅当日做T</strong>
+                    <span className="text-[10px] text-muted-foreground">{deepDropPct != null ? `日内跌幅 ≥ ${number(deepDropPct * 100, 1)}% 时绕过底仓笔数门槛（极端恐慌日抢反弹）` : '关闭'}</span>
+                  </div>
+                </div>
+                {deepDropPct != null && (
+                  <>
+                    <Field label="阈值（%）" hint="10–20，20cm 板极端恐慌线" className="w-40"><UnitInput unit="%" min={10} max={20} step={0.5} placeholder={number(deepDropPct * 100, 1)} value={deepDropInput} onChange={setDeepDropInput} disabled={savingDeepDrop} /></Field>
+                    <Button size="sm" className="h-8" onClick={() => void saveDeepDrop(true)} disabled={savingDeepDrop || deepDropInput === ''}>{savingDeepDrop ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingDeepDrop ? '正在保存' : '保存阈值'}</Button>
+                  </>
+                )}
+              </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
+            </Panel>
+          )}
+
+          {account.auto_strategy && (
+            <Panel className="mb-3" title="加仓按档位 · 先松后紧" description="A3 浮亏加仓信号随 16 笔序列档位逐级加严：早期小仓易加让资金打满，后段高门槛封顶暴露。浮盈右侧回撤 5% 的加仓在所有档位保持不变；关闭则全档统一原始 A3。" action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{tierStrict ? '逐档加严' : '全档统一'}</span><Switch checked={tierStrict} onCheckedChange={(checked) => void toggleTierStrict(checked)} disabled={savingTier} /></div>}>
+              <div className="grid gap-1.5 text-[11px] sm:grid-cols-2">
+                <div className="rounded-lg border bg-muted/20 px-2.5 py-1.5"><strong className="text-foreground">档1 · 10万</strong> · 最松：浮亏 + 当日缩量（量 &lt; 5日均量）</div>
+                <div className="rounded-lg border bg-muted/20 px-2.5 py-1.5"><strong className="text-foreground">档2 · 20万</strong> · + 收盘站回前3日低点</div>
+                <div className="rounded-lg border bg-muted/20 px-2.5 py-1.5"><strong className="text-foreground">档3 · 30万</strong> · + 此前破过新低</div>
+                <div className="rounded-lg border bg-muted/20 px-2.5 py-1.5"><strong className="text-foreground">档4 · 40万</strong> · 最严：+ 缩量 &lt; 5日均量 × 0.5（原始 A3）</div>
+              </div>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">开关保存后下一根 K 线起生效；仅影响浮亏 A3 分支。对应配置字段 add_tier_strict（回测页同步可调，可先回测验证）。</p>
             </Panel>
           )}
 

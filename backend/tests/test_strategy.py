@@ -174,6 +174,125 @@ def test_account_track_includes_t_net_spread():
     assert requests[0].side == "SELL"
 
 
+def test_tiered_a3_add_strict_levels():
+    """按档位「先松后紧」：档1（sequence 0-3）宽松即触发 A3，档4 需完整原始 A3。
+
+    构造一根缩量阴跌 bar（量 = 5日均量×0.6，未破新低、close < 前3根最低）：
+    - 档1（最松，仅要求缩量）→ 触发；
+    - 档4（最严，原始 A3：需 had_new_low + close>前3根最低 + 量<均量×0.5）→ 不触发。
+    """
+    def build(closes, volumes):
+        return [daily(i, c, low=c * 0.99, volume=v)
+                for i, (c, v) in enumerate(zip(closes, volumes))]
+
+    # 阴跌序列：末根 close 跌破前3根最低、量 = 5日均量×0.6（缩量但未砍半）
+    closes = [10.0, 9.8, 9.6, 9.4, 9.3, 9.1]
+    volumes = [1000, 1000, 1000, 1000, 1000, 600]
+    history = build(closes, volumes)
+
+    # 档1（sequence_index=0）：最松，缩量即触发
+    acct1 = funded_account()
+    acct1.sequence_index = 0
+    strat1 = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    strat1.last_add_price = 10.0
+    strat1.last_add_session = 0
+    assert strat1._add_signal(history, acct1) == "浮亏超跌A3"
+
+    # 档4（sequence_index=12）：最严=原始 A3，缩量未砍半 + 未确认破新低 → 不触发
+    acct4 = funded_account()
+    acct4.sequence_index = 12
+    strat4 = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    strat4.last_add_price = 10.0
+    strat4.last_add_session = 0
+    assert strat4._add_signal(history, acct4) == ""
+
+
+def test_tiered_a3_disabled_uses_uniform_original():
+    """add_tier_strict=False：全档统一用原始 A3（档1 也不再放宽）。"""
+    closes = [10.0, 9.8, 9.6, 9.4, 9.3, 9.1]
+    volumes = [1000, 1000, 1000, 1000, 1000, 600]
+    history = [daily(i, c, low=c * 0.99, volume=v)
+               for i, (c, v) in enumerate(zip(closes, volumes))]
+    acct = funded_account()
+    acct.sequence_index = 0  # 档1 位置
+    strat = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, add_tier_strict=False,
+    ))
+    strat.last_add_price = 10.0
+    strat.last_add_session = 0
+    # 原始 A3 需缩量 <均量×0.5，0.6 不满足 → 不触发
+    assert strat._add_signal(history, acct) == ""
+
+
+def test_deep_drop_t_bypasses_sequence_gate():
+    """深跌幅当日做T：当日跌幅 ≥ t_deep_drop_pct(10%) 时，sequence_index=1 也过门槛。"""
+    def deep_drop_bar(drop_pct: float) -> Bar:
+        bar = daily(6, 10.0 * (1 - drop_pct), low=10.0 * (1 - drop_pct) * 0.99,
+                    volume=100_000)
+        bar.prev_close = 10.0
+        bar.turnover_rate = 0.05
+        bar.bid, bar.ask = 9.99, 10.01
+        return bar
+
+    history = [daily(i, 10.0, low=9.6) for i in range(1, 6)]
+    # 跌 12%（≥10%）→ 旁路生效，sequence_index=1 也过门槛
+    account = funded_account()
+    account.sequence_index = 1
+    strategy = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    assert strategy._t_eligible(history, deep_drop_bar(0.12), account,
+                                daily_amplitude=0.05, daily_turnover_rate=0.05) is True
+    # 跌 5%（<10%）→ 旁路不生效，sequence_index=1 被底仓笔数门槛挡住
+    assert strategy._t_eligible(history, deep_drop_bar(0.05), account,
+                                daily_amplitude=0.05, daily_turnover_rate=0.05) is False
+
+
+def test_deep_drop_pct_validation():
+    """t_deep_drop_pct < 10% 报错（20cm 板极端恐慌线，保证做T成功率）。"""
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=0.05)
+    # None=关闭，合法
+    StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=None)
+    # 0 视为关闭（归一化为 None）：前端开关关掉时传 0
+    assert StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=0).t_deep_drop_pct is None
+
+
+def test_tiered_a3_spec_progression():
+    """档位规范语义：缩量收紧（×0.5）只在档4（sequence 12-15）生效。
+
+    场景：量 = 5日均量×0.6（缩量但未砍半）、close 9.8 站回前3日低点（9.306）之上、
+    无新低记录（除非显式置位）——
+    档1（seq 0-3）触发、档2（seq 4-7）触发（规范：+站回即可，量仍按 <均量 口径）、
+    档3（seq 8-11）因缺 had_new_low 不触发、置位后触发、
+    档4（seq 12-15）因量未砍半不触发（= 原始 A3，最严）。
+    若实现把 ×0.5 提前到档2（恢复代码的行为），seq 4 会不触发——本测试即分歧哨兵。
+    """
+    closes = [10.0, 10.2, 10.5, 9.6, 9.4, 9.8]
+    volumes = [1000, 1000, 1000, 1000, 1000, 600]
+    history = [daily(i, c, low=c * 0.99, volume=v)
+               for i, (c, v) in enumerate(zip(closes, volumes))]
+    # 无新低记录：档1/档2 触发，档3/档4 不触发
+    for sequence_index, expected in ((0, "浮亏超跌A3"), (4, "浮亏超跌A3"), (8, ""), (12, "")):
+        acct = funded_account()
+        acct.sequence_index = sequence_index
+        strat = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+        strat.last_add_price = 10.0
+        strat.last_add_session = 0
+        assert strat._add_signal(history, acct) == expected, (
+            f"sequence_index={sequence_index} 应为 {expected!r}"
+        )
+    # 显式置位 had_new_low：档3 触发（量未砍半仍可），档4 仍不触发（量须砍半）
+    for sequence_index, expected in ((8, "浮亏超跌A3"), (12, "")):
+        acct = funded_account()
+        acct.sequence_index = sequence_index
+        strat = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+        strat.last_add_price = 10.0
+        strat.last_add_session = 0
+        strat.had_new_low = True
+        assert strat._add_signal(history, acct) == expected, (
+            f"had_new_low=True sequence_index={sequence_index} 应为 {expected!r}"
+        )
+
+
 def test_same_intraday_bar_is_only_evaluated_once():
     """live-tick 在同一根已收盘 5 分钟 K 线上重复轮询时，不能重复累加确认计数。"""
     account = funded_account()

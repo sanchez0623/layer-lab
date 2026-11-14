@@ -161,6 +161,16 @@ class StrategyConfig:
     # 目的：避免资金被长期套牢在「既不到 15% 止盈、也不触发 Armed 背离」的缓慢阴跌标的里。
     max_holding_days: int | None = None
     holding_tp_override: float | None = None
+    # 加仓按档位「先松后紧」：16 笔序列分 4 档（每档 4 笔，档1=10万…档4=40万）。
+    # 开启后 A3 加仓信号按档位分级——档1 最松（仅浮亏+缩量<5日均量）、
+    # 档2 +收盘站回前3日低点、档3 +此前破过新低、档4 +缩量收紧到 oversold_volume_ratio
+    # （= 原始 A3 条件，最严）。目的：早期仓位易加让资金打满，后段高门槛封顶暴露，
+    # 避免无差别摊进输家。False = 全档统一用原始 A3 条件（向后兼容）。
+    add_tier_strict: bool = True
+    # 深跌幅当日做T：当日盘中跌幅（相对前收盘）≥ 此阈值时，绕过底仓笔数门槛
+    # （sequence_index≥4）允许做T。创业板/科创板 20cm 涨跌幅，-10% 已是极端恐慌事件
+    # 才值得抢反弹。None = 关闭；__post_init__ 校验：非 None 时必须 >= 0.10。
+    t_deep_drop_pct: float | None = 0.10
     # ---- 指数 beta 腿（ETF）------------------------------------------------
     # 个股轮动空仓期间，用创业板 ETF 承接 beta，避免「大门关闭 → 整段上涨 0 收益」。
     # 与个股互斥：选到股票时先卖 ETF 再建个股仓；ETF 期间不占用轮动序列。
@@ -204,6 +214,14 @@ class StrategyConfig:
             datetime.strptime(self.t_exit_cutoff, "%H:%M")
         except (TypeError, ValueError):
             raise ValueError("t_exit_cutoff 必须是合法的 HH:MM 时间（做T的T+1日尾盘强平截止点）")
+        # 深跌幅当日做T阈值：20cm 板（创业板/科创板）日内 -10% 才算极端恐慌事件，
+        # 阈值过低会频繁触发低质量做T。0 视为关闭（归一化为 None，便于前端开关传值）；
+        # 开启时必须 >= 10%。
+        if self.t_deep_drop_pct is not None:
+            if float(self.t_deep_drop_pct) == 0:
+                self.t_deep_drop_pct = None
+            elif float(self.t_deep_drop_pct) < 0.10:
+                raise ValueError("t_deep_drop_pct 必须 >= 10%（20cm 板极端恐慌线，保证做T成功率）")
         self.installment_amounts = [float(x) for x in self.installment_amounts]
         # ---- ETF beta 腿校验 -------------------------------------------------
         symbol = str(self.etf_symbol or "").strip().lower()
