@@ -80,6 +80,18 @@ commit 到该分支 → 合并回 `main`（或走 PR）→ push。**版本号 bu
 
 ### git push 实操（沙箱内可直接跑，VPN 开关无关）
 
+> ⚠️ **动手前先核对分支落点 + 先 fetch**（2026-11-14 踩坑，浪费多轮）：
+> 本地 `main` 可能**落后于 `origin/main`**（本地陈旧），且 `git checkout -b` 建分支后
+> 若中途被打断/切走，commit 可能落到**意料之外的已有分支**上。教训：
+> 1. 提交前 `git branch --show-current` 确认真在目标分支，别想当然；
+> 2. 开分支前先 `git fetch origin`，从 `origin/main`（不是本地 main）切，否则
+>    cherry-pick / 合并会撞上远端已有、本地没有的改动（同文件同版本号 → 冲突）；
+> 3. 若 commit 落错分支：`git branch tmp-save <sha>` 存住 → 旧分支 `git reset --hard <原基点>`
+>    → 新分支 `git reset --hard origin/main` → `git cherry-pick tmp-save` → 删 tmp-save。
+>    （`git cherry-pick` 若 HEAD 已是目标 commit 会报 empty，先 `--abort`/`--quit` 再重来。）
+> 4. 版本号冲突：若远端已 bump 到同一版本（如都到 1.5.1），cherry-pick 时版本号 hunk 会
+>    自动去重丢弃——这是对的，别再重复 bump，确认三处一致即可。
+
 系统 git 配置（`D:/Program Files/Git/etc/gitconfig`）写死了 `http.sslbackend=schannel`，
 而 schannel 取不到 Windows 凭据管理器里的 GitHub 凭据 → `git push` 报
 `SEC_E_NO_CREDENTIALS`。**这与 VPN 开关无关**（诊断确认过 TCP 443 到 github.com 通、

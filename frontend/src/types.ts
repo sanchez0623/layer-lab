@@ -129,6 +129,10 @@ export interface RotationTrailItem {
   chg20d_at_select: number | null;
   gate_open: boolean;
   status: 'CLOSED' | 'OPEN' | 'WAITING' | string;
+  /** 本轮逐股决策日志（为什么开门/关门/空仓/深度超跌旁路几只），挂在对应选股日。 */
+  screen_warnings?: string[];
+  /** 本轮漏斗计数 universe→L0→L1→L2→L3→eligible。 */
+  funnel?: Record<string, number>;
 }
 
 /**
