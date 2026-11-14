@@ -245,7 +245,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.1.4",
+        version="1.2.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1132,6 +1132,7 @@ def create_app() -> FastAPI:
             screener_config=screener, initial_cash=request.initial_cash,
             config=config, start_date=request.start_date, end_date=request.end_date,
             name=request.name,
+            quan=getattr(application.state, "quan_store", None),
         )
         report["data_info"].update({
             "daily_source": getattr(service.store, "provider", "universe_db"),

@@ -149,7 +149,16 @@ class QuanStore:
         self.index_path = self.path / "index_daily.parquet"
         self.calendar_path = self.path / "trade_calendar.parquet"
         self.minute5_dir = self.path / "minute5"
-        self.turnover_path = self.path / "turnover_daily.parquet"
+        # 日线换手率 parquet 多候选路径：优先可写卷 /data/（服务器 /data/quan/history 只读，
+        # turn parquet 由部署放到可写卷），回退原路径。load_minute5/_daily_turnover_map 自动读取。
+        self._turnover_candidates = [
+            Path("/data/turnover_daily.parquet"),
+            self.path / "turnover_daily.parquet",
+        ]
+        self.turnover_path = next(
+            (p for p in self._turnover_candidates if p.exists()),
+            self._turnover_candidates[-1],
+        )
         self._lock = threading.RLock()
         self._basic: Any = None
         self._codes: list[UniverseRow] | None = None

@@ -336,9 +336,15 @@ class FunnelRotationBacktest:
         initial_cash: float = 4_000_000.0, config: StrategyConfig | None = None,
         start_date: str | None = None, end_date: str | None = None,
         name: str = "选股漏斗轮动回测",
+        quan: Any = None,
     ) -> None:
         self.store = store
         self.market = market
+        # 可选 QuanStore：提供 5 分钟数据源（做 T 用）。缺省 None → 降级日线口径。
+        self.quan = quan
+        # 持仓标的 5 分钟惰性缓存：任意时刻最多驻留一只标的的持有期分钟数据。
+        self._held_m5_code: str | None = None
+        self._held_m5_bars: list[Bar] = []
         # 引擎内部强制关闭财务深筛：既避免联网财务，也避免用「今天」的季报回看历史（未来数据）。
         base = screener_config or ScreenerConfig()
         self.screener_config = ScreenerConfig.from_dict({**base.to_dict(), "enable_fundamental_veto": False})
@@ -445,6 +451,31 @@ class FunnelRotationBacktest:
         self._held_code = code
         self._held_bars = bars
         return bars
+
+    def _intraday_for(self, code: str | None) -> list[Bar]:
+        """当前持仓标的的 5 分钟 bar，带单条目缓存（换票时自然替换）。
+
+        懒加载：只在标的成为持仓时才读其持有期分钟数据，避免全池驻留（OOM 保护，
+        与 _bars_for 同口径）。数据来自 QuanStore.load_minute5（含换手/盘口代理）。
+        无 quan 源或文件缺失返回空列表 → 该标的按日线口径回放（无做 T）。
+        """
+        if not code or self.quan is None:
+            return []
+        if self._held_m5_code == code:
+            return self._held_m5_bars
+        start = self.start_date.isoformat() if self.start_date else None
+        end = self.end_date.isoformat() if self.end_date else None
+        bars = self.quan.load_minute5(code, max_rows=2400, start=start, end=end)
+        self._held_m5_code = code
+        self._held_m5_bars = bars
+        return bars
+
+    def _intraday_by_date(self, code: str) -> dict[str, list[Bar]]:
+        """某标的的 {date: [5分钟bar]}，供 run() 按日取当日分钟序列。"""
+        by_date: dict[str, list[Bar]] = defaultdict(list)
+        for bar in self._intraday_for(code):
+            by_date[bar.date].append(bar)
+        return by_date
 
     # -- 与 BacktestEngine 一致的轮次记账 --------------------------------
 
@@ -573,7 +604,11 @@ class FunnelRotationBacktest:
         return snapshot
 
     def run(self) -> dict[str, Any]:
-        self.warnings.append("漏斗轮动回测为日线口径，5分钟做T与tick级风控降级")
+        has_quan = self.quan is not None
+        if has_quan:
+            self.warnings.append("漏斗轮动回测启用5分钟做T：持仓期逐根处理5分钟bar，准入换手/盘口用日线turn+代理盘口")
+        else:
+            self.warnings.append("漏斗轮动回测为日线口径（无5分钟数据源），T交易与tick级风控降级")
         self.warnings.append("财务深筛已强制关闭（enable_fundamental_veto=False）：避免联网财务与未来数据")
         self._chg20d_at_select: dict[str, float | None] = {}
         self._screen_by_symbol: dict[str, dict] = {}
@@ -583,6 +618,9 @@ class FunnelRotationBacktest:
         flat_wait_days = 0
         session_index = -1
         self._round_just_closed = False
+        # 持仓标的的 5 分钟序列（按日分组），换票时重新加载
+        intraday_by_date: dict[str, list[Bar]] = {}
+        t_trade_count = 0
 
         equity_curve: list[dict[str, Any]] = []
         used_dates: list[str] = []
@@ -602,19 +640,43 @@ class FunnelRotationBacktest:
                 bars = self._bars_for(current_symbol)
                 bar = next((item for item in bars if item.date == date_str), None)
                 if bar is not None:
+                    # 日线 bar 只负责隔夜 NEXT_OPEN 撮合（漏斗建仓/加仓/清仓信号次开执行，
+                    # 保留漏斗原有建仓语义）；随后 5 分钟 bar 走 NEXT_BAR 做日内 T。
                     fills = self.account.process_bar(bar, modes={"NEXT_OPEN"})
                     self._handle_fills(fills, session_index, bar)
                     self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
-                    self.account.mark(current_symbol, bar.close)
                     history = [item for item in bars if item.date <= date_str]
                     board = self.board_by_code.get(current_symbol, "")
                     index_history = [
                         item for item in self.index_history.get(board, [])
                         if item.timestamp.date().isoformat() <= date_str
                     ]
+                    # 5 分钟做 T：逐根喂 on_intraday（信号下一 5 分钟 bar 开盘撮合）。
+                    m5_today = intraday_by_date.get(date_str, [])
+                    if m5_today:
+                        # 日线口径的振幅/换手（做 T 准入），与模拟盘同口径（架构原则 1）：
+                        # 振幅用当日日线 high/low，换手用当日日线 turn（_load_bars 已从 parquet 填充）。
+                        daily_amp = (bar.high - bar.low) / (bar.prev_close or bar.open)
+                        daily_turn = bar.turnover_rate
+                        recent: list[Bar] = []
+                        for m5_index, m5 in enumerate(m5_today):
+                            m5_fills = self.account.process_bar(m5, modes={"NEXT_BAR"})
+                            self._handle_fills(m5_fills, session_index, m5)
+                            self.account.mark(current_symbol, m5.close)
+                            recent.append(m5)
+                            m5_requests = self.strategy.on_intraday(
+                                history[:-1], recent, m5, self.account,
+                                index_history=index_history, session_index=session_index,
+                                daily_amplitude=daily_amp, daily_turnover_rate=daily_turn,
+                            )
+                            self._submit(m5_requests, m5.timestamp)
+                        # 日终撤未成交的日内单（下一 5 分钟 bar 开盘模式），与 BacktestEngine 一致。
+                        self.account.cancel_open_orders("日内订单日终取消", modes={"NEXT_BAR"})
+                        t_trade_count += len(recent)
+                    self.account.mark(current_symbol, bar.close)
                     self._update_round(bar, session_index)
                     requests = self.strategy.on_daily(
-                        history, index_history, self.account, session_index, False,
+                        history, index_history, self.account, session_index, bool(m5_today),
                     )
                     self._submit(requests, bar.timestamp)
                     submitted_signal = bool(requests)
@@ -663,6 +725,8 @@ class FunnelRotationBacktest:
                 if first_code:
                     current_symbol = first_code
                     flat_wait_days = 0
+                    # 换票：重载新标的的 5 分钟序列（按日分组），供做 T 逐根处理
+                    intraday_by_date = self._intraday_by_date(first_code)
                     self._chg20d_at_select[first_code] = self._trail[-1]["chg20d_at_select"]
                     self._screen_by_symbol[first_code] = snapshot
                     self._trail[-1]["status"] = "OPEN"

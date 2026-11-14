@@ -489,7 +489,9 @@ class LayeredTStrategy(Strategy):
 
     def _t_eligible(self, history: list[Bar], bar: Bar, account: BrokerAccount,
                     live_turnover: float | None = None,
-                    live_bid: float | None = None, live_ask: float | None = None) -> bool:
+                    live_bid: float | None = None, live_ask: float | None = None,
+                    daily_amplitude: float | None = None,
+                    daily_turnover_rate: float | None = None) -> bool:
         position = account.position(bar.symbol)
         if (
             not self.config.enable_t or account.sequence_index < 4 or self.armed
@@ -498,12 +500,18 @@ class LayeredTStrategy(Strategy):
         ):
             return False
         recent = history[-5:]
-        average_amplitude = mean(
-            (item.high - item.low) / (item.prev_close or item.open) for item in recent
-        )
+        # 振幅/换手口径：漏斗回测等日线场景传 daily_amplitude/daily_turnover_rate
+        # （当日日线振幅/换手），避免用 5 分钟 bar 局部振幅（天然 ~0.3%）过不了日线
+        # 口径门槛（振幅≥4%）。未传时回退到 recent（日线 history 或 5 分钟 bar）。
+        if daily_amplitude is not None:
+            average_amplitude = daily_amplitude
+        else:
+            average_amplitude = mean(
+                (item.high - item.low) / (item.prev_close or item.open) for item in recent
+            )
         # 换手率取「当日实时快照」优先（live_turnover，腾讯快照字段[38]，做T是当日盘中决策）；
         # 历史日线 bar 无换手字段（quan 源 turnover_rate 恒 None），缺失时回落实时值。
-        turnover = recent[-1].turnover_rate
+        turnover = daily_turnover_rate if daily_turnover_rate is not None else recent[-1].turnover_rate
         if turnover is None and live_turnover is not None:
             turnover = live_turnover
         if average_amplitude < self.config.t_min_amplitude or turnover is None:
@@ -538,6 +546,8 @@ class LayeredTStrategy(Strategy):
         session_index: int | None = None,
         live_turnover: float | None = None,
         live_bid: float | None = None, live_ask: float | None = None,
+        daily_amplitude: float | None = None,
+        daily_turnover_rate: float | None = None,
     ) -> list[OrderRequest]:
         # 同一根已收盘 5 分钟 K 线只评估一次：live-tick 重试/同一 5 分钟窗口内多次
         # 轮询时，不能把「连续 3 根 5 分钟 K 线」的确认计数重复累加。
@@ -581,7 +591,9 @@ class LayeredTStrategy(Strategy):
         if current_time < datetime.strptime("09:35", "%H:%M").time() or current_time >= datetime.strptime("14:00", "%H:%M").time():
             return []
         if not self._t_eligible(history, bar, account, live_turnover=live_turnover,
-                                live_bid=live_bid, live_ask=live_ask):
+                                live_bid=live_bid, live_ask=live_ask,
+                                daily_amplitude=daily_amplitude,
+                                daily_turnover_rate=daily_turnover_rate):
             return []
         # T 仓按板块口径取股数：目标金额与可用资金分别折算后取小，
         # 再用可卖永久仓数量封顶（做T不超过底仓，避免裸卖）。
