@@ -125,7 +125,14 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
 - **T+1 可卖**：`broker.new_day` 只在真正跨交易日时清零 `today_*_buy_qty`，撮合每根 K 线都调它，别无条件 reset。
 - **分板块申报口径**：股数计算必须走 `trading_rules.rules_for(symbol)` 的 `min_qty`/`step`（科创板 200/1，创业板·主板 100/100），不要写死 100 股整手。
 - **16 笔序列**：高价股按「方案 2」——金额不足最小申报也按最小申报建仓（`board_buy_quantity`），宁可略微透支该笔预算也不跳过。
-- **止盈**：价格轨/账户轨各 15% 立即清；10%~15% 进 Armed 区间，内含量价背离、VWAP 回撤 4% 两个辅助清仓点。做 T 目标价差 `t_target_spread` 已可配置（模拟盘 config 面板）。
+- **止盈**：价格轨/账户轨各 15% 立即清；10%~15% 进 Armed 区间，内含量价背离、VWAP 回撤 4% 两个辅助清仓点。
+- **做 T 退出（净利止盈 + T+1 硬截止）**：平 T 目标价 = T 仓均价 ×(1 + `t_target_net_spread` + `_t_roundtrip_cost()`)，
+  即**扣完成本后净赚 `t_target_net_spread`（默认 3%）**才平，不是毛价差。成本率由 `_t_roundtrip_cost()` 统一估算
+  （双边佣金/经手费/证管费/过户费 + 卖出印花税 + 双边滑点 ≈0.1%），准入门槛 `_t_eligible` 复用同一口径。
+  资金硬截止：**T+1 日 `t_exit_cutoff`（默认 14:50）仍未止盈则无条件强平**（reason「T+1尾盘截止平T」），
+  用 `position.t_qty > today_t_buy_qty` 区分隔夜仓（T1）与当日仓（T0）——**T0 当日不强平**可留到 T1，
+  保证做 T 资金最迟 T+1 收盘前了结。两个参数都在模拟盘做 T 面板可视化编辑。
+  ⚠️ 旧的 `t_target_spread`（毛价差）**已废弃**，不再驱动平 T，仅保留字段兼容老账户快照，别再读它。
 - **baostock 禁止并发**：baostock 数据源**不能并发访问**，并发会被服务端拉黑（封 IP/账号）。任何调用 baostock 的路径必须串行化：
   - `universe.py` 已做对：单 login 复用全部查询 + `threading.RLock` 串行 + 后台单线程回补（`_relogin` 定时轮换）。
   - **`market.py` 是隐患**：`fetch_baostock_daily` / 两处 `fetch_*_index` 各自独立 `bs.login()`（约 317/378/431 行），**没有全局锁**；若调度线程（paper-scheduler）与用户触发请求并发打 baostock，会撞车。新增任何 baostock 调用前，先确认已被全局锁串行化，或复用 `universe.py` 的会话，别再各开 login。
