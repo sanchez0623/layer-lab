@@ -86,6 +86,7 @@ def _all_rules() -> dict[str, BoardRules]:
     """六个板块的规则表。key 与 market.SymbolInfo.board 的板块名对齐。
 
     单笔申报上限均为**股数**（limit/market_order_cap）。
+    北交所数据源暂未覆盖，未建模。
     """
     return {
         "科创板": BoardRules(
@@ -142,6 +143,7 @@ def board_of(symbol: str) -> str:
 
     判定口径与 market.SymbolInfo.board 保持一致：B股/科创板/创业板按代码段，
     主板按交易所前缀（sh.6xxxxx→沪市主板、sz.0xxxxx→深市主板）。合成标的返回空串。
+    北交所（bj 前缀 / 43/82/83/87/88/920）数据源未覆盖，未建模，返回空串走合成回退。
     """
     text = str(symbol or "").strip().lower()
     code = text.split(".")[-1]

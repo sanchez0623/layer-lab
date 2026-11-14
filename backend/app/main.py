@@ -467,6 +467,19 @@ def create_app() -> FastAPI:
                 account.last_daily_signal_date = None
                 # 一轮刚结束：允许下一次 tick 把轮动推进到池内下一只。
                 account.rotation_pending_advance = True
+            elif (
+                position.total_qty == 0 and account.sequence_index != 0
+                and not strategy.liquidating
+                and not any(o.status in {"PENDING", "PARTIALLY_FILLED"} for o in account.orders)
+            ):
+                # 兜底：持仓已平但清仓标志（liquidating）未置位的路径（尾盘轧平/手动卖/
+                # 外部清仓等），会让 reset_round 永不触发，sequence_index 卡死在中间值，
+                # on_daily 的首仓条件（total_qty==0 AND sequence_index==0）永不满足，
+                # 账户再也建不起仓。这里在「确认空仓 + 无在途委托」时强制收尾一轮，
+                # 让序列归零、账户恢复建仓能力。不等 liquidating 是因为它可能永不到来。
+                strategy.reset_round(account)
+                account.last_daily_signal_date = None
+                account.rotation_pending_advance = True
 
             if bar.timeframe != "daily" and detect_intraday:
                 previous_daily = [item for item in (daily_history or []) if item.date < bar.date]

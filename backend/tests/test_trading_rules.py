@@ -52,6 +52,10 @@ def test_board_of_b_shares_and_unknown_codes():
     assert board_of("SYNTH001") == ""
     assert board_of("") == ""
     assert board_of("12345") == ""         # 非 6 位
+    assert board_of("TEST") == ""          # 合成标的无板块
+    assert board_of("SYNTH001") == ""
+    assert board_of("") == ""
+    assert board_of("12345") == ""         # 非 6 位
 
 
 # ---------------- validate_quantity 数量口径 ----------------
