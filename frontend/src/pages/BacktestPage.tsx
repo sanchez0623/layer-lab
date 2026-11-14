@@ -13,9 +13,10 @@ import {
 } from '../lib/format';
 import FeeConfigPanel from '../components/FeeConfigPanel';
 import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
+import PaginationBar from '../components/PaginationBar';
 import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SuccessBanner, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { BacktestSummary, Dataset, FeeConfig, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig } from '../types';
+import type { BacktestSummary, Dataset, FeeConfig, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -80,6 +81,11 @@ export default function BacktestPage() {
   const [exporting, setExporting] = useState<'trades' | 'orders' | null>(null);
   const [mode, setMode] = useState<BacktestMode>('funnel');
   const [screener, setScreener] = useState<ScreenerConfig>(fallbackScreener);
+  // 换票轨迹后台分页状态：主报告已瘦身不含全量 trail，列表按页拉取。
+  const [trailData, setTrailData] = useState<Paginated<RotationTrailItem> | null>(null);
+  const [trailPage, setTrailPage] = useState(1);
+  const [trailPageSize, setTrailPageSize] = useState(20);
+  const [trailLoading, setTrailLoading] = useState(false);
 
   const loadInitial = async () => {
     setLoading(true);
@@ -221,10 +227,23 @@ export default function BacktestPage() {
   const metrics = report?.metrics;
   const closedRounds = useMemo(() => report?.rounds.filter((round) => !round.status || ['closed', 'completed', '已结束'].includes(lower(round.status))).length || 0, [report]);
   // 漏斗轮动回测专属：每轮换票轨迹（选中日期/标的/入选依据/进出日期/盈亏）。
-  const rotationTrail = useMemo<RotationTrailItem[]>(() => {
-    const raw = report?.data_info?.rotation_trail;
-    return Array.isArray(raw) ? (raw as RotationTrailItem[]) : [];
-  }, [report]);
+  // 主报告已瘦身不含全量 trail，改走 GET /backtests/{id}/rotation-trail 后台分页。
+  const isFunnel = String(report?.data_info?.mode) === 'funnel_rotation';
+  const rotationTrail = useMemo<RotationTrailItem[]>(() => trailData?.items ?? [], [trailData]);
+
+  // 切换报告时回到第一页（同一 report 内翻页不重置）。
+  useEffect(() => { setTrailPage(1); }, [report?.id]);
+
+  useEffect(() => {
+    if (!report || !isFunnel) { setTrailData(null); return; }
+    let cancelled = false;
+    setTrailLoading(true);
+    api.backtestRotationTrail(report.id, trailPage, trailPageSize)
+      .then((paged) => { if (!cancelled) setTrailData(paged); })
+      .catch(() => { if (!cancelled) setTrailData(null); })
+      .finally(() => { if (!cancelled) setTrailLoading(false); });
+    return () => { cancelled = true; };
+  }, [report, isFunnel, trailPage, trailPageSize]);
 
   return (
     <div className="page backtest-page">
@@ -409,15 +428,15 @@ export default function BacktestPage() {
             {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
           </Panel>
 
-          {rotationTrail.length > 0 && (
-            <Panel className="rotation-trail-panel" title="换票轨迹" description="每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待" action={<Layers3 size={18} />}>
+          {isFunnel && trailData && trailData.total > 0 && (
+            <Panel className="rotation-trail-panel" title="换票轨迹" description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待 · 共 ${trailData.total} 次筛选`} action={<Layers3 size={18} />}>
               <div className="table-scroll">
                 <table>
                   <thead><tr><th>轮次</th><th>选股日</th><th>标的</th><th>名称</th><th className="num">入选 Chg20D</th><th>L0 门</th><th className="num">入场</th><th className="num">出场</th><th className="num">净盈亏</th><th>状态</th></tr></thead>
                   <tbody>
                     {rotationTrail.map((item, index) => (
-                      <tr key={`${item.round}-${index}`} className={item.status === 'WAITING' ? 'trail-waiting' : ''}>
-                        <td><strong className="round-id">{item.round || `#${index + 1}`}</strong></td>
+                      <tr key={`${item.round}-${(trailPage - 1) * trailPageSize + index}`} className={item.status === 'WAITING' ? 'trail-waiting' : ''}>
+                        <td><strong className="round-id">{item.round || `#${(trailPage - 1) * trailPageSize + index + 1}`}</strong></td>
                         <td>{shortDate(item.select_date)}</td>
                         <td>{item.symbol ? <strong title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="muted">空仓等待</span>}</td>
                         <td>{item.name || '—'}</td>
@@ -432,6 +451,15 @@ export default function BacktestPage() {
                   </tbody>
                 </table>
               </div>
+              <PaginationBar
+                page={trailData.page}
+                pageSize={trailData.page_size}
+                total={trailData.total}
+                totalPages={trailData.total_pages}
+                onPageChange={setTrailPage}
+                onPageSizeChange={(size) => { setTrailPageSize(size); setTrailPage(1); }}
+                disabled={trailLoading}
+              />
             </Panel>
           )}
 

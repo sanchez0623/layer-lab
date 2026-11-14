@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal
 
 import requests
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,6 +29,7 @@ from .market import (
     MarketDataService,
     normalize_symbol,
 )
+from .pagination import paginate, page_params
 from .quan_data import QuanRefresher, QuanStore, quan_data_dir
 from .rotation import rescreen_and_advance, set_from_run as set_rotation_from_run, set_pool as set_rotation_pool
 from .screener import ScreenerConfig, ScreenerService, ScreeningResult
@@ -238,6 +239,23 @@ class RotationRequest(BaseModel):
     pool: list[dict] | None = None
 
 
+def _slim_rotation_trail(report: dict) -> dict:
+    """把主报告里的大体积 ``rotation_trail`` 抽走，只留条数。
+
+    换票轨迹改由 ``GET /api/backtests/{id}/rotation-trail`` 分页下发，
+    主报告（创建 / 读取）不再一次性携带全量轨迹，避免序列化 / 传输 / 渲染膨胀，
+    也避免 data_info 概览网格把整条轨迹 JSON.stringify 进 DOM。
+    全量数据仍完整落库（save_backtest 在瘦身处之前调用）。
+    """
+    info = report.get("data_info")
+    if isinstance(info, dict):
+        trail = info.get("rotation_trail")
+        if isinstance(trail, list) and trail:
+            info["rotation_trail_total"] = len(trail)
+            info["rotation_trail"] = []
+    return report
+
+
 def create_app() -> FastAPI:
     data_dir = Path(os.environ.get("WB_DATA_DIR", str(BASE_DIR / "data")))
     upload_dir = data_dir / "uploads"
@@ -245,7 +263,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.2.3",
+        version="1.3.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1152,7 +1170,7 @@ def create_app() -> FastAPI:
             "universe_db": str(service.store.path),
         })
         storage.save_backtest(report)
-        return report
+        return _slim_rotation_trail(report)
 
     @application.get("/api/backtests")
     def backtests():
@@ -1163,7 +1181,23 @@ def create_app() -> FastAPI:
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
-        return report
+        return _slim_rotation_trail(report)
+
+    @application.get("/api/backtests/{backtest_id}/rotation-trail")
+    def backtest_rotation_trail(
+        backtest_id: str,
+        params: tuple[int, int] = Depends(page_params),
+    ):
+        """换票轨迹分页：后台切片返回，支持上下页 / 跳转 / 自定义页大小。
+
+        全量轨迹已落库；这里只返回请求的那一页，避免一次性下发大数据量。
+        """
+        report = storage.get_backtest(backtest_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        trail = report.get("data_info", {}).get("rotation_trail") or []
+        page, page_size = params
+        return paginate(trail, page=page, page_size=page_size)
 
     @application.get("/api/backtests/{backtest_id}/export")
     def export_backtest(backtest_id: str, kind: Literal["trades", "orders"]):

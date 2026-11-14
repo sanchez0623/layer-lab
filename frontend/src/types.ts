@@ -97,6 +97,20 @@ export interface RotationTrailItem {
   status: 'CLOSED' | 'OPEN' | 'WAITING' | string;
 }
 
+/**
+ * 后台分页统一信封（与 backend/app/pagination.py 的 paginate() 对齐）。
+ * 任何「可能变长」的列表一律走这套结构，前端配套组件见 components/PaginationBar.tsx。
+ */
+export interface Paginated<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+  total_pages: number;
+  has_prev: boolean;
+  has_next: boolean;
+}
+
 export interface EquityPoint {
   date: string;
   equity: number;

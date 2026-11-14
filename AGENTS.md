@@ -113,6 +113,16 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
   - **`market.py` 是隐患**：`fetch_baostock_daily` / 两处 `fetch_*_index` 各自独立 `bs.login()`（约 317/378/431 行），**没有全局锁**；若调度线程（paper-scheduler）与用户触发请求并发打 baostock，会撞车。新增任何 baostock 调用前，先确认已被全局锁串行化，或复用 `universe.py` 的会话，别再各开 login。
   - 默认数据源已是 quan_parquet（只读本地 parquet，无并发限制），只有回落旧链路时才真正打 baostock——但别因此掉以轻心，回落路径同样要串行。
 
+## 分页约定（后台分页，写进记忆——后续相关列表一律照做）
+
+任何「可能随时间 / 数据量变长」的列表，**后端必须做服务端分页**，不要一次性把全量数据塞进响应再让前端自行截断，避免大数据量下的序列化 / 传输 / 渲染性能问题。已落地的首例：回测「换票轨迹」（`rotation_trail`）。
+
+- **后端**：统一用 `backend/app/pagination.py` 的 `paginate(items, page, page_size)`，返回固定信封 `{items, total, page, page_size, total_pages, has_prev, has_next}`。端点用 `page_params`（FastAPI `Depends`，`page>=1`、`1<=page_size<=200`）解析并校验查询串。范例端点：`GET /api/backtests/{id}/rotation-trail?page=&page_size=`。
+- **大字段瘦身**：主资源里的大数组（如 `data_info.rotation_trail`）从「创建 / 读取」响应里抽走，只留条数（`rotation_trail_total` / `screening_count`），全量仍完整落库、由独立分页端点下发。见 `main.py::_slim_rotation_trail`。
+- **前端**：统一用 `frontend/src/components/PaginationBar.tsx`（受控组件，支持上一页 / 下一页 / 跳转指定页 / 切换每页条数），类型用 `types.ts` 的 `Paginated<T>`，API 走 `lib/api.ts` 对应方法。范例：`BacktestPage.tsx` 换票轨迹面板。
+- **新增长列表时的自检**：这段数据会不会超过几十 / 上百条？会 → 走分页端点 + PaginationBar，别直接 `.map` 全量渲染。
+- **单测**：分页逻辑 / 端点要有 pytest 覆盖（切片、越界收敛、空集合、422、404），见 `backend/tests/test_pagination.py`。
+
 ## 架构原则（实现功能时必须遵守）
 
 这三条是写代码时的硬约束，新功能 / 重构都要对齐，别各写一套。

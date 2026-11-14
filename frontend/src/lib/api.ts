@@ -15,10 +15,12 @@ import type {
   MarketQuote,
   MarketSourceStatus,
   Order,
+  Paginated,
   PrepareResponse,
   RefreshStatus,
   Report,
   RotationRequest,
+  RotationTrailItem,
   ScreenerCoverageResponse,
   ScreenerDefaults,
   ScreenerPrepareRequest,
@@ -120,6 +122,11 @@ export const api = {
   runFunnelBacktest: (payload: FunnelBacktestRequest) => request<Report>('/backtests/funnel', { method: 'POST', body: JSON.stringify(payload) }),
   backtests: () => request<BacktestSummary[]>('/backtests'),
   backtest: (id: string) => request<Report>(`/backtests/${encodeURIComponent(id)}`),
+  // 换票轨迹后台分页：主报告已瘦身不含全量 trail，列表按页拉取。
+  backtestRotationTrail: (id: string, page = 1, pageSize = 20) =>
+    request<Paginated<RotationTrailItem>>(
+      `/backtests/${encodeURIComponent(id)}/rotation-trail${query({ page: String(page), page_size: String(pageSize) })}`,
+    ),
   createAccount: (payload: CreateAccountRequest) => request<AccountState>('/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   currentAccount: () => request<AccountState>('/paper/accounts/current'),
   account: (id: string) => request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}`),
