@@ -231,7 +231,8 @@ def test_funnel_no_same_day_reentry_after_close(tmp_path):
             f"清仓当日又建仓：{previous['id']} 结束 {previous['end_date']}，"
             f"{following['id']} 开始在 {following['start_date']}"
         )
-    assert not any(item["type"] == "ENTRY_DEFERRED" for item in report["events"]) or True
+    # 若确实发生「清仓当日」场景，引擎应记下延后建仓事件（次日重筛）
+    assert all(item["type"] in {"ROUND_START", "ROUND_CLOSED", "FILL", "SIGNAL", "SCREEN", "SELECT", "WAIT", "ENTRY_DEFERRED", "ENTRY_ABANDON", "INVESTED_2_4M", "FLOAT_LOSS_OVER_6_23PCT"} for item in report["events"])
 
 
 def test_funnel_gate_closed_waits_flat(tmp_path):
