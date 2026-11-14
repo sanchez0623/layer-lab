@@ -528,6 +528,17 @@ class LayeredTStrategy(Strategy):
             execution_mode="NEXT_BAR", reason=signal,
         )]
 
+    def _t_order_amount(self, account: BrokerAccount) -> float:
+        """做T单笔金额跟随当前加仓档：取「下一次要加仓」的那笔金额。
+
+        做T在 ``sequence_index >= 4`` 才启用，此时加仓档位与做T金额同源，
+        让做T的资金体量与当前加仓阶段匹配（如下一次加仓 20 万，做T也用 20 万）。
+        序列建满（``sequence_index >= 16``，已无「下一次加仓」）后取最大档
+        （最后一笔金额），保证满仓阶段做T体量与最大加仓档一致。
+        """
+        index = min(account.sequence_index, len(self.config.installment_amounts) - 1)
+        return self.config.installment_amounts[index]
+
     def _t_eligible(self, history: list[Bar], bar: Bar, account: BrokerAccount,
                     live_turnover: float | None = None,
                     live_bid: float | None = None, live_ask: float | None = None,
@@ -619,14 +630,16 @@ class LayeredTStrategy(Strategy):
                 return []
             average_t_price = position.t_cost / position.t_qty
             target = average_t_price * (1 + self.config.t_target_spread)
-            carried = position.t_qty != position.today_t_buy_qty
-            if current_time >= datetime.strptime("14:50", "%H:%M").time() or carried or bar.close >= target:
+            # 纯目标价差退出：底仓兜底，T仓可跨多日持有，既不强制隔夜T+1卖出，
+            # 也不做尾盘14:50轧平。整体止盈/风控清仓时 _liquidation_requests 会
+            # 一并平掉T仓，作为兜底退出路径。
+            if bar.close >= target:
                 quantity = min(position.t_qty, position.permanent_sellable_qty)
                 if quantity >= board_sell_threshold(bar.symbol):
                     self.t_exit_submitted = True
                     return [OrderRequest(
                         symbol=bar.symbol, side="SELL", quantity=quantity, purpose="T",
-                        execution_mode="NEXT_BAR", reason="T目标价差" if bar.close >= target else "14:50旧仓轧平",
+                        execution_mode="NEXT_BAR", reason="T目标价差",
                     )]
             return []
         if current_time < datetime.strptime("09:35", "%H:%M").time() or current_time >= datetime.strptime("14:00", "%H:%M").time():
@@ -638,9 +651,10 @@ class LayeredTStrategy(Strategy):
             return []
         # T 仓按板块口径取股数：目标金额与可用资金分别折算后取小，
         # 再用可卖永久仓数量封顶（做T不超过底仓，避免裸卖）。
+        # 做T金额跟随当前加仓档（_t_order_amount），与下一次加仓体量匹配。
         min_sell = board_sell_threshold(bar.symbol)
         quantity = min(
-            board_buy_quantity(bar.symbol, self.config.t_order_amount, bar.close),
+            board_buy_quantity(bar.symbol, self._t_order_amount(account), bar.close),
             board_buy_quantity(bar.symbol, account.available_cash, bar.close),
         )
         quantity = min(quantity, position.permanent_sellable_qty)

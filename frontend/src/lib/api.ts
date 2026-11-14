@@ -136,7 +136,7 @@ export const api = {
   setAutoStrategy: (id: string, enabled: boolean) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/auto-strategy`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** 局部更新模拟账户策略配置（非费率）；下一根K线起的新操作立刻生效。 */
-  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_spread' | 't_order_amount'>>) =>
+  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_spread'>>) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/config`, { method: 'POST', body: JSON.stringify(patch) }),
   // 后端 domain 枚举为大写（BUY/SELL、MARKET/LIMIT），前端 UI 状态为小写；
   // 统一在 API 边界上行归一化，避免 Pydantic Literal 校验返回 422。

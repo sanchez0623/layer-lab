@@ -612,7 +612,7 @@ export default function PaperPage() {
             <Panel
               className="t-config-panel"
               title="做 T 目标价差"
-              description="T 仓均价上浮该幅度即触发平 T；改动保存后下一根 K 线起的新操作立刻生效，已开仓的 T 仓按新价差重新判定"
+              description="T 仓均价上浮该幅度即触发平 T（纯目标价差退出，可跨多日持有，不强制 T+1 或尾盘轧平）；做 T 金额跟随当前加仓档。改动保存后下一根 K 线起的新操作立刻生效"
               action={<Badge tone="indigo">即时生效</Badge>}
             >
               <div className="t-config-row">

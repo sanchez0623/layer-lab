@@ -101,6 +101,9 @@ class StrategyConfig:
         + [300000.0] * 4 + [400000.0] * 4
     )
     enable_t: bool = True
+    # 已废弃：做T金额现跟随当前加仓档 installment_amounts[sequence_index]
+    # （满仓后取最大档），不再使用本字段。保留字段仅为兼容老账户已快照的 config，
+    # 避免 from_dict 因「未知字段」报错；新逻辑请勿再读取。
     t_order_amount: float = 100000.0
     commission_rate: float = 0.00005       # 万0.5，双边
     min_commission: float = 5.0             # 元/笔，仅作用于佣金项
