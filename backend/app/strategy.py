@@ -392,11 +392,14 @@ class LayeredTStrategy(Strategy):
             ):
                 return "浮盈右侧回撤5%"
         elif price_return < 0 and len(history) >= 6:
+            # A3 放宽：a3_require_new_low=False（默认）时不再要求「先破新低」前置，
+            # 只要 close 站上前3根最低 + 缩量即触发；True 时回到旧行为。
             had_low_before = self.had_new_low
             previous_three_low = min(item.low for item in history[-4:-1])
             previous_five_volume = mean(item.volume for item in history[-6:-1])
+            new_low_ok = had_low_before or not self.config.a3_require_new_low
             a3 = (
-                had_low_before and bar.close > previous_three_low
+                new_low_ok and bar.close > previous_three_low
                 and bar.volume < previous_five_volume * self.config.oversold_volume_ratio
             )
             if bar.low < self.last_add_price and bar.low < previous_three_low:
@@ -546,7 +549,7 @@ class LayeredTStrategy(Strategy):
                     daily_turnover_rate: float | None = None) -> bool:
         position = account.position(bar.symbol)
         if (
-            not self.config.enable_t or account.sequence_index < 4 or self.armed
+            not self.config.enable_t or account.sequence_index < self.config.t_min_sequence or self.armed
             or self.liquidating or self.t_traded_today or self.t_order_submitted
             or position.t_qty or len(history) < 5
         ):

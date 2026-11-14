@@ -118,7 +118,15 @@ class StrategyConfig:
     limit_pct: float = 0.20
     right_drawdown: float = 0.05
     min_add_gap_days: int = 1
-    oversold_volume_ratio: float = 0.50
+    # 浮亏超跌A3 加仓信号放宽（见 strategy._add_signal）：
+    # - oversold_volume_ratio：当日量 < 5日均量 × 此值才算「缩量」。原 0.50 太严
+    #   （要求砍半），放宽到 0.80 让阴跌标的更容易触发加仓。
+    # - a3_require_new_low：是否要求「先破新低」作为 A3 前置。False（默认）时只要
+    #   close 站上前3根最低 + 缩量即触发，不再要求 had_new_low。
+    oversold_volume_ratio: float = 0.80
+    a3_require_new_low: bool = False
+    # 做T所需最小底仓笔数（原硬编码 4）。默认 1 让做T在首笔建仓后即可启用。
+    t_min_sequence: int = 1
     price_armed: float = 0.10
     price_disarm: float = 0.095
     price_take_profit: float = 0.15

@@ -157,6 +157,74 @@ def test_holding_days_counts_only_bars_after_entry():
     assert strategy._holding_days(history) == 0
 
 
+def test_t_min_sequence_gate_configurable():
+    """做T门槛 t_min_sequence：默认 1（首笔建仓后即可做T）；=4 回到旧行为。
+
+    直接测 _t_eligible 的 sequence 门槛：构造满足振幅/换手/盘口/价差的 bar，
+    只让 sequence_index 变化，验证门槛由 t_min_sequence 控制。
+    """
+    def make_bar() -> Bar:
+        bar = daily(6, 10.0, low=9.0, volume=100_000)
+        bar.turnover_rate = 0.05
+        bar.bid, bar.ask = 9.99, 10.01
+        return bar
+
+    # 默认 t_min_sequence=1：sequence_index=1 即过门槛
+    account = funded_account()
+    account.sequence_index = 1
+    strategy = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    history = [daily(i, 10.0, low=9.6) for i in range(1, 6)]
+    assert strategy._t_eligible(history, make_bar(), account,
+                                daily_amplitude=0.05, daily_turnover_rate=0.05) is True
+
+    # t_min_sequence=4：sequence_index=1 不够，门槛挡住
+    account2 = funded_account()
+    account2.sequence_index = 1
+    strategy2 = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, t_min_sequence=4,
+    ))
+    assert strategy2._t_eligible(history, make_bar(), account2,
+                                 daily_amplitude=0.05, daily_turnover_rate=0.05) is False
+
+    # t_min_sequence=4 且 sequence_index=4：过门槛（回归旧行为）
+    account3 = funded_account()
+    account3.sequence_index = 4
+    assert strategy2._t_eligible(history, make_bar(), account3,
+                                 daily_amplitude=0.05, daily_turnover_rate=0.05) is True
+
+
+def test_a3_relaxed_volume_and_no_new_low():
+    """A3 放宽：oversold_volume_ratio=0.8 + a3_require_new_low=False 时更易触发加仓。"""
+    # 构造阴跌序列：建仓 @10，之后阴跌到 9.0，某日缩量反弹到前3根最低之上
+    account = funded_account()
+    account.sequence_index = 4
+    # 放宽配置：缩量阈值 0.8 + 不要求破新低
+    config = StrategyConfig(
+        slippage_bps=0, volume_participation=1.0,
+        oversold_volume_ratio=0.8, a3_require_new_low=False,
+    )
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    # 阴跌：i=1..6，收盘从 9.8 跌到 9.0，最后一根温和缩量反弹
+    closes = [10.0, 9.8, 9.6, 9.4, 9.2, 9.0, 9.1]
+    history = []
+    for i, close in enumerate(closes):
+        volume = 1000 if i < 6 else 700  # 最后一根缩量（< 5日均量×0.8）
+        history.append(daily(i, close, low=close * 0.99, volume=volume))
+    # 放宽后应触发 A3
+    assert strategy._add_signal(history, account) == "浮亏超跌A3"
+
+    # 严格配置（旧默认 0.5 + 要求破新低）：同样数据不应触发
+    strict = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0,
+        oversold_volume_ratio=0.5, a3_require_new_low=True,
+    ))
+    strict.last_add_price = 10.0
+    strict.last_add_session = 0
+    assert strict._add_signal(history, account) == ""
+
+
 def test_account_track_includes_t_net_spread():
     account = funded_account()
     account.t_net_profit = 600.0
