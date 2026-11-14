@@ -22,12 +22,18 @@
 
 ### 增量部署速查（每次改完代码）
 
-前提：本机 `C:\Users\zsq23\.workbench\config.json` 已配好阿里云 AK（`ecs_run.py` / `oss_upload.py` 依赖）。
+前提：本机 `C:\Users\zsq23\.workbench\config.json` 已配好阿里云 AK（`ecs_run.py` 依赖）。
+
+> **⚠️ 不要再用 OSS 中转（`deploy/oss_upload.py`）**：阿里云 OSS 账号已被禁用，
+> 上传一律返回 `403 UserDisable`（2026-11-14 实测确认）。**改走 `ecs_run.py upload` 直传服务器**，
+> 跳过下面的第 2 步，把 tar 直接传到 `/root/layer-lab.tar.gz`（脚本自带 sha256 校验）。
 
 1. 本地验证通过后打包：`python deploy/pack_deploy.py`（产出 `layer-lab-deploy.tar.gz`）
-2. OSS 中转上传：`python deploy/oss_upload.py layer-lab-deploy.tar.gz layer-lab-deploy.tar.gz`
+2. **（弃用）~~OSS 中转上传~~** → 改用直传：`python deploy/ecs_run.py upload layer-lab-deploy.tar.gz /root/layer-lab.tar.gz`
 3. ECS 下载解包：`python deploy/ecs_run.py run "mkdir -p /root/layer-lab && tar -xzf /root/layer-lab.tar.gz -C /root/layer-lab"`
 4. 一键部署（幂等，重建镜像 + 重启容器）：`python deploy/ecs_run.py run "cd /root/layer-lab && bash deploy/deploy_aliyun.sh"`
+
+> 注意：第 4 步会**重建容器**，之前 `docker cp` 进容器的临时文件会丢，别依赖容器内残留文件。
 
 - 改后端/前端代码走上面全量重打包；只改配置/脚本可直接 `python deploy/ecs_run.py upload <本地> <远端>` 覆盖单个文件再重启容器。
 - 部署后自检：`docker compose -f deploy/compose.server.yaml ps` + `docker logs layer-lab --tail 50`；访问 `https://47.119.50.139:3444`。
