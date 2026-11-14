@@ -30,6 +30,8 @@ const fallbackConfig: StrategyConfig = {
   volume_participation: 0.2,
   t_target_net_spread: 0.03,
   t_exit_cutoff: '14:50',
+  max_holding_days: 22,
+  holding_tp_override: 0.03,
 };
 
 /** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
@@ -120,7 +122,12 @@ export default function BacktestPage() {
         }
       } catch { /* 作业列表不可用时静默忽略，不影响页面初始化 */ }
       const defaultConfig = defaults.config || defaults;
-      setConfig((current) => ({ ...current, ...defaultConfig }));
+      // 超期降阈默认预填 22 天 / 3%（后端默认 None = 关闭，UI 侧给推荐值，可由用户改空关闭）。
+      setConfig((current) => ({
+        ...current, ...defaultConfig,
+        max_holding_days: defaultConfig.max_holding_days ?? 22,
+        holding_tp_override: defaultConfig.holding_tp_override ?? 0.03,
+      }));
       setFees(defaults.fees || strategyToFeeConfig(defaultConfig));
       if (defaults.initial_cash) setInitialCash(defaults.initial_cash);
       // 漏斗轮动回测：用后端选股默认阈值打底（失败不阻塞，沿用本地 fallbackScreener）。
@@ -456,6 +463,28 @@ export default function BacktestPage() {
               </Field>
             </div>
           )}
+          <div className="form-grid t-params-grid">
+            <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降到右侧阈值；留空=关闭" className="span-3">
+              <div className="input-with-unit">
+                <input
+                  type="number" min="1" max="250" step="1"
+                  value={config.max_holding_days ?? ''}
+                  onChange={(event) => updateConfig('max_holding_days', event.target.value === '' ? null : Number(event.target.value))}
+                />
+                <span>交易日</span>
+              </div>
+            </Field>
+            <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值；与左侧天数需同时填写" className="span-3">
+              <div className="input-with-unit">
+                <input
+                  type="number" min="0" max="100" step="0.1"
+                  value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''}
+                  onChange={(event) => updateConfig('holding_tp_override', event.target.value === '' ? null : Number(event.target.value) / 100)}
+                />
+                <span>%</span>
+              </div>
+            </Field>
+          </div>
           {mode === 'funnel' && (
             <div className="funnel-mode-note">
               <Layers3 size={15} />

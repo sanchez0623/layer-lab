@@ -505,6 +505,12 @@ export default function PaperPage() {
   const [tCutoffInput, setTCutoffInput] = useState('');
   const [savingTCutoff, setSavingTCutoff] = useState(false);
   const tCutoff = account?.config?.t_exit_cutoff ?? defaultConfig.t_exit_cutoff ?? '14:50';
+  // 超期降阈：持有 ≥N 交易日后止盈降到 override（两项需同时配置才生效）。
+  const [holdingDaysInput, setHoldingDaysInput] = useState('');
+  const [holdingTpInput, setHoldingTpInput] = useState('');
+  const [savingHolding, setSavingHolding] = useState(false);
+  const holdingDays = account?.config?.max_holding_days ?? null;
+  const holdingTp = account?.config?.holding_tp_override ?? null;
 
   const saveTNetSpread = async () => {
     if (!account) return;
@@ -540,6 +546,28 @@ export default function PaperPage() {
       setError(cause instanceof Error ? cause.message : '做T截止时间更新失败。');
     } finally {
       setSavingTCutoff(false);
+    }
+  };
+
+  const saveHoldingOverride = async () => {
+    if (!account) return;
+    const days = Number(holdingDaysInput);
+    const pct = Number(holdingTpInput);
+    if (!Number.isInteger(days) || days < 1) { setError('超期降阈天数需为正整数交易日。'); return; }
+    if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) { setError('降阈后止盈需为 0–100 之间的百分数。'); return; }
+    setSavingHolding(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, {
+        max_holding_days: days, holding_tp_override: pct / 100,
+      });
+      setAccount(next);
+      setHoldingDaysInput('');
+      setHoldingTpInput('');
+      setSuccess(`超期降阈已更新：持有 ≥${days} 个交易日后止盈降为 ${number(pct, 2)}%，下一根K线起生效。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '超期降阈更新失败。');
+    } finally {
+      setSavingHolding(false);
     }
   };
 
@@ -682,6 +710,57 @@ export default function PaperPage() {
                 </button>
               </div>
               <p className="t-config-note">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
+            </Panel>
+          )}
+
+          {account.auto_strategy && (
+            <Panel
+              className="t-config-panel"
+              title="超期降阈止盈"
+              description={`持有交易日数达到阈值后，价格轨/账户轨止盈阈值从 15% 降为设定值，让长期横盘/缓慢阴跌标的尽快让位下一轮。当前：${
+                holdingDays != null && holdingTp != null
+                  ? `持有 ≥${holdingDays} 日 → ${number(holdingTp * 100, 2)}%`
+                  : '关闭'
+              }。两项需同时填写，保存后下一根 K 线起生效`}
+              action={<Badge tone={holdingDays != null && holdingTp != null ? 'indigo' : 'neutral'}>
+                {holdingDays != null && holdingTp != null ? '已开启' : '关闭'}
+              </Badge>}
+            >
+              <div className="t-config-row">
+                <Field label="超期天数（交易日）" hint="持有 ≥N 个交易日后降阈" className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="1" max="250" step="1"
+                      placeholder={holdingDays != null ? String(holdingDays) : '22'}
+                      value={holdingDaysInput}
+                      onChange={(event) => setHoldingDaysInput(event.target.value)}
+                      disabled={savingHolding}
+                    />
+                    <span>日</span>
+                  </div>
+                </Field>
+                <Field label="降阈后止盈（%）" hint="价格轨/账户轨同时降为该值" className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="0" max="100" step="0.1"
+                      placeholder={holdingTp != null ? number(holdingTp * 100, 2) : '3'}
+                      value={holdingTpInput}
+                      onChange={(event) => setHoldingTpInput(event.target.value)}
+                      disabled={savingHolding}
+                    />
+                    <span>%</span>
+                  </div>
+                </Field>
+                <button
+                  className="button primary t-spread-save"
+                  onClick={() => void saveHoldingOverride()}
+                  disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}
+                >
+                  {savingHolding ? <span className="button-spinner" /> : <Repeat2 size={15} />}
+                  {savingHolding ? '正在保存' : '保存降阈'}
+                </button>
+              </div>
+              <p className="t-config-note">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
             </Panel>
           )}
 

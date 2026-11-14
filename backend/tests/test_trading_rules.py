@@ -10,8 +10,8 @@ from app.domain import Bar, OrderRequest, StrategyConfig
 from app.main import create_app
 from app.trading_rules import (
     NOT_MODELED, SYNTHETIC_FALLBACK, all_board_rules, board_of, limit_pct_for,
-    price_cage_bounds, rules_for, validate_limit_price_cage, validate_order_amount,
-    validate_quantity,
+    order_share_cap, price_cage_bounds, rules_for, split_quantity,
+    validate_limit_price_cage, validate_order_amount, validate_quantity,
 )
 
 
@@ -295,3 +295,92 @@ def test_manual_star_order_201_accepted_by_api(tmp_path, monkeypatch):
     })
     assert response.status_code == 200
     assert response.json()["order"]["status"] == "PENDING"
+
+
+# ---------------- 单笔申报上限拆分 ----------------
+
+def test_order_share_cap_per_board_and_order_type():
+    assert order_share_cap("sz.300045", "MARKET") == 50_000
+    assert order_share_cap("sz.300045", "LIMIT") == 100_000
+    assert order_share_cap("sh.688200", "MARKET") == 50_000
+    assert order_share_cap("sh.600519", "MARKET") == 100_000
+    assert order_share_cap("TEST", "MARKET") == 0
+
+
+def test_split_quantity_gem_large_liquidation():
+    """回归：创业板 176,200 股整笔市价卖出超 5 万股上限，必须拆成 4 笔。"""
+    chunks = split_quantity("sz.300045", 176_200, "MARKET")
+    assert chunks == [50_000, 50_000, 50_000, 26_200]
+    assert all(0 < qty <= 50_000 and qty % 100 == 0 for qty in chunks)
+    assert sum(chunks) == 176_200
+
+
+def test_split_quantity_uses_limit_cap_for_limit_orders():
+    assert split_quantity("sz.300045", 176_200, "LIMIT") == [100_000, 76_200]
+
+
+def test_split_quantity_main_board_and_synthetic():
+    assert split_quantity("sh.600519", 120_000, "MARKET") == [100_000, 20_000]
+    # 合成标的未建模上限：原样一笔，不改变旧回测/旧测试行为。
+    assert split_quantity("TEST", 500_000, "MARKET") == [500_000]
+
+
+def test_split_quantity_star_remainder_borrows_to_min_qty():
+    """科创板 min_qty=200：余数不足 200 时从上一笔借，避免产生非法尾单。"""
+    chunks = split_quantity("sh.688200", 50_050, "MARKET")
+    assert chunks == [49_850, 200]
+    assert all(qty >= 200 for qty in chunks)
+
+
+def test_split_quantity_odd_lot_liquidation_single_chunk():
+    """整笔持仓低于最小申报的零股清仓：单笔返回，走 broker 零股通道。"""
+    assert split_quantity("sh.688200", 150, "MARKET") == [150]
+    assert split_quantity("sz.300045", 50, "MARKET") == [50]
+
+
+def test_submit_split_emits_cap_conformant_child_orders():
+    account = BrokerAccount(100_000_000, config())
+    orders = account.submit_split(request("sz.300045", quantity=176_200))
+    assert len(orders) == 4
+    assert sum(order.quantity for order in orders) == 176_200
+    assert all(order.status == "PENDING" and order.quantity <= 50_000 for order in orders)
+
+
+def test_submit_still_rejects_oversize_manual_order():
+    """手工委托保持「超额即拒绝」的真实反馈，不走自动拆分。"""
+    account = BrokerAccount(100_000_000, config())
+    order = account.submit(request("sz.300045", quantity=176_200))
+    assert order.status == "REJECTED"
+    assert "上限" in order.message
+
+
+def test_liquidation_of_large_position_splits_and_never_rejected():
+    """回归 REPORT/4ECFE242：整笔 176,200 股清仓被拆成 4 笔合规卖单，不再刷拒绝。
+
+    历史 bug：策略把整个持仓当一笔市价卖单提交，超创业板 5 万股上限被拒，
+    且 liquidating 状态每根 K 线重发，单份报告刷出 2.4 万条相同拒绝。
+    """
+    from datetime import datetime
+
+    from app.backtest import submit_split_requests
+    from app.domain import Position
+    from app.strategy import LayeredTStrategy
+
+    account = BrokerAccount(100_000_000, config())
+    account.positions["sz.300045"] = Position(
+        symbol="sz.300045", permanent_qty=176_200, permanent_cost=1_762_000.0, last_price=10.0,
+    )
+    strategy = LayeredTStrategy(config())
+    strategy.close_reason = "Armed量价背离三选二_3根5分钟K线"
+    requests = strategy._liquidation_requests(account.position("sz.300045"), "NEXT_BAR")
+
+    events: list[dict] = []
+    warnings: list[str] = []
+    submit_split_requests(account, requests, datetime(2024, 10, 8, 13, 25), events, warnings)
+
+    sells = [order for order in account.orders if order.side == "SELL"]
+    assert len(sells) == 4
+    assert sum(order.quantity for order in sells) == 176_200
+    assert all(order.status == "PENDING" for order in sells)
+    assert warnings == []
+    assert len(events) == 4

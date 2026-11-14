@@ -25,6 +25,34 @@ _INDEX_LOOKBACK_BUFFER_DAYS = 45
 _DAILY_LOOKBACK_BUFFER_DAYS = 420
 _DAILY_WINDOW_MAX_ROWS = 2000
 
+
+def submit_split_requests(
+    account: BrokerAccount, requests, timestamp: datetime,
+    events: list[dict[str, Any]], warnings: list[str],
+) -> None:
+    """按板块单笔申报上限拆分策略委托后提交，并把每笔子单记入 SIGNAL 事件。
+
+    策略层按「整笔持仓」生成清仓/止盈委托，但交易所对单笔市价申报有股数上限
+    （创业板/科创板 5 万股）。这里统一拆分，回测与模拟盘自动策略共用同一口径。
+
+    拒绝不再静默重复：同一拒绝原因只记一次 warning。历史 bug——176,200 股整笔
+    卖出超创业板 5 万股上限，每根 K 线重发一次，单份报告刷出 2.4 万条相同拒绝。
+    """
+    for request in requests:
+        if request.quantity <= 0:
+            continue
+        for order in account.submit_split(request, timestamp):
+            events.append({
+                "date": timestamp.isoformat(), "type": "SIGNAL", "order_id": order.id,
+                "symbol": order.symbol, "side": order.side, "purpose": order.purpose,
+                "quantity": order.quantity, "reason": order.reason, "status": order.status,
+                "execution_mode": order.execution_mode,
+            })
+            if order.status == "REJECTED":
+                message = f"[委托被拒] {order.symbol} {order.side} {order.quantity}股：{order.message}"
+                if message not in warnings:
+                    warnings.append(message)
+
 # 选股 warnings 分两类（整合进换票轨迹，见 _screen）：
 # - 全局口径声明：整轮回测不变的口径/数据边界（做T粒度、财务深筛关闭、数据源覆盖盲区），
 #   只需在报告顶部提示一次，去重后进 report.warnings。
@@ -228,16 +256,7 @@ class BacktestEngine:
             self.strategy.reset_round(self.account)
 
     def _submit(self, requests, timestamp: datetime) -> None:
-        for request in requests:
-            if request.quantity < 100:
-                continue
-            order = self.account.submit(request, timestamp)
-            self.events.append({
-                "date": timestamp.isoformat(), "type": "SIGNAL", "order_id": order.id,
-                "symbol": order.symbol, "side": order.side, "purpose": order.purpose,
-                "quantity": order.quantity, "reason": order.reason, "status": order.status,
-                "execution_mode": order.execution_mode,
-            })
+        submit_split_requests(self.account, requests, timestamp, self.events, self.warnings)
 
     def run(self, resume_state: dict[str, Any] | None = None) -> dict[str, Any]:
         selected = self._selected_days()
@@ -658,16 +677,7 @@ class FunnelRotationBacktest:
             self._round_just_closed = True
 
     def _submit(self, requests, timestamp: datetime) -> None:
-        for request in requests:
-            if request.quantity < 100:
-                continue
-            order = self.account.submit(request, timestamp)
-            self.events.append({
-                "date": timestamp.isoformat(), "type": "SIGNAL", "order_id": order.id,
-                "symbol": order.symbol, "side": order.side, "purpose": order.purpose,
-                "quantity": order.quantity, "reason": order.reason, "status": order.status,
-                "execution_mode": order.execution_mode,
-            })
+        submit_split_requests(self.account, requests, timestamp, self.events, self.warnings)
 
     # -- 选股 ------------------------------------------------------------
 
