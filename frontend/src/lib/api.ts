@@ -21,6 +21,7 @@ import type {
   PrepareResponse,
   RefreshStatus,
   Report,
+  Round,
   RotationRequest,
   RotationTrailItem,
   ScreenerCoverageResponse,
@@ -35,6 +36,7 @@ import type {
   StrategyConfig,
   StrategyDefaults,
   Timeframe,
+  Trade,
   TradingRulesAllResponse,
   TradingRulesResponse,
   TradingSession,
@@ -140,6 +142,13 @@ export const api = {
   backtestRotationTrail: (id: string, page = 1, pageSize = 20) =>
     request<Paginated<RotationTrailItem>>(
       `/backtests/${encodeURIComponent(id)}/rotation-trail${query({ page: String(page), page_size: String(pageSize) })}`,
+    ),
+  // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
+  backtestRecords: <K extends 'trades' | 'orders' | 'rounds'>(
+    id: string, kind: K, page = 1, pageSize = 20,
+  ) =>
+    request<Paginated<{ trades: Trade; orders: Order; rounds: Round }[K]>>(
+      `/backtests/${encodeURIComponent(id)}/records/${kind}${query({ page: String(page), page_size: String(pageSize) })}`,
     ),
   createAccount: (payload: CreateAccountRequest) => request<AccountState>('/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   currentAccount: () => request<AccountState>('/paper/accounts/current'),

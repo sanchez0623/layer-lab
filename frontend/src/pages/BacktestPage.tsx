@@ -16,7 +16,7 @@ import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
 import PaginationBar from '../components/PaginationBar';
 import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SuccessBanner, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig } from '../types';
+import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Order, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -102,6 +102,11 @@ export default function BacktestPage() {
   const [trailPage, setTrailPage] = useState(1);
   const [trailPageSize, setTrailPageSize] = useState(20);
   const [trailLoading, setTrailLoading] = useState(false);
+  // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
+  const [recordData, setRecordData] = useState<Paginated<Trade | Order | Round> | null>(null);
+  const [recordPage, setRecordPage] = useState(1);
+  const [recordPageSize, setRecordPageSize] = useState(20);
+  const [recordLoading, setRecordLoading] = useState(false);
 
   const loadInitial = async () => {
     setLoading(true);
@@ -365,7 +370,10 @@ export default function BacktestPage() {
 
   const updateConfig = <K extends keyof StrategyConfig>(key: K, value: StrategyConfig[K]) => setConfig((current) => ({ ...current, [key]: value }));
   const metrics = report?.metrics;
-  const closedRounds = useMemo(() => report?.rounds.filter((round) => !round.status || ['closed', 'completed', '已结束'].includes(lower(round.status))).length || 0, [report]);
+  // 明细条数：主报告只带 *_total；旧缓存报告回退到本地数组长度。
+  const roundsTotal = report?.rounds_total ?? report?.rounds?.length ?? 0;
+  const tradesTotal = report?.trades_total ?? report?.trades?.length ?? 0;
+  const ordersTotal = report?.orders_total ?? report?.orders?.length ?? 0;
   // 漏斗轮动回测专属：每轮换票轨迹（选中日期/标的/入选依据/进出日期/盈亏）。
   // 主报告已瘦身不含全量 trail，改走 GET /backtests/{id}/rotation-trail 后台分页。
   const isFunnel = String(report?.data_info?.mode) === 'funnel_rotation';
@@ -393,6 +401,28 @@ export default function BacktestPage() {
       .finally(() => { if (!cancelled) setTrailLoading(false); });
     return () => { cancelled = true; };
   }, [report, isFunnel, trailPage, trailPageSize]);
+
+  // 成交 / 委托 / 轮次 明细分页：切 tab 或翻页时按需拉取当前 tab 的一页。
+  useEffect(() => { setRecordPage(1); }, [report?.id, tableTab]);
+
+  useEffect(() => {
+    if (!report) { setRecordData(null); return; }
+    let cancelled = false;
+    setRecordLoading(true);
+    api.backtestRecords(report.id, tableTab, recordPage, recordPageSize)
+      .then((paged) => { if (!cancelled) setRecordData(paged); })
+      .catch(() => { if (!cancelled) setRecordData(null); })
+      .finally(() => { if (!cancelled) setRecordLoading(false); });
+    return () => { cancelled = true; };
+  }, [report, tableTab, recordPage, recordPageSize]);
+
+  // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片）。
+  const recordItems = useMemo<any[]>(() => {
+    if (recordData) return recordData.items;
+    const local = tableTab === 'rounds' ? report?.rounds : tableTab === 'trades' ? report?.trades : report?.orders;
+    const start = (recordPage - 1) * recordPageSize;
+    return (local ?? []).slice(start, start + recordPageSize);
+  }, [recordData, tableTab, report, recordPage, recordPageSize]);
 
   return (
     <div className="page backtest-page">
@@ -705,27 +735,37 @@ export default function BacktestPage() {
           <Panel className="records-panel">
             <div className="records-header">
               <div className="tabs" role="tablist">
-                <button className={tableTab === 'rounds' ? 'active' : ''} onClick={() => setTableTab('rounds')} role="tab">已结束轮次<span>{closedRounds}</span></button>
-                <button className={tableTab === 'trades' ? 'active' : ''} onClick={() => setTableTab('trades')} role="tab">成交明细<span>{report.trades.length}</span></button>
-                <button className={tableTab === 'orders' ? 'active' : ''} onClick={() => setTableTab('orders')} role="tab">委托记录<span>{report.orders.length}</span></button>
+                <button className={tableTab === 'rounds' ? 'active' : ''} onClick={() => setTableTab('rounds')} role="tab">已结束轮次<span>{roundsTotal}</span></button>
+                <button className={tableTab === 'trades' ? 'active' : ''} onClick={() => setTableTab('trades')} role="tab">成交明细<span>{tradesTotal}</span></button>
+                <button className={tableTab === 'orders' ? 'active' : ''} onClick={() => setTableTab('orders')} role="tab">委托记录<span>{ordersTotal}</span></button>
               </div>
               <span className="records-caption"><Clock3 size={14} />按时间顺序记录</span>
             </div>
             <div className="table-scroll">
               {tableTab === 'rounds' && <table><thead><tr><th>轮次</th><th>开始时间</th><th>结束时间</th><th className="num">最大投入</th><th className="num">净盈亏</th><th className="num">收益率</th><th className="num">成交数</th><th>状态</th></tr></thead><tbody>
-                {report.rounds.length === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : report.rounds.map((round, index) => {
+                {roundsTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : recordItems.map((round, index) => {
                   const pnl = roundNumber(round, ['net_profit', 'pnl', 'realized_pnl']);
                   const returns = roundNumber(round, ['return_rate', 'total_return', 'return']);
-                  return <tr key={String(round.id ?? index)}><td><strong className="round-id">#{String(roundValue(round, ['round', 'index']) ?? index + 1).padStart(2, '0')}</strong></td><td>{shortDate(String(roundValue(round, ['start_date', 'start', 'opened_at']) || ''))}</td><td>{shortDate(String(roundValue(round, ['end_date', 'end', 'closed_at']) || ''))}</td><td className="num">{money(roundNumber(round, ['max_invested', 'invested']))}</td><td className={`num ${pnl !== undefined ? pnl >= 0 ? 'positive' : 'negative' : ''}`}>{signedMoney(pnl)}</td><td className={`num ${returns !== undefined ? returns >= 0 ? 'positive' : 'negative' : ''}`}>{signedPercent(returns)}</td><td className="num">{integer(roundNumber(round, ['trade_count', 'trades_count', 'total_trades']))}</td><td><Badge tone={lower(round.status) === 'closed' ? 'green' : 'neutral'}>{statusLabel(round.status || 'closed')}</Badge></td></tr>;
+                  const seq = (recordPage - 1) * recordPageSize + index + 1;
+                  return <tr key={String(round.id ?? index)}><td><strong className="round-id">#{String(roundValue(round, ['round', 'index']) ?? seq).padStart(2, '0')}</strong></td><td>{shortDate(String(roundValue(round, ['start_date', 'start', 'opened_at']) || ''))}</td><td>{shortDate(String(roundValue(round, ['end_date', 'end', 'closed_at']) || ''))}</td><td className="num">{money(roundNumber(round, ['max_invested', 'invested']))}</td><td className={`num ${pnl !== undefined ? pnl >= 0 ? 'positive' : 'negative' : ''}`}>{signedMoney(pnl)}</td><td className={`num ${returns !== undefined ? returns >= 0 ? 'positive' : 'negative' : ''}`}>{signedPercent(returns)}</td><td className="num">{integer(roundNumber(round, ['trade_count', 'trades_count', 'total_trades']))}</td><td><Badge tone={lower(round.status) === 'closed' ? 'green' : 'neutral'}>{statusLabel(round.status || 'closed')}</Badge></td></tr>;
                 })}
               </tbody></table>}
               {tableTab === 'trades' && <table><thead><tr><th>成交时间</th><th>标的</th><th>方向</th><th>用途</th><th className="num">价格</th><th className="num">数量</th><th className="num">成交额</th><th className="num">费用</th><th className="num">已实现盈亏</th></tr></thead><tbody>
-                {report.trades.length === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : report.trades.map((trade, index) => <tr key={String(trade.id ?? `${trade.timestamp}-${index}`)}><td>{dateTime(trade.timestamp)}</td><td><strong title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></td><td><span className={`side-label ${lower(trade.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(trade.side)}</span></td><td>{purposeLabel(trade.purpose)}</td><td className="num">{money(trade.price)}</td><td className="num">{integer(trade.quantity)}</td><td className="num">{money(trade.amount ?? trade.notional)}</td><td className="num" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</td><td className={`num ${(trade.realized_pnl || 0) >= 0 ? 'positive' : 'negative'}`}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</td></tr>)}
+                {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : recordItems.map((trade, index) => <tr key={String(trade.id ?? `${trade.timestamp}-${index}`)}><td>{dateTime(trade.timestamp)}</td><td><strong title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></td><td><span className={`side-label ${lower(trade.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(trade.side)}</span></td><td>{purposeLabel(trade.purpose)}</td><td className="num">{money(trade.price)}</td><td className="num">{integer(trade.quantity)}</td><td className="num">{money(trade.amount ?? trade.notional)}</td><td className="num" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</td><td className={`num ${(trade.realized_pnl || 0) >= 0 ? 'positive' : 'negative'}`}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</td></tr>)}
               </tbody></table>}
               {tableTab === 'orders' && <table><thead><tr><th>委托时间</th><th>标的</th><th>方向</th><th>类型</th><th className="num">限价</th><th className="num">委托数量</th><th className="num">已成交</th><th>状态</th></tr></thead><tbody>
-                {report.orders.length === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : report.orders.map((order) => <tr key={order.id}><td>{dateTime(order.created_at || order.timestamp)}</td><td><strong title={order.symbol}>{displaySymbol(order.symbol)}</strong></td><td><span className={`side-label ${lower(order.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(order.side)}</span></td><td>{orderTypeLabel(order.order_type || order.type)}</td><td className="num">{money(order.limit_price ?? order.price)}</td><td className="num">{integer(order.quantity)}</td><td className="num">{integer(order.filled_quantity ?? order.filled_qty)}</td><td><Badge>{statusLabel(order.status)}</Badge></td></tr>)}
+                {ordersTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : recordItems.map((order) => <tr key={order.id}><td>{dateTime(order.created_at || order.timestamp)}</td><td><strong title={order.symbol}>{displaySymbol(order.symbol)}</strong></td><td><span className={`side-label ${lower(order.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(order.side)}</span></td><td>{orderTypeLabel(order.order_type || order.type)}</td><td className="num">{money(order.limit_price ?? order.price)}</td><td className="num">{integer(order.quantity)}</td><td className="num">{integer(order.filled_quantity ?? order.filled_qty)}</td><td><Badge>{statusLabel(order.status)}</Badge></td></tr>)}
               </tbody></table>}
             </div>
+            <PaginationBar
+              page={recordData?.page ?? recordPage}
+              pageSize={recordData?.page_size ?? recordPageSize}
+              total={tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal}
+              totalPages={recordData?.total_pages ?? Math.max(1, Math.ceil((tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal) / recordPageSize))}
+              onPageChange={setRecordPage}
+              onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }}
+              disabled={recordLoading}
+            />
           </Panel>
         </div>
       )}

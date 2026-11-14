@@ -256,9 +256,16 @@ export interface Report {
   config: StrategyConfig;
   metrics: ReportMetrics;
   equity_curve: EquityPoint[];
-  trades: Trade[];
-  orders: Order[];
-  rounds: Round[];
+  /**
+   * 成交 / 委托 / 轮次明细已改为后台分页下发：主报告只带 `*_total` 条数，
+   * 全量数组走 GET /backtests/{id}/records/{kind}。字段保留为可选以兼容旧缓存报告。
+   */
+  trades?: Trade[];
+  orders?: Order[];
+  rounds?: Round[];
+  trades_total?: number;
+  orders_total?: number;
+  rounds_total?: number;
   events: BacktestEvent[];
   warnings: string[];
   data_info: Record<string, unknown>;

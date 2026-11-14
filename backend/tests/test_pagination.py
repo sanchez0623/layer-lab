@@ -150,3 +150,79 @@ def test_main_report_is_slimmed_no_full_trail(api):
     paged = client.get("/api/backtests/bt_3/rotation-trail?page=1&page_size=45").json()
     assert paged["total"] == 45
     assert len(paged["items"]) == 45
+
+
+# ------------------------------------------------- 成交/委托/轮次 明细分页 ----
+
+def _report_with_records(report_id: str, n: int) -> dict:
+    """造一份单标的回测报告，trades / orders / rounds 各含 n 条。"""
+    trades = [{"id": f"t{i}", "symbol": "sz.000001", "side": "buy",
+               "timestamp": f"2026-01-{(i % 28) + 1:02d}", "price": 10.0,
+               "quantity": 100, "amount": 1000.0, "total_fee": 1.0} for i in range(n)]
+    orders = [{"id": f"o{i}", "symbol": "sz.000001", "side": "buy",
+               "created_at": f"2026-01-{(i % 28) + 1:02d}", "order_type": "market",
+               "quantity": 100, "filled_quantity": 100, "status": "filled"} for i in range(n)]
+    rounds = [{"id": f"r{i}", "start_date": "2026-01-01", "end_date": "2026-02-01",
+               "net_profit": float(i), "status": "closed"} for i in range(n)]
+    return {
+        "id": report_id, "name": "明细分页测试", "status": "COMPLETED",
+        "created_at": "2026-11-13T00:00:00", "config": {}, "metrics": {},
+        "equity_curve": [], "trades": trades, "orders": orders, "rounds": rounds,
+        "events": [], "warnings": [], "data_info": {"mode": "single"},
+    }
+
+
+def test_records_paginate_slices_all_kinds(api):
+    application, client = api
+    application.state.storage.save_backtest(_report_with_records("bt_10", 45))
+
+    for kind in ("trades", "orders", "rounds"):
+        first = client.get(f"/api/backtests/bt_10/records/{kind}?page=1&page_size=20")
+        assert first.status_code == 200, first.text
+        body = first.json()
+        assert body["total"] == 45, kind
+        assert body["total_pages"] == 3
+        assert len(body["items"]) == 20
+        assert body["items"][0]["id"].startswith(("t", "o", "r"))
+        assert body["has_next"] is True
+
+        last = client.get(f"/api/backtests/bt_10/records/{kind}?page=3&page_size=20").json()
+        assert len(last["items"]) == 5
+        assert last["has_next"] is False
+
+
+def test_records_jump_out_of_range_and_validation(api):
+    application, client = api
+    application.state.storage.save_backtest(_report_with_records("bt_11", 50))
+
+    jumped = client.get("/api/backtests/bt_11/records/trades?page=4&page_size=10").json()
+    assert jumped["page"] == 4 and jumped["items"][0]["id"] == "t30"
+
+    over = client.get("/api/backtests/bt_11/records/orders?page=999&page_size=10").json()
+    assert over["page"] == 5 and over["has_next"] is False
+
+    # 页大小越界 / 非法页码 → 422
+    assert client.get("/api/backtests/bt_11/records/rounds?page=1&page_size=99999").status_code == 422
+    assert client.get("/api/backtests/bt_11/records/rounds?page=0").status_code == 422
+
+    # 未知 kind → 422（Literal 校验）
+    assert client.get("/api/backtests/bt_11/records/bogus?page=1").status_code == 422
+
+
+def test_records_404_when_backtest_missing(api):
+    _application, client = api
+    assert client.get("/api/backtests/nope/records/trades").status_code == 404
+
+
+def test_main_report_is_slimmed_no_full_records(api):
+    """主报告读取只留 trades_total / orders_total / rounds_total，明细数组清空。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_records("bt_12", 45))
+
+    body = client.get("/api/backtests/bt_12").json()
+    assert body["trades"] == [] and body["trades_total"] == 45
+    assert body["orders"] == [] and body["orders_total"] == 45
+    assert body["rounds"] == [] and body["rounds_total"] == 45
+    # 分页端点仍能读到全量（落库未瘦身）
+    paged = client.get("/api/backtests/bt_12/records/trades?page=1&page_size=45").json()
+    assert paged["total"] == 45 and len(paged["items"]) == 45

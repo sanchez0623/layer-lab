@@ -288,6 +288,25 @@ def _slim_rotation_trail(report: dict) -> dict:
     return report
 
 
+# 主报告里随数据量变长的三大明细列表（成交 / 委托 / 轮次）。
+# 读取 / 创建响应只保留条数，全量改由 /records/{kind} 分页下发，
+# 避免长回测一次性序列化 / 传输 / 渲染成千上万行导致 REPORT 卡顿。
+_RECORD_FIELDS = {"trades": "trades_total", "orders": "orders_total", "rounds": "rounds_total"}
+
+
+def _slim_records(report: dict) -> dict:
+    """把主报告里的全量 ``trades`` / ``orders`` / ``rounds`` 抽走，只留条数。
+
+    全量数据仍完整落库（save_backtest 在瘦身处之前调用），分页端点从库里读全量再切片。
+    """
+    for field, total_key in _RECORD_FIELDS.items():
+        rows = report.get(field)
+        if isinstance(rows, list) and rows:
+            report[total_key] = len(rows)
+            report[field] = []
+    return report
+
+
 def create_app() -> FastAPI:
     data_dir = Path(os.environ.get("WB_DATA_DIR", str(BASE_DIR / "data")))
     upload_dir = data_dir / "uploads"
@@ -295,7 +314,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.6.0",
+        version="1.6.1",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -344,7 +363,7 @@ def create_app() -> FastAPI:
                 report["data_info"]["daily_source"] = getattr(service.store, "provider", "universe_db")
                 report["data_info"]["universe_db"] = str(service.store.path)
                 storage.save_backtest(report)
-                return _slim_rotation_trail(report)
+                return _slim_records(_slim_rotation_trail(report))
 
             return Execution(engine, on_complete)
 
@@ -368,7 +387,7 @@ def create_app() -> FastAPI:
                 "index_source": index_dataset.source if index_dataset else None,
             })
             storage.save_backtest(report)
-            return report
+            return _slim_records(report)
 
         return Execution(engine, on_complete)
 
@@ -1254,7 +1273,7 @@ def create_app() -> FastAPI:
             "universe_db": str(service.store.path),
         })
         storage.save_backtest(report)
-        return _slim_rotation_trail(report)
+        return _slim_records(_slim_rotation_trail(report))
 
     # -- 后台回测任务：进度可见 / 可停止 / 断点续传 ----------------------
 
@@ -1309,7 +1328,7 @@ def create_app() -> FastAPI:
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
-        return _slim_rotation_trail(report)
+        return _slim_records(_slim_rotation_trail(report))
 
     @application.get("/api/backtests/{backtest_id}/rotation-trail")
     def backtest_rotation_trail(
@@ -1326,6 +1345,24 @@ def create_app() -> FastAPI:
         trail = report.get("data_info", {}).get("rotation_trail") or []
         page, page_size = params
         return paginate(trail, page=page, page_size=page_size)
+
+    @application.get("/api/backtests/{backtest_id}/records/{kind}")
+    def backtest_records(
+        backtest_id: str,
+        kind: Literal["trades", "orders", "rounds"],
+        params: tuple[int, int] = Depends(page_params),
+    ):
+        """成交明细 / 委托记录 / 已结束轮次分页：后台切片返回。
+
+        主报告已瘦身不含全量明细（只留 ``*_total``），这里按页下发，
+        避免长回测一次性传输 / 渲染成千上万行导致 REPORT 卡顿。
+        """
+        report = storage.get_backtest(backtest_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        rows = report.get(kind) or []
+        page, page_size = params
+        return paginate(rows, page=page, page_size=page_size)
 
     @application.get("/api/backtests/{backtest_id}/export")
     def export_backtest(backtest_id: str, kind: Literal["trades", "orders"]):
