@@ -28,6 +28,8 @@ const fallbackConfig: StrategyConfig = {
   transfer_fee_rate: 0.00001,
   slippage_bps: 1,
   volume_participation: 0.2,
+  t_target_net_spread: 0.03,
+  t_exit_cutoff: '14:50',
 };
 
 /** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
@@ -292,6 +294,21 @@ export default function BacktestPage() {
             <input type="checkbox" checked={config.enable_t} onChange={(event) => updateConfig('enable_t', event.target.checked)} />
             <span className="switch" />
           </label>
+          {config.enable_t && (
+            <div className="form-grid t-params-grid">
+              <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T" className="span-3">
+                <div className="input-with-unit">
+                  <input type="number" min="0" max="100" step="0.1" value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(event) => updateConfig('t_target_net_spread', Number(event.target.value) / 100)} />
+                  <span>%</span>
+                </div>
+              </Field>
+              <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平" className="span-3">
+                <div className="input-with-unit">
+                  <input type="time" step="300" value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
+                </div>
+              </Field>
+            </div>
+          )}
           {mode === 'funnel' && (
             <div className="funnel-mode-note">
               <Layers3 size={15} />
