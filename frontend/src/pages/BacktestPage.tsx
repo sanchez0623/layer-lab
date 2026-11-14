@@ -175,7 +175,7 @@ export default function BacktestPage() {
 
   const run = async () => {
     if (startDate && endDate && startDate > endDate) { setError('开始日期不能晚于结束日期，请调整回测区间。'); return; }
-    if (initialCash <= 0) { setError('初始资金必须大于 0。'); return; }
+    if (!Number.isFinite(initialCash) || initialCash <= 0) { setError('初始资金必须大于 0。'); return; }
     // 单标的模式必须先选主数据集；漏斗轮动模式用本地 universe.db，无需数据集。
     if (mode === 'single' && !datasetId) { setError('请选择主数据集后再运行回测。'); return; }
     if (mode === 'funnel' && screener.boards.length === 0) { setError('请至少选择一个板块（创业板 / 科创板）。'); return; }
@@ -322,7 +322,7 @@ export default function BacktestPage() {
             )}
             <Field label="开始日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={startDate} min={mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined} max={endDate || (mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined)} onChange={(event) => setStartDate(event.target.value)} /></div></Field>
             <Field label="结束日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={endDate} min={startDate || (mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined)} max={mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined} onChange={(event) => setEndDate(event.target.value)} /></div></Field>
-            <Field label="初始资金" className={mode === 'funnel' ? 'backtest-cash-field' : ''}><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => setInitialCash(Number(event.target.value))} required /><span>CNY</span></div></Field>
+            <Field label="初始资金" className={mode === 'funnel' ? 'backtest-cash-field' : ''}><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => { const parsed = Number(event.target.value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} required /><span>CNY</span></div></Field>
             {mode === 'single' && (
               <>
                 <Field label="5 分钟数据集" hint="腾讯 / quan_parquet 5 分钟"><select value={intradayId} onChange={(event) => setIntradayId(event.target.value)}><option value="">不使用（日线降级）</option>{intradayOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.timeframe} · {item.source}</option>)}</select></Field>

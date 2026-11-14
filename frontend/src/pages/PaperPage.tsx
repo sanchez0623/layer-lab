@@ -466,7 +466,7 @@ export default function PaperPage() {
   }, [accountId]);
 
   const createAccount = async () => {
-    if (!accountName.trim() || initialCash <= 0) { setError('请填写账户名称，并确保初始资金大于 0。'); return; }
+    if (!accountName.trim() || !Number.isFinite(initialCash) || initialCash <= 0) { setError('请填写账户名称，并确保初始资金大于 0。'); return; }
     setCreating(true); setError('');
     try {
       const next = await api.createAccount({
@@ -589,7 +589,7 @@ export default function PaperPage() {
           <div className="account-create-intro"><div className="create-icon"><Landmark size={25} /></div><div><h2>建立本地虚拟账户</h2><p>账户仅用于规则与撮合验证，不连接券商，不产生真实资金变动。</p></div></div>
           <div className="form-grid create-account-form">
             <Field label="账户名称"><input value={accountName} onChange={(event) => setAccountName(event.target.value)} /></Field>
-            <Field label="初始资金"><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => setInitialCash(Number(event.target.value))} /><span>CNY</span></div></Field>
+            <Field label="初始资金"><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => { const parsed = Number(event.target.value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} /><span>CNY</span></div></Field>
             <Field label="行情数据集" hint="用于逐根推送"><select value={datasetId} onChange={(event) => { setDatasetId(event.target.value); const selected = datasets.find((item) => item.id === event.target.value); if (selected) setSymbol(cleanSymbolInput(selected.symbol)); }}><option value="">暂不绑定</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)} · {item.timeframe}</option>)}</select></Field>
             <label className="switch-row span-2 create-auto-switch"><span><strong>自动执行策略</strong><small>复用回测LayeredTStrategy状态机</small></span><input type="checkbox" checked={autoStrategy} onChange={(event) => setAutoStrategy(event.target.checked)} /><span className="switch" /></label>
             <button className="button primary create-account-button" onClick={() => void createAccount()} disabled={creating}>{creating ? <span className="button-spinner" /> : <Plus size={16} />}{creating ? '正在创建' : '创建虚拟账户'}</button>
