@@ -108,6 +108,13 @@ class ScreenerConfig:
     enable_fundamental_veto: bool = True  # L2 深筛：亏损且营收<1亿 / 净资产为负
     max_deep_checks: int = 10           # L4 逐只深筛上限
     blacklist: list[str] = field(default_factory=list)
+    # L0 大盘同步门放宽（激进方案）：
+    # - l0_ret20_open: 指数近 20 日收益 < 此阈值即开门（默认 None = < 0 才开，即原行为）。
+    # - l0_stock_bypass_chg20d: 即使 L0 关门，若该板块内存在 Chg20D < 此阈值的标的，
+    #   也为这些标的单独开门（默认 None = 关闭该旁路）。
+    # 目的：把「大盘弱势才做多超跌」放宽为「大盘弱势 **或** 个股深度超跌」，提高资金利用率。
+    l0_ret20_open: float | None = None
+    l0_stock_bypass_chg20d: float | None = None
 
     def __post_init__(self) -> None:
         if not self.boards:
@@ -554,14 +561,22 @@ def run_screener(
             "ret20": None,
             "open": True,  # 指数缺失 → 降级按开门处理
             "date": None,
+            "bypass": False,
+            "bypass_deep_count": 0,
         }
         if len(index_bars) >= 21 and index_bars[-21].close > 0:
             ret20 = index_bars[-1].close / index_bars[-21].close - 1
+            # l0_ret20_open：放宽开门阈值（默认 None = < 0 才开）
+            open_threshold = (
+                float(cfg.l0_ret20_open) if cfg.l0_ret20_open is not None else 0.0
+            )
             entry = {
                 "index": index_code,
                 "ret20": _num(ret20),
-                "open": bool(ret20 < 0),
+                "open": bool(ret20 < open_threshold),
                 "date": index_bars[-1].date,
+                "bypass": False,
+                "bypass_deep_count": 0,
             }
         else:
             warnings.append(
@@ -584,6 +599,37 @@ def run_screener(
     # -- L1 A1 超跌 ------------------------------------------------------
     open_boards = {board for board, entry in gate_boards.items() if entry["open"]}
     target_rows = [row for row in rows if row.board in open_boards]
+
+    # L0 个股深度超跌旁路：即使 L0 关门，若板块内存在 Chg20D < l0_stock_bypass_chg20d
+    # 的标的，把这些标的单独加入候选（其余 L0 关门板块的标的仍被排除）。
+    bypass_codes: set[str] = set()
+    if cfg.l0_stock_bypass_chg20d is not None:
+        closed_boards = {board for board, entry in gate_boards.items() if not entry["open"]}
+        bypass_rows = [row for row in rows if row.board in closed_boards]
+        if bypass_rows:
+            bypass_history = store.load_history(
+                [row.code for row in bypass_rows], max_rows=260, end=as_of_text,
+            )
+            for row in bypass_rows:
+                bars = _bar_window(bypass_history.get(row.code, []), as_of_text)
+                if len(bars) < 21 or bars[-21].close <= 0 or bars[-1].close <= 0:
+                    continue
+                chg20d = bars[-1].close / bars[-21].close - 1
+                if chg20d < float(cfg.l0_stock_bypass_chg20d):
+                    bypass_codes.add(row.code)
+                    gate_boards[row.board]["bypass"] = True
+                    gate_boards[row.board]["bypass_deep_count"] = (
+                        gate_boards[row.board].get("bypass_deep_count", 0) + 1
+                    )
+        if bypass_codes:
+            gate_open = True
+            gate["open"] = True
+            gate["bypass_codes_count"] = len(bypass_codes)
+            warnings.append(
+                f"L0 个股深度超跌旁路生效：{len(bypass_codes)} 只标的 Chg20D < "
+                f"{cfg.l0_stock_bypass_chg20d * 100:.0f}%，已单独开门"
+            )
+        target_rows = target_rows + [row for row in bypass_rows if row.code in bypass_codes]
     funnel["after_l0"] = len(target_rows)
 
     candidates: list[Candidate] = []
