@@ -1,5 +1,7 @@
 import type {
   AccountState,
+  BacktestJobRequest,
+  BacktestJobView,
   BacktestRequest,
   BacktestSummary,
   CreateAccountRequest,
@@ -122,6 +124,18 @@ export const api = {
   runFunnelBacktest: (payload: FunnelBacktestRequest) => request<Report>('/backtests/funnel', { method: 'POST', body: JSON.stringify(payload) }),
   backtests: () => request<BacktestSummary[]>('/backtests'),
   backtest: (id: string) => request<Report>(`/backtests/${encodeURIComponent(id)}`),
+  /* ---------- 后台回测作业（进度 / 取消 / 续跑） ----------
+     复用 request<T>，409（已有回测在跑）等错误会抛 ApiError 且带 .status，由调用方识别「忙」。 */
+  runBacktestJob: (payload: BacktestJobRequest) =>
+    request<{ job_id: string; status: string }>('/backtests/jobs', { method: 'POST', body: JSON.stringify(payload) }),
+  backtestJobProgress: (jobId: string) =>
+    request<BacktestJobView>(`/backtests/jobs/${encodeURIComponent(jobId)}`),
+  backtestJobList: (limit?: number) =>
+    request<{ jobs: BacktestJobView[] }>(`/backtests/jobs${query({ limit: limit === undefined ? undefined : String(limit) })}`),
+  cancelBacktestJob: (jobId: string) =>
+    request<{ job_id: string; status: string }>(`/backtests/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
+  resumeBacktestJob: (jobId: string) =>
+    request<{ job_id: string; status: string; resumed: boolean }>(`/backtests/jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST' }),
   // 换票轨迹后台分页：主报告已瘦身不含全量 trail，列表按页拉取。
   backtestRotationTrail: (id: string, page = 1, pageSize = 20) =>
     request<Paginated<RotationTrailItem>>(

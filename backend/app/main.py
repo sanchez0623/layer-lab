@@ -16,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .backtest import run_backtest, run_funnel_backtest
+from .backtest import BacktestEngine, FunnelRotationBacktest, run_backtest, run_funnel_backtest
+from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
 from .broker import BrokerAccount
 from .calendar_api import FuyaoCalendar
 from .data import dataset_from_bars, read_csv_bars, save_demo_datasets
@@ -120,6 +121,22 @@ class FunnelBacktestRequest(BaseModel):
     """选股漏斗轮动回测请求；screener 为 ScreenerConfig 局部覆盖（未知键→400）。"""
 
     name: str = "选股漏斗轮动回测"
+    initial_cash: float = Field(default=4_000_000.0, gt=0)
+    start_date: str | None = None
+    end_date: str | None = None
+    config: dict = Field(default_factory=dict)
+    fees: dict | None = None
+    screener: dict | None = None
+
+
+class BacktestJobRequest(BaseModel):
+    """后台回测任务请求：mode 决定单标的还是漏斗轮动，其余字段同对应同步请求。"""
+
+    mode: Literal["single", "funnel"] = "single"
+    name: str = "回测"
+    dataset_id: str | None = None
+    intraday_dataset_id: str | None = None
+    index_dataset_id: str | None = None
     initial_cash: float = Field(default=4_000_000.0, gt=0)
     start_date: str | None = None
     end_date: str | None = None
@@ -263,7 +280,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.5.0",
+        version="1.6.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -292,6 +309,56 @@ def create_app() -> FastAPI:
         store=quan_store,
         refresher=QuanRefresher(quan_store) if quan_store is not None else None,
     )
+
+    def build_backtest_execution(params, hooks, resume_state, checkpoint):
+        """按任务参数重建引擎（断点续传时同样走此工厂，保证口径一致）。"""
+        mode = params.get("mode", "single")
+        config = resolve_config(params.get("config") or {}, params.get("fees"))
+        name = params.get("name") or "回测"
+        if mode == "funnel":
+            screener = ScreenerConfig.from_dict({**(params.get("screener") or {}), "enable_fundamental_veto": False})
+            service = screener_service()
+            engine = FunnelRotationBacktest(
+                store=service.store, market=application.state.market_service,
+                screener_config=screener, initial_cash=params["initial_cash"],
+                config=config, start_date=params.get("start_date"), end_date=params.get("end_date"),
+                name=name, quan=getattr(application.state, "quan_store", None), hooks=hooks,
+            )
+
+            def on_complete(report):
+                report["data_info"]["daily_source"] = getattr(service.store, "provider", "universe_db")
+                report["data_info"]["universe_db"] = str(service.store.path)
+                storage.save_backtest(report)
+                return _slim_rotation_trail(report)
+
+            return Execution(engine, on_complete)
+
+        daily = load_dataset(params["dataset_id"], {"daily"})
+        intraday = load_dataset(params["intraday_dataset_id"], {"1m", "5m", "tick"}) if params.get("intraday_dataset_id") else None
+        index = load_dataset(params["index_dataset_id"], {"daily"}) if params.get("index_dataset_id") else None
+        daily_dataset = get_dataset(params["dataset_id"])
+        intraday_dataset = get_dataset(params["intraday_dataset_id"]) if params.get("intraday_dataset_id") else None
+        index_dataset = get_dataset(params["index_dataset_id"]) if params.get("index_dataset_id") else None
+        engine = BacktestEngine(
+            daily=daily, intraday=intraday, index=index,
+            initial_cash=params["initial_cash"], config=config,
+            start_date=params.get("start_date"), end_date=params.get("end_date"),
+            name=name, hooks=hooks,
+        )
+
+        def on_complete(report):
+            report["data_info"].update({
+                "daily_source": daily_dataset.source,
+                "intraday_source": intraday_dataset.source if intraday_dataset else None,
+                "index_source": index_dataset.source if index_dataset else None,
+            })
+            storage.save_backtest(report)
+            return report
+
+        return Execution(engine, on_complete)
+
+    backtest_jobs = BacktestJobManager(storage, build_backtest_execution)
+    application.state.backtest_jobs = backtest_jobs
     application.add_middleware(
         CORSMiddleware,
         allow_origins=[
@@ -819,6 +886,8 @@ def create_app() -> FastAPI:
 
     @application.on_event("startup")
     def start_paper_scheduler() -> None:
+        # 进程启动：把上次遗留的 RUNNING 回测标记为 INTERRUPTED（容器重启=被打断），可续传。
+        backtest_jobs.recover_interrupted()
         if not scheduler_enabled or scheduler_state["running"]:
             return
         threading.Thread(target=scheduler_loop, name="paper-scheduler", daemon=True).start()
@@ -1171,6 +1240,50 @@ def create_app() -> FastAPI:
         })
         storage.save_backtest(report)
         return _slim_rotation_trail(report)
+
+    # -- 后台回测任务：进度可见 / 可停止 / 断点续传 ----------------------
+
+    @application.post("/api/backtests/jobs", status_code=202)
+    def create_backtest_job(request: BacktestJobRequest):
+        """提交后台回测任务，立即返回 job_id；串行不排队，忙时返回 409。"""
+        if request.mode == "single" and not request.dataset_id:
+            raise HTTPException(status_code=400, detail="单标的模式必须选择主数据集。")
+        if request.mode == "funnel" and not (request.screener or {}).get("boards"):
+            raise HTTPException(status_code=400, detail="漏斗轮动模式必须至少选择一个板块。")
+        params = request.model_dump()
+        try:
+            return backtest_jobs.submit(params, request.name)
+        except BacktestBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+
+    @application.get("/api/backtests/jobs")
+    def list_backtest_jobs(limit: int = 20):
+        return {"jobs": backtest_jobs.list_jobs(limit=limit)}
+
+    @application.get("/api/backtests/jobs/{job_id}")
+    def backtest_job_progress(job_id: str):
+        progress = backtest_jobs.get_progress(job_id)
+        if progress is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return progress
+
+    @application.post("/api/backtests/jobs/{job_id}/cancel")
+    def cancel_backtest_job(job_id: str):
+        try:
+            return backtest_jobs.cancel(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="任务不存在")
+
+    @application.post("/api/backtests/jobs/{job_id}/resume", status_code=202)
+    def resume_backtest_job(job_id: str):
+        try:
+            return backtest_jobs.resume(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        except BacktestBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @application.get("/api/backtests")
     def backtests():

@@ -49,6 +49,17 @@ class SQLiteStorage:
                 CREATE TABLE IF NOT EXISTS screener_runs (
                     id TEXT PRIMARY KEY, created_at TEXT NOT NULL, as_of TEXT NOT NULL, payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS backtest_jobs (
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
+                    progress REAL NOT NULL DEFAULT 0, cursor_date TEXT, cursor_index INTEGER,
+                    total_days INTEGER, params TEXT NOT NULL, error TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS backtest_checkpoints (
+                    job_id TEXT PRIMARY KEY, cursor_date TEXT, cursor_index INTEGER,
+                    account_state TEXT NOT NULL, strategy_state TEXT NOT NULL,
+                    engine_state TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
             """)
 
     def get_setting(self, key: str) -> str | None:
@@ -216,6 +227,109 @@ class SQLiteStorage:
         with self._lock, self._connect() as connection:
             cursor = connection.execute("DELETE FROM screener_runs WHERE id=?", (run_id,))
         return cursor.rowcount > 0
+
+    # -- 回测后台任务 / 断点续传 ------------------------------------------
+
+    def create_job(self, job: dict[str, Any]) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT INTO backtest_jobs(id,name,status,progress,cursor_date,cursor_index,"
+                "total_days,params,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    job["id"], job["name"], job["status"], job.get("progress", 0.0),
+                    job.get("cursor_date"), job.get("cursor_index"), job.get("total_days"),
+                    json.dumps(job.get("params", {}), ensure_ascii=False),
+                    job.get("error"), job["created_at"], job["updated_at"],
+                ),
+            )
+
+    def update_job(
+        self, job_id: str, *, status: str | None = None, progress: float | None = None,
+        cursor_date: str | None = None, cursor_index: int | None = None,
+        total_days: int | None = None, error: str | None = None,
+    ) -> None:
+        fields = ["updated_at"]
+        values: list[Any] = [utc_now()]
+        for column, value in (
+            ("status", status), ("progress", progress), ("cursor_date", cursor_date),
+            ("cursor_index", cursor_index), ("total_days", total_days), ("error", error),
+        ):
+            if value is not None:
+                fields.append(column)
+                values.append(value)
+        placeholders = ", ".join(f"{name}=?" for name in fields)
+        values.append(job_id)
+        with self._lock, self._connect() as connection:
+            connection.execute(f"UPDATE backtest_jobs SET {placeholders} WHERE id=?", values)
+
+    def get_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM backtest_jobs WHERE id=?", (job_id,)).fetchone()
+        return self._job_from_row(row) if row else None
+
+    def list_jobs(self, limit: int = 50) -> list[dict[str, Any]]:
+        limit = max(1, int(limit))
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM backtest_jobs ORDER BY created_at DESC, id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self._job_from_row(row) for row in rows]
+
+    def list_jobs_by_status(self, status: str) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM backtest_jobs WHERE status=? ORDER BY created_at DESC, id DESC",
+                (status,),
+            ).fetchall()
+        return [self._job_from_row(row) for row in rows]
+
+    @staticmethod
+    def _job_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"], "name": row["name"], "status": row["status"],
+            "progress": row["progress"], "cursor_date": row["cursor_date"],
+            "cursor_index": row["cursor_index"], "total_days": row["total_days"],
+            "params": json.loads(row["params"]), "error": row["error"],
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        }
+
+    def save_checkpoint(
+        self, job_id: str, cursor_date: str | None, cursor_index: int,
+        account_state: dict[str, Any], strategy_state: dict[str, Any],
+        engine_state: dict[str, Any],
+    ) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO backtest_checkpoints(job_id,cursor_date,cursor_index,"
+                "account_state,strategy_state,engine_state,updated_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    job_id, cursor_date, cursor_index,
+                    json.dumps(account_state, ensure_ascii=False, allow_nan=False),
+                    json.dumps(strategy_state, ensure_ascii=False, allow_nan=False),
+                    json.dumps(engine_state, ensure_ascii=False, allow_nan=False),
+                    utc_now(),
+                ),
+            )
+
+    def get_checkpoint(self, job_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM backtest_checkpoints WHERE job_id=?", (job_id,)
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "job_id": row["job_id"], "cursor_date": row["cursor_date"],
+            "cursor_index": row["cursor_index"],
+            "account_state": json.loads(row["account_state"]),
+            "strategy_state": json.loads(row["strategy_state"]),
+            "engine_state": json.loads(row["engine_state"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def delete_checkpoint(self, job_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM backtest_checkpoints WHERE job_id=?", (job_id,))
 
     def find_paper_by_order(self, order_id: str, account_id: str) -> dict[str, Any] | None:
         """按 (account_id, order_id) 精确定位账户。

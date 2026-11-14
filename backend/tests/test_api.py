@@ -447,3 +447,57 @@ def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeyp
     assert client.post(f"/api/paper/accounts/{account['id']}/config",
                        json={"t_target_spread": 0.02}).status_code == 422
     assert base is not None
+
+
+def test_backtest_job_flow_submit_progress_complete(tmp_path, monkeypatch):
+    """后台回测任务端到端：提交→轮询进度→COMPLETED→取报告；串行不排队（忙时 409）。"""
+    import time
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    client = TestClient(create_app())
+    demo = client.post("/api/datasets/demo").json()
+
+    # 缺 dataset_id → 400
+    assert client.post("/api/backtests/jobs", json={"mode": "single"}).status_code == 400
+
+    submitted = client.post("/api/backtests/jobs", json={
+        "mode": "single", "name": "后台任务回测",
+        "dataset_id": demo["daily"]["id"], "initial_cash": 4_000_000,
+        "config": {"enable_t": True},
+    })
+    assert submitted.status_code == 202, submitted.text
+    job_id = submitted.json()["job_id"]
+
+    # 轮询直到终态（demo 数据很小，应当很快完成）
+    deadline = time.time() + 30
+    job = None
+    while time.time() < deadline:
+        job = client.get(f"/api/backtests/jobs/{job_id}").json()
+        if job["status"] in {"COMPLETED", "CANCELLED", "FAILED", "INTERRUPTED"}:
+            break
+        time.sleep(0.05)
+    assert job is not None and job["status"] == "COMPLETED", job
+    assert job["progress"] == 100.0
+
+    # 完成后 job_id 即报告 id，可取完整报告
+    report = client.get(f"/api/backtests/{job_id}")
+    assert report.status_code == 200
+    assert report.json()["status"] == "COMPLETED"
+
+    # 任务已结束，再次提交不再 409（串行槽已释放）
+    again = client.post("/api/backtests/jobs", json={
+        "mode": "single", "name": "第二次",
+        "dataset_id": demo["daily"]["id"], "initial_cash": 4_000_000, "config": {},
+    })
+    assert again.status_code == 202
+    second_id = again.json()["job_id"]
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        job2 = client.get(f"/api/backtests/jobs/{second_id}").json()
+        if job2["status"] in {"COMPLETED", "CANCELLED", "FAILED", "INTERRUPTED"}:
+            break
+        time.sleep(0.05)
+    assert job2["status"] == "COMPLETED"
+
+    # 不存在的任务 → 404
+    assert client.get("/api/backtests/jobs/nope").status_code == 404

@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Play, RotateCcw, ShieldAlert, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Play, RotateCcw, ShieldAlert, Square, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -16,7 +16,7 @@ import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
 import PaginationBar from '../components/PaginationBar';
 import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SuccessBanner, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { BacktestSummary, Dataset, FeeConfig, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig } from '../types';
+import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -32,6 +32,10 @@ const fallbackConfig: StrategyConfig = {
 
 /** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
 type BacktestMode = 'funnel' | 'single';
+
+/** 后台作业终态：轮询到这些状态即停止。CANCELLED / INTERRUPTED / FAILED 可续跑。 */
+const JOB_TERMINAL_STATUSES = ['COMPLETED', 'CANCELLED', 'FAILED', 'INTERRUPTED'];
+const JOB_RESUMABLE_STATUSES = ['CANCELLED', 'INTERRUPTED', 'FAILED'];
 
 /** 漏斗轮动回测默认选股阈值；比率字段为小数，界面百分比换算在 ScreenerConfigPanel 内完成。 */
 const fallbackScreener: ScreenerConfig = {
@@ -77,6 +81,15 @@ export default function BacktestPage() {
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
   const [pendingNotice, setPendingNotice] = useState('');
+  // 后台回测作业：submitting=提交中，jobView=轮询到的最新进度，jobBusy=取消/续跑请求在途。
+  // 轮询只由 jobView 驱动（jobId 存进 ref 避免闭包过期），卸载时清 interval，导航离开后服务端仍继续跑。
+  const [submitting, setSubmitting] = useState(false);
+  const [jobView, setJobView] = useState<BacktestJobView | null>(null);
+  const [jobBusy, setJobBusy] = useState(false);
+  const jobIdRef = useRef<string | null>(null);
+  const pollTimerRef = useRef<number | null>(null);
+  // 本会话内已落地为终态的作业 id：重挂载时用它避免把刚「放弃」的已完成作业重新拉起。
+  const settledJobIdsRef = useRef<Set<string>>(new Set());
   const [tableTab, setTableTab] = useState<'rounds' | 'trades' | 'orders'>('rounds');
   const [exporting, setExporting] = useState<'trades' | 'orders' | null>(null);
   const [mode, setMode] = useState<BacktestMode>('funnel');
@@ -93,6 +106,16 @@ export default function BacktestPage() {
     try {
       const [datasetResult, defaults, reports] = await Promise.all([api.datasets(), api.strategyDefaults(), api.backtests()]);
       setDatasets(datasetResult);
+      // 重挂载时重新挂到仍在跑的后台作业（导航离开后服务端继续跑），避免丢失进度条。
+      try {
+        const { jobs } = await api.backtestJobList(10);
+        const active = jobs.find((job) => job.status === 'RUNNING' && !settledJobIdsRef.current.has(job.id));
+        if (active) {
+          jobIdRef.current = active.id;
+          setJobView(active);
+          setRunning(true);
+        }
+      } catch { /* 作业列表不可用时静默忽略，不影响页面初始化 */ }
       const defaultConfig = defaults.config || defaults;
       setConfig((current) => ({ ...current, ...defaultConfig }));
       setFees(defaults.fees || strategyToFeeConfig(defaultConfig));
@@ -172,6 +195,62 @@ export default function BacktestPage() {
   const selectedDataset = datasets.find((item) => item.id === datasetId);
   const intradayOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === '5m');
   const indexOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
+  // 在途作业：RUNNING 或可续跑（CANCELLED/INTERRUPTED/FAILED）时禁止再起新回测，避免与服务端单作业互斥冲突。
+  const jobActive = running || submitting || (!!jobView && (jobView.status === 'RUNNING' || JOB_RESUMABLE_STATUSES.includes(jobView.status)));
+
+  const stopPolling = () => {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  /** 作业到达终态后的收尾：COMPLETED 拉全量报告并刷新历史；终态保留在 jobView 供继续/放弃，直到用户处理。 */
+  const settleJob = async (view: BacktestJobView) => {
+    stopPolling();
+    jobIdRef.current = view.id;
+    setJobView(view);
+    setRunning(false);
+    if (view.status === 'COMPLETED') {
+      settledJobIdsRef.current.add(view.id);
+      try {
+        const result = await api.backtest(view.id);
+        setReport(result);
+        setTableTab('rounds');
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : '回测报告读取失败。');
+      }
+      const reports = await api.backtests().catch(() => null);
+      if (reports) setHistory(reports); else setHistory((current) => current);
+    }
+  };
+
+  /** 提交后台作业并开始轮询进度；409（已有回测在跑）向上抛出，由调用方 setError 呈现。 */
+  const startJob = async (mode: 'single' | 'funnel') => {
+    const payload = mode === 'funnel'
+      ? {
+        mode, name: name.trim() || '选股漏斗轮动回测',
+        initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
+        config: stripFeeFields(config), fees, screener,
+      }
+      : {
+        mode, name: name.trim() || '未命名回测', dataset_id: datasetId,
+        intraday_dataset_id: intradayId || undefined, index_dataset_id: indexId || undefined,
+        initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
+        config: stripFeeFields(config), fees,
+      };
+    const { job_id } = await api.runBacktestJob(payload);
+    jobIdRef.current = job_id;
+    setRunning(true);
+    try {
+      const view = await api.backtestJobProgress(job_id);
+      setJobView(view);
+      if (JOB_TERMINAL_STATUSES.includes(view.status)) await settleJob(view);
+    } catch (cause) {
+      // 进度查询失败不阻断：保留在途状态，交给轮询继续重试。
+      setError(cause instanceof Error ? cause.message : '回测进度查询失败。');
+    }
+  };
 
   const run = async () => {
     if (startDate && endDate && startDate > endDate) { setError('开始日期不能晚于结束日期，请调整回测区间。'); return; }
@@ -179,31 +258,74 @@ export default function BacktestPage() {
     // 单标的模式必须先选主数据集；漏斗轮动模式用本地 universe.db，无需数据集。
     if (mode === 'single' && !datasetId) { setError('请选择主数据集后再运行回测。'); return; }
     if (mode === 'funnel' && screener.boards.length === 0) { setError('请至少选择一个板块（创业板 / 科创板）。'); return; }
+    setSubmitting(true);
     setRunning(true);
     setError('');
     try {
-      const result = mode === 'funnel'
-        ? await api.runFunnelBacktest({
-          name: name.trim() || '选股漏斗轮动回测',
-          initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
-          config: stripFeeFields(config), fees, screener,
-        })
-        : await api.runBacktest({
-          name: name.trim() || '未命名回测', dataset_id: datasetId,
-          intraday_dataset_id: intradayId || undefined, index_dataset_id: indexId || undefined,
-          initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
-          config: stripFeeFields(config), fees,
-        });
-      setReport(result);
-      setTableTab('rounds');
-      const reports = await api.backtests().catch(() => history);
-      setHistory(reports);
+      await startJob(mode);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '回测运行失败，请稍后重试。');
-    } finally {
       setRunning(false);
+    } finally {
+      setSubmitting(false);
     }
   };
+
+  /** 续跑 CANCELLED / INTERRUPTED / FAILED 作业：从 checkpoint 接着跑并恢复轮询。 */
+  const resumeJob = async () => {
+    const jobId = jobIdRef.current || jobView?.id;
+    if (!jobId) return;
+    setJobBusy(true);
+    setError('');
+    try {
+      await api.resumeBacktestJob(jobId);
+      jobIdRef.current = jobId;
+      setRunning(true);
+      const view = await api.backtestJobProgress(jobId);
+      setJobView(view);
+      if (JOB_TERMINAL_STATUSES.includes(view.status)) await settleJob(view);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '续跑失败，请稍后重试。');
+    } finally {
+      setJobBusy(false);
+    }
+  };
+
+  /** 请求取消：后端在下一个交易日边界停下，作业转 CANCELLED（可续跑）。 */
+  const cancelJob = async () => {
+    const jobId = jobIdRef.current || jobView?.id;
+    if (!jobId) return;
+    setJobBusy(true);
+    setError('');
+    try { await api.cancelBacktestJob(jobId); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : '取消失败，请稍后重试。'); }
+    finally { setJobBusy(false); }
+  };
+
+  /** 放弃在途作业：仅清空前端在途状态，服务端作业本身不受影响。 */
+  const dismissJob = () => {
+    stopPolling();
+    const id = jobIdRef.current || jobView?.id;
+    if (id) settledJobIdsRef.current.add(id);
+    jobIdRef.current = null;
+    setJobView(null);
+    setRunning(false);
+  };
+
+  // 进度轮询：作业在途时每秒拉一次，直到终态；卸载即清 interval，导航离开后服务端继续跑。
+  useEffect(() => {
+    if (!running || !jobView || JOB_TERMINAL_STATUSES.includes(jobView.status)) return;
+    stopPolling();
+    pollTimerRef.current = window.setInterval(() => {
+      const jobId = jobIdRef.current;
+      if (!jobId) return;
+      void api.backtestJobProgress(jobId).then(async (view) => {
+        if (JOB_TERMINAL_STATUSES.includes(view.status)) await settleJob(view);
+        else setJobView(view);
+      }).catch(() => undefined);
+    }, 1000);
+    return stopPolling;
+  }, [running, jobView?.id, jobView?.status]);
 
   const loadReport = async (id: string) => {
     if (!id) return;
@@ -353,10 +475,45 @@ export default function BacktestPage() {
                 <span>请选择主数据集以查看数据边界</span>
               )}
             </div>
-            <button className="button primary run-button" type="submit" disabled={running || (mode === 'single' && !datasetId)}>
-              {running ? <><span className="button-spinner" />正在运行回测</> : <><Play size={16} fill="currentColor" />运行回测</>}
+            <button className="button primary run-button" type="submit" disabled={jobActive || (mode === 'single' && !datasetId)}>
+              {jobActive ? <><span className="button-spinner" />正在运行回测</> : <><Play size={16} fill="currentColor" />运行回测</>}
             </button>
           </div>
+          {jobView && (
+            <div className="job-progress" role="status">
+              <div className="job-progress-topline">
+                <span className="job-progress-label">
+                  {jobView.status === 'RUNNING' ? '回测进行中' : `回测${statusLabel(jobView.status)}`}
+                  {' · '}
+                  {jobView.name || '后台回测'}
+                </span>
+                <div className="job-progress-actions">
+                  {jobView.status === 'RUNNING' && (
+                    <button type="button" className="button secondary" onClick={() => void cancelJob()} disabled={jobBusy}>
+                      <Square size={14} fill="currentColor" />停止
+                    </button>
+                  )}
+                  {JOB_RESUMABLE_STATUSES.includes(jobView.status) && (
+                    <>
+                      <button type="button" className="button secondary" onClick={() => void resumeJob()} disabled={jobBusy}>
+                        <Play size={14} fill="currentColor" />继续
+                      </button>
+                      <button type="button" className="button secondary" onClick={dismissJob} disabled={jobBusy}>放弃</button>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="job-progress-track" aria-hidden="true">
+                <div className="job-progress-fill" style={{ width: `${Math.max(0, Math.min(100, jobView.progress))}%` }} />
+              </div>
+              <div className="job-progress-meta">
+                <span>{jobView.progress.toFixed(1)}%</span>
+                <span>{jobView.cursor_date ? `已跑至 ${jobView.cursor_date}` : '等待首个交易日完成'}</span>
+                {jobView.total_days ? <span>共 {integer(jobView.total_days)} 交易日</span> : null}
+                {jobView.error ? <span className="negative">{jobView.error}</span> : null}
+              </div>
+            </div>
+          )}
         </form>
       </Panel>
 
