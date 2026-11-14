@@ -677,6 +677,16 @@ class FunnelRotationBacktest:
                         for m5_index, m5 in enumerate(m5_today):
                             m5_fills = self.account.process_bar(m5, modes={"NEXT_BAR"})
                             self._handle_fills(m5_fills, session_index, m5)
+                            if self._round_just_closed:
+                                # 清仓当日不再建仓：轮动语义是「清仓→次日收盘重筛」，
+                                # 否则同日剩余 5 分钟 bar 会让策略立刻重新建仓，
+                                # 与次日清空 current_symbol 的换票逻辑冲突（持仓失去管理）。
+                                self.events.append({
+                                    "date": m5.date, "type": "ENTRY_DEFERRED",
+                                    "symbol": current_symbol,
+                                    "reason": "清仓当日不再建仓，次日收盘重新选股",
+                                })
+                                break
                             self.account.mark(current_symbol, m5.close)
                             recent.append(m5)
                             m5_requests = self.strategy.on_intraday(
@@ -690,11 +700,12 @@ class FunnelRotationBacktest:
                         t_trade_count += len(recent)
                     self.account.mark(current_symbol, bar.close)
                     self._update_round(bar, session_index)
-                    requests = self.strategy.on_daily(
-                        history, index_history, self.account, session_index, bool(m5_today),
-                    )
-                    self._submit(requests, bar.timestamp)
-                    submitted_signal = bool(requests)
+                    if not self._round_just_closed:
+                        requests = self.strategy.on_daily(
+                            history, index_history, self.account, session_index, bool(m5_today),
+                        )
+                        self._submit(requests, bar.timestamp)
+                        submitted_signal = bool(requests)
                 # 首笔成交后把轨迹项关联到新开的轮次（供结尾回填 entry/exit/pnl）
                 if self.current_round is not None:
                     round_id = self.current_round["id"]

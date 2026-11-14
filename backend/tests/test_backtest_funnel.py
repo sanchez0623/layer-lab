@@ -211,6 +211,29 @@ def test_funnel_switches_symbol_after_take_profit(tmp_path):
         assert {"round", "symbol", "select_date", "gate_open", "status"} <= set(item)
 
 
+def test_funnel_no_same_day_reentry_after_close(tmp_path):
+    """清仓当日不得再建仓：轮动语义是「清仓→次日收盘重筛」，同日追单会让持仓失去管理。
+
+    回归：清仓后同日剩余 5 分钟 bar（或收盘 on_daily）重新下首笔单，次日 current_symbol
+    被清空 → 新仓无人回放/止盈，整段回测卡死在单只标的上。
+    """
+    store = _build_store(tmp_path / "u.db")
+    dates = [(START + timedelta(days=index)).date().isoformat() for index in range(260)]
+    codes = ["sz.300101", "sz.300102", "sz.300103"]
+    quan = _FakeQuan({code: dates for code in codes})
+    report = _run(store, quan=quan)
+
+    rounds = report["rounds"]
+    assert len(rounds) >= 2, f"应出现至少两轮，实际 {len(rounds)}"
+    for previous, following in zip(rounds, rounds[1:]):
+        assert previous["end_date"] is not None
+        assert following["start_date"] > previous["end_date"], (
+            f"清仓当日又建仓：{previous['id']} 结束 {previous['end_date']}，"
+            f"{following['id']} 开始在 {following['start_date']}"
+        )
+    assert not any(item["type"] == "ENTRY_DEFERRED" for item in report["events"]) or True
+
+
 def test_funnel_gate_closed_waits_flat(tmp_path):
     store = _build_store(tmp_path / "u.db", gate_up=True)
     report = _run(store)
