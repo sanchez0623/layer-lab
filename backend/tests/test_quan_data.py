@@ -270,6 +270,18 @@ def test_load_history_and_latest_trade_date(quan_dir):
     assert store.last_date("sz.300001") == "2026-11-11"
 
 
+def test_load_history_with_end_returns_window_before_end(quan_dir):
+    """end 用于历史时点回看：取「截至 end 的最近 N 根」，而非最新交易日往前 N 根。"""
+    store = QuanStore(quan_dir)
+    latest = store.load_history(["sz.300001"], max_rows=40)
+    as_of = latest["sz.300001"][10].date  # 最新窗口内的一个早期日期
+    truncated = store.load_history(["sz.300001"], max_rows=20, end=as_of)
+    assert len(truncated["sz.300001"]) == 20
+    assert truncated["sz.300001"][-1].date == as_of
+    # 起点 = as_of 往前 19 个交易日，与「最新往前 20 根」不同
+    assert truncated["sz.300001"][0].date < latest["sz.300001"][0].date
+
+
 def test_load_index(quan_dir):
     store = QuanStore(quan_dir)
     bars = store.load_index("sz.399006", max_rows=30)

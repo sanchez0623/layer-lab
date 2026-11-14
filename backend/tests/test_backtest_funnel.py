@@ -106,6 +106,73 @@ def _run(store, **overrides) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 长区间回测回归：回测区间跨过「最近 260 根日线 / 最近 2400 根 5 分钟」
+# ---------------------------------------------------------------------------
+
+LONG_N_BARS = 560
+
+
+def _long_dates() -> list[str]:
+    return [(START + timedelta(days=index)).date().isoformat() for index in range(LONG_N_BARS)]
+
+
+def _build_long_store(path) -> tuple[UniverseStore, list[str]]:
+    """560 根日线的 store：回测区间起点早于「最近 260 根」窗口。
+
+    指数持续缓跌 → L0 开门；个股持续阴跌 → 任意时点都满足 L1 超跌条件，
+    因此「能不能在区间前段建仓」只取决于回测的数据窗口是否正确。
+    """
+    store = UniverseStore(path)
+    index_closes = [round(6000.0 * 0.999 ** index, 4) for index in range(LONG_N_BARS)]
+    for board in (BOARD_GEM, BOARD_STAR):
+        store.upsert_index(BOARD_INDEX[board], _bars(BOARD_INDEX[board], index_closes))
+    codes: list[str] = []
+    for code, name, base in (("sz.300201", "长窗一", 200.0), ("sz.300202", "长窗二", 120.0)):
+        closes = [round(base * 0.99 ** index, 4) for index in range(LONG_N_BARS)]
+        store.upsert_rows([UniverseRow(code=code, board=BOARD_GEM, name=name)])
+        store.upsert_daily(code, _bars(code, closes))
+        codes.append(code)
+    return store, codes
+
+
+def test_funnel_long_window_builds_position_before_recent_tail(tmp_path):
+    """区间 > 260 根时，前半段必须仍能选股建仓（回归「只取最近 260 根」的窗口 bug）。"""
+    store, _ = _build_long_store(tmp_path / "u.db")
+    dates = _long_dates()
+    report = _run(store, start_date=dates[100], end_date=dates[-1])
+
+    assert report["data_info"]["screening_count"] >= 1
+    assert report["metrics"]["total_rounds"] >= 1, "长区间前段应能建仓，实际没有轮次"
+    # 最近 260 根从 dates[-260] 起；建仓必须发生在那之前，才证明窗口覆盖了区间前段。
+    assert report["rounds"][0]["start_date"] <= dates[150]
+    assert report["rounds"][0]["start_date"] < dates[-260]
+
+
+def test_funnel_long_window_minute5_covers_early_holdings(tmp_path):
+    """区间 > 2400 根 5 分钟 bar 时，前段持仓也要逐根处理 5 分钟 bar（回归分钟截断 bug）。"""
+    store, codes = _build_long_store(tmp_path / "u.db")
+    dates = _long_dates()
+    quan = _FakeQuan({code: dates for code in codes})
+
+    orig_on_intraday = LayeredTStrategy.on_intraday
+    intraday_dates: list[str] = []
+
+    def tracked_on_intraday(self, history, recent, bar, account, **kwargs):
+        intraday_dates.append(bar.date)
+        return orig_on_intraday(self, history, recent, bar, account, **kwargs)
+
+    LayeredTStrategy.on_intraday = tracked_on_intraday
+    try:
+        _run(store, start_date=dates[100], end_date=dates[-1], quan=quan)
+    finally:
+        LayeredTStrategy.on_intraday = orig_on_intraday
+
+    assert intraday_dates, "传 QuanStore 后应逐根处理 5 分钟 bar"
+    # 最近 2400 根 5 分钟 bar ≈ 最后 50 个交易日；前段持仓被处理说明没有按 tail 截断。
+    assert min(intraday_dates) < dates[200]
+
+
+# ---------------------------------------------------------------------------
 # 用例
 # ---------------------------------------------------------------------------
 
@@ -233,7 +300,7 @@ class _FakeQuan:
             if end and date > end:
                 continue
             result.extend(per_date[date])
-        return result[:max_rows] if max_rows else result
+        return result[-int(max_rows):] if max_rows else result
 
 
 def test_funnel_intraday_t_processes_minute5(tmp_path):

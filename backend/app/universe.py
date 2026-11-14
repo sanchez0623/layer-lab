@@ -419,23 +419,39 @@ class UniverseStore:
             ).fetchone()
         return row[0] if row and row[0] else None
 
-    def load_history(self, codes: Sequence[str], max_rows: int = 260) -> dict[str, list[Bar]]:
+    def load_history(
+        self, codes: Sequence[str], max_rows: int = 260,
+        *, start: str | None = None, end: str | None = None,
+    ) -> dict[str, list[Bar]]:
+        """批量日线（``end`` 用于历史时点回看，语义同 QuanStore.load_history）。
+
+        start/end 必须在子查询内先过滤，rn 才是「过滤后」的序号；否则 end 截断后
+        rn<=limit 会取到错误的行集（同 load_index 的注释）。
+        """
         unique = [str(code) for code in dict.fromkeys(codes or [])]
         result: dict[str, list[Bar]] = {code: [] for code in unique}
         if not unique:
             return result
         limit = max(1, int(max_rows))
         with self._lock, self._connection() as connection:
-            for start in range(0, len(unique), 400):
-                chunk = unique[start : start + 400]
+            for begin in range(0, len(unique), 400):
+                chunk = unique[begin : begin + 400]
                 placeholders = ",".join("?" for _ in chunk)
+                inner = (
+                    "SELECT *, ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn"
+                    f" FROM universe_daily WHERE code IN ({placeholders})"
+                )
+                params: list[Any] = list(chunk)
+                if start:
+                    inner += " AND date >= ?"
+                    params.append(str(start)[:10])
+                if end:
+                    inner += " AND date <= ?"
+                    params.append(str(end)[:10])
                 rows = connection.execute(
                     "SELECT code, date, open, high, low, close, prev_close, volume, amount, turnover "
-                    "FROM ("
-                    "  SELECT * , ROW_NUMBER() OVER (PARTITION BY code ORDER BY date DESC) AS rn"
-                    f"  FROM universe_daily WHERE code IN ({placeholders})"
-                    ") WHERE rn <= ? ORDER BY code, date",
-                    (*chunk, limit),
+                    f"FROM ({inner}) WHERE rn <= ? ORDER BY code, date",
+                    (*params, limit),
                 ).fetchall()
                 for row in rows:
                     result[str(row["code"])].append(self._bar_from_payload(row, str(row["code"])))

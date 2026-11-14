@@ -16,6 +16,10 @@ from .universe import BOARD_INDEX, UniverseStore
 
 # 回测指数加载：start 前推的日历天缓冲，保证回测首日往前 ≥21 根（L0 ret20 + 策略大盘门）。
 _INDEX_LOOKBACK_BUFFER_DAYS = 45
+# 持仓标的日线加载：start 前推的日历天缓冲，保证回测首日往前 ≥250 根（52周高/ATR）。
+# 与 max_rows 一起构成「覆盖整个回测区间」的窗口（长区间回测不能只取最近 260 根）。
+_DAILY_LOOKBACK_BUFFER_DAYS = 420
+_DAILY_WINDOW_MAX_ROWS = 2000
 
 
 def performance_metrics(
@@ -411,15 +415,26 @@ class FunnelRotationBacktest:
         self._turnover_cache: dict[str, dict[str, float]] | None = None
 
     def _load_bars(self, code: str) -> list[Bar]:
-        """单标的日线（最近 260 根）；供持仓回放与 buy_hold 参照按需加载。
+        """单标的日线：覆盖「回测区间 + 起点前推缓冲」的窗口（按需单只加载）。
 
-        与改造前一致取 max_rows=260（tail 最近 N 根），窗口裁剪由 timeline 与
-        buy_hold 处的日期过滤负责，这里不额外按 start/end 截断。
+        长区间回测的关键：不能只取「截至最新交易日的最近 260 根」——那样回测前半段
+        的一天在 tail 窗口之外，持仓回放拿不到 bar、信号/撮合直接静默停摆。
+        这里显式按 [timeline[0]-缓冲, timeline[-1]] 取窗口，回测任意一天都有历史。
+
         做 T 准入需要日线换手率，而 quan 源日线无换手字段（turnover_rate 恒 None），
         这里从 turnover_daily.parquet（BaoStock 日线 turn，见 gen_turnover_parquet.py）
         按日期填充——与模拟盘实时快照换手同口径（架构原则 1）。
         """
-        bars = self.store.load_history([code], max_rows=260).get(code, [])
+        start = end = None
+        if self.timeline:
+            start = (
+                datetime.fromisoformat(self.timeline[0]).date()
+                - timedelta(days=_DAILY_LOOKBACK_BUFFER_DAYS)
+            ).isoformat()
+            end = self.timeline[-1]
+        bars = self.store.load_history(
+            [code], max_rows=_DAILY_WINDOW_MAX_ROWS, start=start, end=end,
+        ).get(code, [])
         turn_map = self._daily_turnover(code)
         if turn_map:
             for bar in bars:
@@ -455,9 +470,9 @@ class FunnelRotationBacktest:
     def _intraday_for(self, code: str | None) -> list[Bar]:
         """当前持仓标的的 5 分钟 bar，带单条目缓存（换票时自然替换）。
 
-        懒加载：只在标的成为持仓时才读其持有期分钟数据，避免全池驻留（OOM 保护，
-        与 _bars_for 同口径）。数据来自 QuanStore.load_minute5（含换手/盘口代理）。
-        无 quan 源或文件缺失返回空列表 → 该标的按日线口径回放（无做 T）。
+        只取回测区间内的分钟数据（start/end 下推），**不设 max_rows 上限**：长区间
+        回测里持仓可能发生在区间任意位置，若按「最近 2400 根」截断，中段持仓会拿不到
+        当日分钟 bar → 做 T 静默降级。单只标的全区间约 2 万根 Bar，内存可接受。
         """
         if not code or self.quan is None:
             return []
@@ -465,7 +480,7 @@ class FunnelRotationBacktest:
             return self._held_m5_bars
         start = self.start_date.isoformat() if self.start_date else None
         end = self.end_date.isoformat() if self.end_date else None
-        bars = self.quan.load_minute5(code, max_rows=2400, start=start, end=end)
+        bars = self.quan.load_minute5(code, max_rows=None, start=start, end=end)
         self._held_m5_code = code
         self._held_m5_bars = bars
         return bars

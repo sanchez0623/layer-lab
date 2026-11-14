@@ -575,8 +575,16 @@ class QuanStore:
             result[symbol] = bars
         return result
 
-    def load_history(self, codes: Sequence[str], max_rows: int = 260) -> dict[str, list[Bar]]:
-        return self.load_bars(codes, max_rows=max_rows)
+    def load_history(
+        self, codes: Sequence[str], max_rows: int = 260,
+        *, start: str | None = None, end: str | None = None,
+    ) -> dict[str, list[Bar]]:
+        """批量日线：``end`` 用于历史时点回看（漏斗回测 as_of / 长区间持仓窗口）。
+
+        传 ``end`` 时取「截至 end 的最近 max_rows 根」而不是「截至最新交易日的
+        最近 max_rows 根」，否则回测首年拿不到任何 Bar（tail 落在回测区间之后）。
+        """
+        return self.load_bars(codes, max_rows=max_rows, start=start, end=end)
 
     def list_trade_dates(
         self, codes: Sequence[str], *, start: str | None = None, end: str | None = None,

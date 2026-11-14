@@ -589,7 +589,11 @@ def run_screener(
     candidates: list[Candidate] = []
     bars_by_code: dict[str, list[Bar]] = {}
     if target_rows:
-        history = store.load_history([row.code for row in target_rows], max_rows=260)
+        # end=当次选股时点：历史回看（回测/指定 as_of）必须取「截至 as_of 的最近
+        # 260 根」，否则 tail 会落在 as_of 之后 → 早期时点窗口为空、永远选不出票。
+        history = store.load_history(
+            [row.code for row in target_rows], max_rows=260, end=as_of_text,
+        )
         for row in target_rows:
             bars = _bar_window(history.get(row.code, []), as_of_text)
             if len(bars) < 21:

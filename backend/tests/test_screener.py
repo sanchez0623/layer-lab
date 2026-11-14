@@ -219,6 +219,28 @@ def test_l1_boundaries(tmp_path):
     assert result.pool[0].sessions == 40
 
 
+def test_as_of_older_than_recent_tail_window(tmp_path):
+    """as_of 早于「最近 260 根」时仍要取到截至 as_of 的历史（长区间回测回归）。
+
+    旧实现 load_history 只取「截至最新交易日的最近 260 根」，回测/回溯 as_of 落在
+    这个 tail 之前时筛选窗口为空（<21 根）→ 永远选不出票。这里 as_of 取第 60 根：
+    tail 260 从第 40 根起，旧实现只剩 20 根（被跳过），修复后取第 0–60 根。
+    """
+    store = UniverseStore(tmp_path / "u.db")
+    open_indices(store)
+    code = "sz.300007"
+    closes = [round(100 * 0.99 ** index, 4) for index in range(300)]
+    bars = make_bars(code, closes)
+    store.upsert_rows([UniverseRow(code=code, board=BOARD_GEM, name="长窗样本")])
+    store.upsert_daily(code, bars)
+
+    as_of = bars[55].date
+    result = run_screener(store, None, cfg(), as_of=as_of)
+    assert result.as_of == as_of
+    assert result.funnel["after_l1"] == 1
+    assert result.pool[0].sessions == 56
+
+
 def test_as_of_truncates_history(tmp_path):
     store = UniverseStore(tmp_path / "u.db")
     open_indices(store)
