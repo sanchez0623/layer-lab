@@ -76,6 +76,7 @@ export default function BacktestPage() {
   const [advanced, setAdvanced] = useState(false);
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
+  const [applying, setApplying] = useState(false);
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
   const [pendingNotice, setPendingNotice] = useState('');
@@ -204,6 +205,21 @@ export default function BacktestPage() {
       setError(cause instanceof Error ? cause.message : '回测运行失败，请稍后重试。');
     } finally {
       setRunning(false);
+    }
+  };
+
+  // 把当前回测配置（策略字段 + 费率）整套应用到模拟盘「当前账户」，下一根 K 起生效。
+  const applyToPaper = async () => {
+    setApplying(true);
+    setError('');
+    try {
+      const current = await api.currentAccount();
+      await api.applyAccountConfig(current.id, { config: stripFeeFields(config), fees });
+      setPendingNotice(`已把回测配置应用到模拟盘账户「${current.name}」，下一根 K 线起生效。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '应用到模拟盘失败，请确认模拟盘服务可用。');
+    } finally {
+      setApplying(false);
     }
   };
 
@@ -370,6 +386,9 @@ export default function BacktestPage() {
                 <span>请选择主数据集以查看数据边界</span>
               )}
             </div>
+            <button className="button secondary" type="button" onClick={() => void applyToPaper()} disabled={applying || running}>
+              {applying ? <><span className="button-spinner" />正在应用</> : <><ArrowDownToLine size={16} />应用到模拟盘</>}
+            </button>
             <button className="button primary run-button" type="submit" disabled={running || (mode === 'single' && !datasetId)}>
               {running ? <><span className="button-spinner" />正在运行回测</> : <><Play size={16} fill="currentColor" />运行回测</>}
             </button>

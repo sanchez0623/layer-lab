@@ -138,6 +138,9 @@ export const api = {
   /** 局部更新模拟账户策略配置（非费率）；下一根K线起的新操作立刻生效。 */
   updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_net_spread' | 't_exit_cutoff'>>) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/config`, { method: 'POST', body: JSON.stringify(patch) }),
+  /** 把回测配置整套应用到模拟账户（策略字段 config 已 strip 费率 + 费率 fees 万分之）；下一根K线起生效。 */
+  applyAccountConfig: (id: string, payload: { config: Partial<StrategyConfig>; fees?: FeeConfig }) =>
+    request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/apply-config`, { method: 'POST', body: JSON.stringify(payload) }),
   // 后端 domain 枚举为大写（BUY/SELL、MARKET/LIMIT），前端 UI 状态为小写；
   // 统一在 API 边界上行归一化，避免 Pydantic Literal 校验返回 422。
   placeOrder: (accountId: string, payload: CreateOrderRequest) =>

@@ -8,7 +8,7 @@ import threading
 import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import requests
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
@@ -173,6 +173,21 @@ class AccountConfigRequest(BaseModel):
     t_exit_cutoff: str | None = Field(default=None, pattern=r"^\d{1,2}:\d{2}$")
 
 
+class ApplyConfigRequest(BaseModel):
+    """POST /api/paper/accounts/{id}/apply-config：把回测配置整套应用到模拟账户。
+
+    回测页调参验证后，一键把同一套配置（策略字段 + 费率）同步到模拟盘当前账户，
+    免去在模拟盘手动重配一遍。数据结构与回测提交一致：
+    - ``config``：策略字段（前端已 stripFeeFields 剥离费率，避免两处写同一费率键打架）。
+    - ``fees``：费率（万分之口径），走 merge_fees 统一换算成小数比例。
+    两者合并后整体覆盖账户 config，作为「下一根 K 起的新操作」口径（与既有 config/fees
+    端点一致，不追溯历史记账）。
+    """
+
+    config: dict[str, Any] = Field(default_factory=dict)
+    fees: dict[str, Any] | None = None
+
+
 class PaperOrderRequest(BaseModel):
     symbol: str
     side: Literal["BUY", "SELL"]
@@ -263,7 +278,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.5.1",
+        version="1.6.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1284,6 +1299,29 @@ def create_app() -> FastAPI:
         # 这里再过一遍 from_dict 兜底（未知键会抛 ValueError → 400）。
         try:
             updated = StrategyConfig.from_dict({**account.config.to_dict(), **patch})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        account.config = updated
+        return save_paper(account)
+
+    @application.post("/api/paper/accounts/{account_id}/apply-config")
+    def apply_backtest_config(account_id: str, request: ApplyConfigRequest):
+        """把回测配置整套应用到模拟账户（策略字段 + 费率）；下一根 K 起的新操作生效。
+
+        回测页调参验证后一键同步到模拟盘当前账户，免去手动重配。数据结构与回测提交
+        一致：config（策略字段，前端已 strip 费率）+ fees（万分之）。两者合并成完整
+        StrategyConfig 整体覆盖账户 config；不追溯历史记账，与既有 config/fees 端点
+        口径一致。空 config 且空 fees → 400。
+        """
+        account = get_paper(account_id)
+        if not request.config and not request.fees:
+            raise HTTPException(status_code=400, detail="没有要应用的配置字段")
+        # 费率走 merge_fees 统一口径（全局打底 + 本次 fees 覆盖，万分之 → 小数比例）。
+        fee_patch = merge_fees(request.fees).to_strategy_patch() if request.fees else {}
+        # 策略字段打底，费率最高优先级（与回测「fees 单独覆盖费率」口径一致）。
+        merged = {**request.config, **fee_patch}
+        try:
+            updated = StrategyConfig.from_dict(merged)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         account.config = updated
