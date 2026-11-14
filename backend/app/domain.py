@@ -129,6 +129,11 @@ class StrategyConfig:
     t_min_expected_net_spread: float = 0.03
     t_target_spread: float = 0.015
     deep_loss_threshold: float = -0.10
+    # 超期持仓降阈止盈：持有超过 max_holding_days 个交易日后，价格轨/账户轨止盈阈值
+    # 降为 holding_tp_override（0~1 小数）。None 表示关闭该逻辑（维持 price_take_profit）。
+    # 目的：避免资金被长期套牢在「既不到 15% 止盈、也不触发 Armed 背离」的缓慢阴跌标的里。
+    max_holding_days: int | None = None
+    holding_tp_override: float | None = None
 
     def __post_init__(self) -> None:
         if len(self.installment_amounts) != 16:

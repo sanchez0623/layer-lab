@@ -87,6 +87,76 @@ def test_price_track_take_profit_liquidates():
     assert all(item.execution_mode == "NEXT_OPEN" for item in requests)
 
 
+def test_max_holding_days_overrides_take_profit_to_3pct():
+    """持有超过 max_holding_days 交易日后，止盈阈值降为 holding_tp_override。
+
+    回归：策略只有 15% 止盈 + Armed 量价清仓，没有硬止损；横盘/缓慢阴跌标的会让
+    资金被长期套牢。降到 3% 让超期标的尽快让位给下一轮。
+    """
+    account = funded_account()
+    config = StrategyConfig(
+        slippage_bps=0, volume_participation=1.0,
+        max_holding_days=22, holding_tp_override=0.03,
+    )
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    strategy.round_entry_date = "2025-01-01"
+
+    # 持有 20 天（未超期），浮盈 5%：未达 15%，也不该被 3% 提前清仓。
+    history_short = [daily(i, 10.5) for i in range(1, 21)]
+    assert strategy.on_daily(history_short, [], account, 20, False) == []
+    assert strategy.liquidating is False
+
+    # 持有 25 天（超期），同样 5% 浮盈：3% 阈值应立即触发清仓。
+    strategy.liquidating = False
+    strategy.close_reason = ""
+    history_long = [daily(i, 10.5) for i in range(1, 26)]
+    requests = strategy.on_daily(history_long, [], account, 25, False)
+    assert any(item.side == "SELL" and item.purpose == "PERMANENT" for item in requests)
+    assert strategy.liquidating is True
+    # close_reason 带实际持有天数与降阈后的止盈百分比
+    assert "3%" in strategy.close_reason
+    assert "25" in strategy.close_reason
+
+
+def test_max_holding_days_override_requires_both_fields():
+    """只配 max_holding_days 不配 holding_tp_override：保持原止盈，不降阈。"""
+    account = funded_account()
+    config = StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, max_holding_days=22,
+    )
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    strategy.round_entry_date = "2025-01-01"
+    history = [daily(i, 10.5) for i in range(1, 30)]
+    assert strategy.on_daily(history, [], account, 29, False) == []
+    assert strategy.liquidating is False
+
+
+def test_round_entry_date_survives_state_roundtrip():
+    """state_dict/load_state 必须保留 round_entry_date：live 模拟盘重启后超期降阈仍生效。"""
+    account = funded_account()
+    strategy = LayeredTStrategy(account.config)
+    strategy.round_entry_date = "2025-01-15"
+    restored = LayeredTStrategy(account.config)
+    restored.load_state(strategy.state_dict())
+    assert restored.round_entry_date == "2025-01-15"
+
+
+def test_holding_days_counts_only_bars_after_entry():
+    account = funded_account()
+    strategy = LayeredTStrategy(account.config)
+    strategy.round_entry_date = "2025-01-05"
+    history = [daily(i, 10.0) for i in range(1, 11)]
+    # daily(i) 的 date = 2025-01-01 + i 天；i=1..10 → 01-02..01-11。
+    # 严格晚于 01-05 的是 i=5..10 → 6 天（建仓次日起算）。
+    assert strategy._holding_days(history) == 6
+    strategy.round_entry_date = None
+    assert strategy._holding_days(history) == 0
+
+
 def test_account_track_includes_t_net_spread():
     account = funded_account()
     account.t_net_profit = 600.0

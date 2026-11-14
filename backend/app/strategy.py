@@ -87,6 +87,8 @@ class LayeredTStrategy(Strategy):
         self.entry_submitted_date: str | None = None
         # 尾盘加仓已在本交易日提交（防同日 15:00 日终信号重复加仓）。
         self.add_submitted_date: str | None = None
+        # 本轮首个永久仓建仓日期（YYYY-MM-DD）：用于计算持有交易日数（超期降阈止盈）。
+        self.round_entry_date: str | None = None
         # live-tick 可能在同一根已收盘 5 分钟 K 线上重复触发；按 bar 时间去重，
         # 避免背离/VWAP 确认计数被同一根 bar 叠加。
         self.last_intraday_timestamp: datetime | None = None
@@ -103,6 +105,7 @@ class LayeredTStrategy(Strategy):
             "event_halt": self.event_halt,
             "entry_submitted_date": self.entry_submitted_date,
             "add_submitted_date": self.add_submitted_date,
+            "round_entry_date": self.round_entry_date,
             "last_intraday_timestamp": (
                 self.last_intraday_timestamp.isoformat() if self.last_intraday_timestamp else None
             ),
@@ -128,6 +131,8 @@ class LayeredTStrategy(Strategy):
         self.entry_submitted_date = str(submitted_date) if submitted_date else None
         add_date = state.get("add_submitted_date")
         self.add_submitted_date = str(add_date) if add_date else None
+        raw_entry_date = state.get("round_entry_date")
+        self.round_entry_date = str(raw_entry_date) if raw_entry_date else None
         raw_timestamp = state.get("last_intraday_timestamp")
         try:
             self.last_intraday_timestamp = datetime.fromisoformat(raw_timestamp) if raw_timestamp else None
@@ -162,6 +167,7 @@ class LayeredTStrategy(Strategy):
         self.event_halt = False
         self.entry_submitted_date = None
         self.add_submitted_date = None
+        self.round_entry_date = None
         account.sequence_index = 0
         account.armed_state = "OFF"
 
@@ -175,6 +181,9 @@ class LayeredTStrategy(Strategy):
             self.last_add_price = fill.price
             self.last_add_session = session_index
             self.had_new_low = False
+            # 记录本轮首个永久仓建仓日期：超期持仓降阈止盈按此计算持有交易日数。
+            if self.round_entry_date is None:
+                self.round_entry_date = fill.timestamp[:10]
         if fill.purpose == "T":
             if fill.side == "BUY":
                 self.t_traded_today = True
@@ -233,22 +242,54 @@ class LayeredTStrategy(Strategy):
             ))
         return mean(values) if values else 0.0
 
+    def _holding_days(self, history: list[Bar]) -> int:
+        """本轮持有交易日数：history 里严格晚于建仓日的 bar 数量。
+
+        history 是升序日线，建仓次日起算第 1 天；未记录入口日期返回 0。
+        """
+        if not self.round_entry_date:
+            return 0
+        return sum(1 for item in history if item.date > self.round_entry_date)
+
+    def _effective_take_profit(self, holding_days: int) -> tuple[float, bool]:
+        """返回 (有效止盈阈值, 是否因超期降阈)。
+
+        持有交易日数超过 ``max_holding_days`` 时，价格轨/账户轨止盈阈值降为
+        ``holding_tp_override``（若配置）。两者任一未配置则维持原止盈。
+        """
+        base = self.config.price_take_profit
+        max_days = self.config.max_holding_days
+        override = self.config.holding_tp_override
+        if max_days is None or override is None:
+            return base, False
+        if holding_days < int(max_days):
+            return base, False
+        return min(base, float(override)), True
+
     def _risk_requests(
         self, history: list[Bar], bar: Bar, account: BrokerAccount,
         recent_bars: list[Bar], mode: str,
     ) -> list[OrderRequest]:
         position = account.position(bar.symbol)
         price_return, account_return = self._returns(account, bar.symbol, bar.close, self.round_t_start)
+        holding_days = self._holding_days(history)
+        effective_tp, tp_overridden = self._effective_take_profit(holding_days)
         if self.event_halt:
             self.close_reason = self.close_reason or "事件熔断"
             return self._liquidation_requests(position, mode)
-        if price_return >= self.config.price_take_profit:
+        if price_return >= effective_tp:
             self.liquidating = True
-            self.close_reason = "价格轨收益达到15%"
+            self.close_reason = (
+                f"超期持仓{holding_days}日_止盈降至{effective_tp * 100:.0f}%"
+                if tp_overridden else f"价格轨收益达到{effective_tp * 100:.0f}%"
+            )
             return self._liquidation_requests(position, mode)
-        if account_return >= self.config.account_take_profit:
+        if account_return >= effective_tp:
             self.liquidating = True
-            self.close_reason = "账户轨收益达到15%"
+            self.close_reason = (
+                f"超期持仓{holding_days}日_账户轨止盈降至{effective_tp * 100:.0f}%"
+                if tp_overridden else f"账户轨收益达到{effective_tp * 100:.0f}%"
+            )
             return self._liquidation_requests(position, mode)
         if self.liquidating:
             return self._liquidation_requests(position, mode)
