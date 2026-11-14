@@ -263,7 +263,7 @@ export default function BacktestPage() {
       {pendingNotice && <SuccessBanner onClose={() => setPendingNotice('')}>{pendingNotice}</SuccessBanner>}
 
       <Panel className="config-panel">
-        <form onSubmit={(event) => { event.preventDefault(); void run(); }}>
+        <form onSubmit={(event) => { event.preventDefault(); void run(); }} noValidate>
           <div className="config-topline">
             <div className="config-title"><span className="step-index">01</span><div><h2>实验配置</h2><p>定义数据边界与交易摩擦，再启动本地回测。</p></div></div>
             <div className="backtest-mode-toggle" role="tablist" aria-label="回测模式">
