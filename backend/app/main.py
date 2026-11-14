@@ -1132,6 +1132,7 @@ def create_app() -> FastAPI:
             screener_config=screener, initial_cash=request.initial_cash,
             config=config, start_date=request.start_date, end_date=request.end_date,
             name=request.name,
+            quan=getattr(application.state, "quan_store", None),
         )
         report["data_info"].update({
             "daily_source": getattr(service.store, "provider", "universe_db"),

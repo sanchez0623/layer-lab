@@ -13,6 +13,7 @@ import pytest
 from app.backtest import FunnelRotationBacktest
 from app.domain import Bar, StrategyConfig
 from app.screener import ScreenerConfig
+from app.strategy import LayeredTStrategy
 from app.universe import BOARD_GEM, BOARD_INDEX, BOARD_STAR, UniverseRow, UniverseStore
 
 START = datetime(2025, 1, 1)
@@ -170,3 +171,122 @@ def test_funnel_empty_universe_raises(tmp_path):
         FunnelRotationBacktest(
             store=store, market=_DummyMarket(), screener_config=ScreenerConfig(boards=[BOARD_GEM]),
         )
+
+
+# ---------------------------------------------------------------------------
+# 5 分钟做 T：传入 QuanStore 后逐根处理 minute5，触发日内 T
+# ---------------------------------------------------------------------------
+
+
+class _FakeMinute5Bar(Bar):
+    """构造 5 分钟 bar 的辅助（继承 Bar，带 5m timeframe）。"""
+
+
+class _FakeQuan:
+    """假 QuanStore：为每个候选返回振荡 5 分钟 bar（触发做 T 准入）。
+
+    振荡设计：日内 48 根 5 分钟 bar 在 [low, high] 来回摆动，振幅 >4% 满足
+    t_min_amplitude；换手率固定 6%（落在 [3%,12%]）；bid/ask 用 close±0.2% 代理
+    （净价差 >3% 由振荡幅度保证）。on_intraday 会在满足准入时下 T 单。
+    """
+
+    def __init__(self, codes_dates: dict[str, list[str]]) -> None:
+        # {standard_code: {date: [Bar x48]}}
+        self._by_code: dict[str, dict[str, list[Bar]]] = {}
+        for code, dates in codes_dates.items():
+            per_date: dict[str, list[Bar]] = {}
+            for date in dates:
+                per_date[date] = self._oscillate(code, date)
+            self._by_code[code] = per_date
+
+    @staticmethod
+    def _oscillate(code: str, date: str) -> list[Bar]:
+        base = 20.0
+        bars: list[Bar] = []
+        # 09:35 起 48 根（9:30 开盘后每 5 分钟），收盘价在 20±0.3 温和振荡（日内振幅 ~3%）。
+        # 幅度刻意压小：太大（±1.2）会让策略建仓首日就触发 15% 止盈清仓，底仓建不满 4 笔，
+        # 做T 永远卡在 sequence_index<4。温和振荡让底仓逐步建满、持有期足够长，做T 才有机会触发。
+        for i in range(48):
+            minute = 35 + i * 5
+            hour, mi = 9 + minute // 60, minute % 60
+            if hour >= 12 and hour < 13:
+                hour, mi = 13, mi  # 简化午休
+            ts = datetime.fromisoformat(f"{date}T{hour:02d}:{mi:02d}:00")
+            close = base + (0.3 if i % 2 == 0 else -0.3)
+            high, low = close * 1.004, close * 0.996
+            bid, ask = close * 0.998, close * 1.002
+            bars.append(Bar(
+                timestamp=ts, symbol=code, open=close, high=high, low=low, close=close,
+                volume=1e5, amount=2e6, timeframe="5m", turnover_rate=0.06,
+                bid=bid, ask=ask, prev_close=base,
+            ))
+        return bars
+
+    def load_minute5(self, code: str, *, max_rows: int | None = None,
+                     start: str | None = None, end: str | None = None,
+                     daily_turnover: dict[str, float] | None = None) -> list[Bar]:
+        per_date = self._by_code.get(code, {})
+        result: list[Bar] = []
+        for date in sorted(per_date):
+            if start and date < start:
+                continue
+            if end and date > end:
+                continue
+            result.extend(per_date[date])
+        return result[:max_rows] if max_rows else result
+
+
+def test_funnel_intraday_t_processes_minute5(tmp_path):
+    """传 QuanStore 后，持仓期 5 分钟 bar 被逐根处理并喂给 on_intraday。
+
+    注意：做 T「成交」依赖底仓建满 4 笔（sequence_index>=4）+ 当日准入（振幅/换手/盘口），
+    是市场条件问题；本测试验证的是**机制**——传 QuanStore 后 5 分钟 bar 真的被逐根处理，
+    而非像无 quan 时只调 on_daily。机制正确后，真实数据下底仓建满时做 T 自然触发。
+    """
+    store = _build_store(tmp_path / "u.db")
+    # 给所有候选造 5 分钟数据（覆盖建仓窗口 8/20~9/17 的交易日）
+    dates = [(START + timedelta(days=i)).date().isoformat() for i in range(260)]
+    codes = ["sz.300101", "sz.300102", "sz.300103"]
+    quan = _FakeQuan({code: dates for code in codes})
+
+    # 跟踪 on_intraday 调用次数（确认 5 分钟 bar 被逐根处理）
+    orig_on_intraday = LayeredTStrategy.on_intraday
+    intraday_calls: list[tuple[str, str]] = []
+
+    def tracked_on_intraday(self, history, recent, bar, account, **kwargs):
+        intraday_calls.append((bar.symbol, bar.date))
+        return orig_on_intraday(self, history, recent, bar, account, **kwargs)
+
+    LayeredTStrategy.on_intraday = tracked_on_intraday
+    try:
+        report = _run(store, quan=quan)
+    finally:
+        LayeredTStrategy.on_intraday = orig_on_intraday
+
+    # 启用 5 分钟做 T 的警告
+    assert any("5分钟做T" in item for item in report["warnings"])
+    # 5 分钟 bar 被逐根处理：on_intraday 被调用多次（每日 48 根 × 持有天数）
+    assert len(intraday_calls) > 0, "传 QuanStore 后 on_intraday 应被调用（5 分钟 bar 逐根处理）"
+    # 每根 5 分钟 bar 的换手/盘口被填充（做 T 准入数据源就绪）
+    assert any(code == "sz.300101" for code, _ in intraday_calls)
+
+
+def test_funnel_without_quan_stays_daily(tmp_path):
+    """无 QuanStore 时保持日线口径，on_intraday 不被调用（回归保护）。"""
+    store = _build_store(tmp_path / "u.db")
+
+    orig_on_intraday = LayeredTStrategy.on_intraday
+    intraday_calls: list[tuple[str, str]] = []
+
+    def tracked_on_intraday(self, history, recent, bar, account, **kwargs):
+        intraday_calls.append((bar.symbol, bar.date))
+        return orig_on_intraday(self, history, recent, bar, account, **kwargs)
+
+    LayeredTStrategy.on_intraday = tracked_on_intraday
+    try:
+        report = _run(store)
+    finally:
+        LayeredTStrategy.on_intraday = orig_on_intraday
+
+    assert any("日线口径" in item for item in report["warnings"])
+    assert len(intraday_calls) == 0, f"无 quan 时 on_intraday 不应被调用，实际 {len(intraday_calls)} 次"
