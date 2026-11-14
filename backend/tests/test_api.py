@@ -394,7 +394,7 @@ def test_market_and_paper_endpoints_reject_invalid_plain_code(tmp_path, monkeypa
 
 
 def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeypatch):
-    """做T目标价差走 /config 局部更新：改完立即反映到账户 config，供下一根K线的新操作使用。"""
+    """做T净利止盈/截止时间走 /config 局部更新：改完立即反映到账户 config，供下一根K线使用。"""
     monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
     client = TestClient(create_app())
@@ -403,19 +403,26 @@ def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeyp
         "name": "配置更新", "initial_cash": 4_000_000,
         "dataset_id": demo["intraday"]["id"],
     }).json()
-    base = account["config"]["t_target_spread"]
+    base = account["config"]["t_target_net_spread"]
 
-    # 局部更新 t_target_spread（小数口径，0.015 → 0.02）
+    # 局部更新 t_target_net_spread（小数口径，0.03 → 0.04）
     updated = client.post(f"/api/paper/accounts/{account['id']}/config",
-                          json={"t_target_spread": 0.02})
+                          json={"t_target_net_spread": 0.04})
     assert updated.status_code == 200, updated.text
-    assert updated.json()["config"]["t_target_spread"] == 0.02
+    assert updated.json()["config"]["t_target_net_spread"] == 0.04
     # 原值未被误改的其他字段保持
     assert updated.json()["config"]["enable_t"] == account["config"]["enable_t"]
 
+    # 截止时间也能改（HH:MM）
+    updated_cut = client.post(f"/api/paper/accounts/{account['id']}/config",
+                              json={"t_exit_cutoff": "14:45"})
+    assert updated_cut.status_code == 200, updated_cut.text
+    assert updated_cut.json()["config"]["t_exit_cutoff"] == "14:45"
+
     # 重读（走持久化往返）仍是新值
     reloaded = client.get(f"/api/paper/accounts/{account['id']}").json()
-    assert reloaded["config"]["t_target_spread"] == 0.02
+    assert reloaded["config"]["t_target_net_spread"] == 0.04
+    assert reloaded["config"]["t_exit_cutoff"] == "14:45"
 
     # 费率字段归 /fees 管，这里显式拒绝
     rejected = client.post(f"/api/paper/accounts/{account['id']}/config",
@@ -426,9 +433,17 @@ def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeyp
     empty = client.post(f"/api/paper/accounts/{account['id']}/config", json={})
     assert empty.status_code == 400
 
-    # 边界校验：负数 / 超过 1 → 422
+    # 边界校验：净利止盈负数 / 超过 1 → 422
     assert client.post(f"/api/paper/accounts/{account['id']}/config",
-                       json={"t_target_spread": -0.01}).status_code == 422
+                       json={"t_target_net_spread": -0.01}).status_code == 422
     assert client.post(f"/api/paper/accounts/{account['id']}/config",
-                       json={"t_target_spread": 1.5}).status_code == 422
+                       json={"t_target_net_spread": 1.5}).status_code == 422
+    # 截止时间非法：格式不匹配 pattern → 422；格式像但超出 24h → from_dict strptime 拒 → 400
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"t_exit_cutoff": "25:00"}).status_code == 400
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"t_exit_cutoff": "not-a-time"}).status_code == 422
+    # 已废弃字段被 extra="forbid" 拒绝
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"t_target_spread": 0.02}).status_code == 422
     assert base is not None

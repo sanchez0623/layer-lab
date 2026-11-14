@@ -47,8 +47,12 @@ export interface StrategyConfig {
   transfer_fee_rate: number;
   slippage_bps: number;
   volume_participation: number;
-  /** 做T目标价差（小数，0.015 = 均价+1.5% 平T）；可在模拟盘账户配置里改，下一根K线起生效 */
+  /** 已废弃：做T平仓改用 t_target_net_spread（扣成本后净利止盈），本字段不再参与做T计算，仅为兼容后端 config 保留 */
   t_target_spread?: number;
+  /** 做T净利止盈阈值（小数，0.03 = 扣完成本后净赚 3% 平T）；可在模拟盘账户配置里改，下一根K线起生效 */
+  t_target_net_spread?: number;
+  /** 做T的T+1日尾盘硬截止时间（HH:MM，默认 14:50），到点仍未止盈则无条件强平；T0 当日不强平 */
+  t_exit_cutoff?: string;
   /** 已废弃：做T金额现跟随当前加仓档 installment_amounts[sequence_index]（满仓后取最大档），本字段不再参与做T计算，仅为兼容后端 config 保留 */
   t_order_amount?: number;
 }

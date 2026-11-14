@@ -498,25 +498,48 @@ export default function PaperPage() {
     }
   };
 
-  // 做T目标价差：改完立刻 PATCH 账户 config，下一根K线起的新操作即用新值。
+  // 做T净利止盈 + T+1截止时间：改完立刻 PATCH 账户 config，下一根K线起的新操作即用新值。
   const [tSpreadInput, setTSpreadInput] = useState('');
   const [savingTSpread, setSavingTSpread] = useState(false);
-  const tTargetSpread = account?.config?.t_target_spread ?? defaultConfig.t_target_spread ?? 0.015;
+  const tNetSpread = account?.config?.t_target_net_spread ?? defaultConfig.t_target_net_spread ?? 0.03;
+  const [tCutoffInput, setTCutoffInput] = useState('');
+  const [savingTCutoff, setSavingTCutoff] = useState(false);
+  const tCutoff = account?.config?.t_exit_cutoff ?? defaultConfig.t_exit_cutoff ?? '14:50';
 
-  const saveTTargetSpread = async () => {
+  const saveTNetSpread = async () => {
     if (!account) return;
     const pct = Number(tSpreadInput);
-    if (!Number.isFinite(pct) || pct < 0 || pct > 100) { setError('做T目标价差需为 0–100 之间的百分数。'); return; }
+    if (!Number.isFinite(pct) || pct <= 0 || pct >= 100) { setError('做T净利止盈需为 0–100 之间的百分数。'); return; }
     setSavingTSpread(true); setError('');
     try {
-      const next = await api.updateAccountConfig(account.id, { t_target_spread: pct / 100 });
+      const next = await api.updateAccountConfig(account.id, { t_target_net_spread: pct / 100 });
       setAccount(next);
       setTSpreadInput('');
-      setSuccess(`做T目标价差已更新为 ${number(pct, 2)}%，下一根K线起生效。`);
+      setSuccess(`做T净利止盈已更新为 ${number(pct, 2)}%，下一根K线起生效。`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '做T目标价差更新失败。');
+      setError(cause instanceof Error ? cause.message : '做T净利止盈更新失败。');
     } finally {
       setSavingTSpread(false);
+    }
+  };
+
+  const saveTCutoff = async () => {
+    if (!account) return;
+    const value = tCutoffInput.trim();
+    if (!/^\d{1,2}:\d{2}$/.test(value)) { setError('T+1截止时间需为 HH:MM 格式，如 14:50。'); return; }
+    const [hh, mm] = value.split(':').map(Number);
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) { setError('T+1截止时间需为合法的 24 小时制时间。'); return; }
+    const normalized = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    setSavingTCutoff(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { t_exit_cutoff: normalized });
+      setAccount(next);
+      setTCutoffInput('');
+      setSuccess(`做T的T+1尾盘截止时间已更新为 ${normalized}，下一根K线起生效。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '做T截止时间更新失败。');
+    } finally {
+      setSavingTCutoff(false);
     }
   };
 
@@ -611,16 +634,16 @@ export default function PaperPage() {
           {account.auto_strategy && (
             <Panel
               className="t-config-panel"
-              title="做 T 目标价差"
-              description="T 仓均价上浮该幅度即触发平 T（纯目标价差退出，可跨多日持有，不强制 T+1 或尾盘轧平）；做 T 金额跟随当前加仓档。改动保存后下一根 K 线起的新操作立刻生效"
+              title="做 T 止盈与截止"
+              description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；若到 T+1 尾盘截止时间仍未止盈，则无条件强平，确保做 T 资金最迟 T+1 收盘前了结。做 T 金额跟随当前加仓档。改动保存后下一根 K 线起生效"
               action={<Badge tone="indigo">即时生效</Badge>}
             >
               <div className="t-config-row">
-                <Field label="目标价差（%）" hint={`当前 ${number(tTargetSpread * 100, 2)}%`} className="t-spread-field">
+                <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="t-spread-field">
                   <div className="input-with-unit">
                     <input
                       type="number" min="0" max="100" step="0.1"
-                      placeholder={number(tTargetSpread * 100, 2)}
+                      placeholder={number(tNetSpread * 100, 2)}
                       value={tSpreadInput}
                       onChange={(event) => setTSpreadInput(event.target.value)}
                       disabled={savingTSpread}
@@ -630,14 +653,35 @@ export default function PaperPage() {
                 </Field>
                 <button
                   className="button primary t-spread-save"
-                  onClick={() => void saveTTargetSpread()}
+                  onClick={() => void saveTNetSpread()}
                   disabled={savingTSpread || tSpreadInput === ''}
                 >
                   {savingTSpread ? <span className="button-spinner" /> : <Repeat2 size={15} />}
-                  {savingTSpread ? '正在保存' : '保存价差'}
+                  {savingTSpread ? '正在保存' : '保存止盈'}
                 </button>
               </div>
-              <p className="t-config-note">留空表示沿用当前值 {number(tTargetSpread * 100, 2)}%；填入新百分数后点保存。费率等摩擦参数请在费率面板调整。</p>
+              <div className="t-config-row">
+                <Field label="T+1 截止时间" hint={`当前 ${tCutoff}（HH:MM，尾盘强平）`} className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="time" step="300"
+                      placeholder={tCutoff}
+                      value={tCutoffInput}
+                      onChange={(event) => setTCutoffInput(event.target.value)}
+                      disabled={savingTCutoff}
+                    />
+                  </div>
+                </Field>
+                <button
+                  className="button primary t-spread-save"
+                  onClick={() => void saveTCutoff()}
+                  disabled={savingTCutoff || tCutoffInput === ''}
+                >
+                  {savingTCutoff ? <span className="button-spinner" /> : <Repeat2 size={15} />}
+                  {savingTCutoff ? '正在保存' : '保存截止'}
+                </button>
+              </div>
+              <p className="t-config-note">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
             </Panel>
           )}
 

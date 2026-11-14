@@ -539,6 +539,22 @@ class LayeredTStrategy(Strategy):
         index = min(account.sequence_index, len(self.config.installment_amounts) - 1)
         return self.config.installment_amounts[index]
 
+    def _t_roundtrip_cost(self) -> float:
+        """一次完整做T往返的成本率估算（占投入金额的比例，小数）。
+
+        四项双边费率各计两次、印花税仅卖出计一次、滑点买卖各一次。用于：
+        ①做T准入的净价差门槛（_t_eligible）；②净利止盈的目标价换算
+        （毛目标价差 = 净目标 + 本成本率）。百分比近似，忽略 min_commission
+        固定佣金（做T金额 10 万~40 万时占比 <0.005%）。
+        """
+        return (
+            2 * (
+                self.config.commission_rate + self.config.handling_fee_rate
+                + self.config.regulatory_fee_rate + self.config.transfer_fee_rate
+            )
+            + self.config.stamp_tax_rate + 2 * self.config.slippage_bps / 10000
+        )
+
     def _t_eligible(self, history: list[Bar], bar: Bar, account: BrokerAccount,
                     live_turnover: float | None = None,
                     live_bid: float | None = None, live_ask: float | None = None,
@@ -575,14 +591,8 @@ class LayeredTStrategy(Strategy):
         ask = bar.ask if bar.ask is not None else live_ask
         if bid is None or ask is None or ask <= bid or bar.volume < 100:
             return False
-        # 一次完整 T 往返：四项双边费率各计两次、印花税仅卖出计一次，滑点买卖各一次。
-        estimated_cost = (
-            2 * (
-                self.config.commission_rate + self.config.handling_fee_rate
-                + self.config.regulatory_fee_rate + self.config.transfer_fee_rate
-            )
-            + self.config.stamp_tax_rate + 2 * self.config.slippage_bps / 10000
-        )
+        # 一次完整 T 往返成本率（四项双边费率各计两次、印花税仅卖出一次、滑点买卖各一次）。
+        estimated_cost = self._t_roundtrip_cost()
         if average_amplitude - estimated_cost < self.config.t_min_expected_net_spread:
             return False
         closes = [item.close for item in recent]
@@ -629,18 +639,32 @@ class LayeredTStrategy(Strategy):
             if self.t_exit_submitted:
                 return []
             average_t_price = position.t_cost / position.t_qty
-            target = average_t_price * (1 + self.config.t_target_spread)
-            # 纯目标价差退出：底仓兜底，T仓可跨多日持有，既不强制隔夜T+1卖出，
-            # 也不做尾盘14:50轧平。整体止盈/风控清仓时 _liquidation_requests 会
-            # 一并平掉T仓，作为兜底退出路径。
-            if bar.close >= target:
-                quantity = min(position.t_qty, position.permanent_sellable_qty)
-                if quantity >= board_sell_threshold(bar.symbol):
+            # 净利止盈：目标价 = 均价 ×(1 + 净目标 + 往返成本率)。扣掉双边佣金/经手费/
+            # 证管费/过户费/印花税/滑点后净赚 t_target_net_spread（默认 3%）。
+            target = average_t_price * (1 + self.config.t_target_net_spread + self._t_roundtrip_cost())
+            quantity = min(position.t_qty, position.permanent_sellable_qty)
+            can_sell = quantity >= board_sell_threshold(bar.symbol)
+            # T+1 尾盘硬截止：做T资金最迟在 T+1 日 t_exit_cutoff（默认 14:50）无条件平掉。
+            # 仅隔夜仓触发（t_qty > today_t_buy_qty）：T0 当日新建仓 is_overnight=False 不强平，
+            # 可持有到 T1，兑现「资金 T0 或 T1 做完、T1 的 14:50 是截止点」。
+            cutoff = datetime.strptime(self.config.t_exit_cutoff, "%H:%M").time()
+            is_overnight = position.t_qty > position.today_t_buy_qty
+            if current_time >= cutoff and is_overnight:
+                if can_sell:
                     self.t_exit_submitted = True
                     return [OrderRequest(
                         symbol=bar.symbol, side="SELL", quantity=quantity, purpose="T",
-                        execution_mode="NEXT_BAR", reason="T目标价差",
+                        execution_mode="NEXT_BAR", reason="T+1尾盘截止平T",
                     )]
+                return []
+            # 净利止盈：达到目标价即平T（T0 当天满足就当天做完，无需等到 T1）。
+            # 整体止盈/风控清仓时 _liquidation_requests 会一并平掉T仓，作为兜底退出路径。
+            if bar.close >= target and can_sell:
+                self.t_exit_submitted = True
+                return [OrderRequest(
+                    symbol=bar.symbol, side="SELL", quantity=quantity, purpose="T",
+                    execution_mode="NEXT_BAR", reason="T净利止盈",
+                )]
             return []
         if current_time < datetime.strptime("09:35", "%H:%M").time() or current_time >= datetime.strptime("14:00", "%H:%M").time():
             return []

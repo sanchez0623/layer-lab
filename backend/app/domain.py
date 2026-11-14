@@ -130,7 +130,15 @@ class StrategyConfig:
     t_min_turnover: float = 0.03
     t_max_turnover: float = 0.12
     t_min_expected_net_spread: float = 0.03
+    # 已废弃：做T平仓改用 t_target_net_spread（扣成本后净利止盈）。本字段不再驱动平仓判定，
+    # 仅为兼容老账户已快照的 config 保留，避免 from_dict 因「未知字段」报错。
     t_target_spread: float = 0.015
+    # 做T净利止盈阈值：扣掉双边佣金/经手费/证管费/过户费/印花税/滑点后净赚该比例即平T（0~1 小数）。
+    # 目标价 = T仓均价 ×(1 + t_target_net_spread + 往返成本估算)，成本估算见 strategy._t_roundtrip_cost。
+    t_target_net_spread: float = 0.03
+    # 做T资金硬截止：T+1 日到达该时刻（HH:MM，24小时制）仍未止盈则无条件尾盘强平。
+    # T0 当日不强平（可持有到 T1），保证做T资金最迟在 T+1 收盘前了结。
+    t_exit_cutoff: str = "14:50"
     deep_loss_threshold: float = -0.10
     # 超期持仓降阈止盈：持有超过 max_holding_days 个交易日后，价格轨/账户轨止盈阈值
     # 降为 holding_tp_override（0~1 小数）。None 表示关闭该逻辑（维持 price_take_profit）。
@@ -152,6 +160,12 @@ class StrategyConfig:
                 raise ValueError(f"{name} 必须是非负且小于 10% 的小数比例")
         if self.min_commission < 0 or self.slippage_bps < 0:
             raise ValueError("min_commission 与 slippage_bps 不能为负")
+        if not 0 < self.t_target_net_spread < 1:
+            raise ValueError("t_target_net_spread 必须是大于0且小于1的小数（做T净利止盈阈值）")
+        try:
+            datetime.strptime(self.t_exit_cutoff, "%H:%M")
+        except (TypeError, ValueError):
+            raise ValueError("t_exit_cutoff 必须是合法的 HH:MM 时间（做T的T+1日尾盘强平截止点）")
         self.installment_amounts = [float(x) for x in self.installment_amounts]
 
     @classmethod

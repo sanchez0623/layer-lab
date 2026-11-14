@@ -1,10 +1,12 @@
-"""做T金额跟随加仓档 + T仓纯目标价差退出的回归测试。
+"""做T金额跟随加仓档 + 净利止盈 + T+1日尾盘截止的回归测试。
 
-覆盖两条优化：
+覆盖：
 1. 做T单笔金额不再用固定 t_order_amount，改为跟随当前加仓档
    installment_amounts[sequence_index]（满仓 sequence_index>=16 取最大档）。
-2. T仓退出为纯目标价差：去掉「隔夜强制T+1卖出」与「14:50尾盘强制轧平」，
-   底仓兜底下可跨多日持有，只有价格达到 均价*(1+t_target_spread) 才平T。
+2. 做T平仓为「扣成本后净利止盈」：目标价 = 均价×(1 + t_target_net_spread + 往返成本率)，
+   扣费后净赚 t_target_net_spread（默认 3%）即平T，T0 当天满足就当天做完。
+3. 做T资金硬截止：T+1 日 t_exit_cutoff（默认 14:50）仍未止盈则无条件强平；
+   T0 当日不强平（仅隔夜仓 t_qty>today_t_buy_qty 触发），保证资金最迟 T+1 收盘前了结。
 """
 
 from datetime import datetime, timedelta
@@ -99,61 +101,94 @@ def test_t_amount_matches_board_quantity_of_stage():
     )
 
 
-def _exit_account(*, t_qty: int = 1_000, t_cost: float = 100_000.0) -> BrokerAccount:
-    """已有 T 仓（均价 100）+ 充足可卖底仓的账户；永久仓均价也是 100（不触发止盈）。"""
+def _exit_account(*, t_qty: int = 1_000, t_cost: float = 100_000.0,
+                  today_t_qty: int = 0) -> BrokerAccount:
+    """已有 T 仓（均价 100）+ 充足可卖底仓的账户；永久仓均价也是 100（不触发止盈）。
+
+    today_t_qty=0 表示隔夜仓（T1）；today_t_qty=t_qty 表示当日新建仓（T0）。
+    """
     acct = _make_account(sequence_index=5)
     pos = acct.positions[SYM]
     pos.t_qty = t_qty
     pos.t_cost = t_cost
+    pos.today_t_buy_qty = today_t_qty
     return acct
 
 
-def test_t_exit_only_on_target_spread_not_overnight_forced():
-    """隔夜 T 仓（t_qty != today_t_buy_qty）价格未达目标 → 不强制 T+1 卖出。"""
-    acct = _exit_account()
+def _net_target(strat: LayeredTStrategy, avg_price: float = 100.0) -> float:
+    """净利止盈目标价 = 均价 ×(1 + 净目标 + 往返成本率)，与 strategy 实现同口径。"""
+    return avg_price * (1 + strat.config.t_target_net_spread + strat._t_roundtrip_cost())
+
+
+def test_t_exit_net_profit_target_triggers_same_day():
+    """T0 当日达到净利目标价 → 平T，reason=T净利止盈（当天做完，不等 T1）。"""
+    acct = _exit_account(t_qty=1_000, t_cost=100_000.0, today_t_qty=1_000)  # 当日新建仓
     strat = LayeredTStrategy(acct.config)
     strat.start_day(True)
-    # 隔夜：today_t_buy_qty=0 而 t_qty=1000 → 旧逻辑会强制平，新逻辑不卖
-    assert acct.position(SYM).t_qty != acct.position(SYM).today_t_buy_qty
-    bar = _m5(datetime(2026, 11, 10, 10, 40), 100.9)  # < 目标 101.5
-    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
-
-
-def test_t_exit_not_forced_at_1450():
-    """尾盘 14:50 价格未达目标 → 不再强制轧平（去掉旧 14:50 轧平）。"""
-    acct = _exit_account()
-    strat = LayeredTStrategy(acct.config)
-    strat.start_day(True)
-    bar = _m5(datetime(2026, 11, 10, 14, 50), 100.9)  # 未达目标 101.5
-    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
-
-
-def test_t_exit_triggers_on_target_spread():
-    """价格达到 均价*(1+t_target_spread) → 平T，reason=T目标价差。"""
-    acct = _exit_account(t_qty=1_000, t_cost=100_000.0)  # 均价 100，目标 101.5
-    strat = LayeredTStrategy(acct.config)
-    strat.start_day(True)
-    bar = _m5(datetime(2026, 11, 10, 10, 40), 101.6)  # >= 目标 101.5
+    target = _net_target(strat, 100.0)  # ≈103.09
+    bar = _m5(datetime(2026, 11, 10, 10, 40), round(target, 2) + 0.1)
     requests = strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08)
     assert len(requests) == 1
     assert requests[0].side == "SELL" and requests[0].purpose == "T"
-    assert requests[0].reason == "T目标价差"
+    assert requests[0].reason == "T净利止盈"
     assert requests[0].quantity == 1_000
     assert strat.t_exit_submitted is True
 
 
-def test_t_exit_can_carry_multiple_days_until_target():
-    """T 仓跨多日持有：连续多日未达目标都不卖，直到某日达目标才平。"""
-    acct = _exit_account()
+def test_net_profit_target_includes_roundtrip_cost():
+    """目标价含往返成本：价格刚好等于 均价×(1+净目标)（未含成本）时不应平T。"""
+    acct = _exit_account(t_qty=1_000, t_cost=100_000.0, today_t_qty=1_000)
     strat = LayeredTStrategy(acct.config)
     strat.start_day(True)
-    for day_offset, price in [(0, 100.5), (1, 101.0), (2, 101.4)]:
-        ts = datetime(2026, 11, 10 + day_offset, 10, 40)
-        bar = _m5(ts, price)  # 均未达 101.5
-        assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == [], (
-            f"第{day_offset}日未达目标不应平T"
-        )
-    # 第三日达目标 → 平T
-    bar = _m5(datetime(2026, 11, 13, 10, 40), 101.6)
+    assert strat._t_roundtrip_cost() > 0  # 成本率 > 0，才会抬高目标价
+    bare_target = 100.0 * (1 + strat.config.t_target_net_spread)  # 103.0，未含成本
+    bar = _m5(datetime(2026, 11, 10, 10, 40), round(bare_target, 2))
+    assert bar.close < _net_target(strat, 100.0)  # 确认它低于含成本目标
+    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
+
+
+def test_t1_cutoff_forces_exit_at_1450():
+    """T1 隔夜仓到 14:50 截止仍未止盈 → 无条件强平，reason=T+1尾盘截止平T。"""
+    acct = _exit_account(t_qty=1_000, t_cost=100_000.0, today_t_qty=0)  # 隔夜仓
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 14, 50), 101.0)  # 未达净利目标 ≈103.09
     requests = strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08)
-    assert len(requests) == 1 and requests[0].reason == "T目标价差"
+    assert len(requests) == 1
+    assert requests[0].side == "SELL" and requests[0].purpose == "T"
+    assert requests[0].reason == "T+1尾盘截止平T"
+    assert requests[0].quantity == 1_000
+
+
+def test_t0_not_forced_at_cutoff():
+    """T0 当日新建仓到 14:50 截止 → 不强平（可持有到 T1），仅隔夜仓触发截止。"""
+    acct = _exit_account(t_qty=1_000, t_cost=100_000.0, today_t_qty=1_000)  # 当日仓
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 14, 50), 101.0)  # 未达净利目标
+    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
+
+
+def test_t1_before_cutoff_not_forced():
+    """T1 隔夜仓在截止时间前（10:40）未达止盈 → 不强平（还有时间等止盈）。"""
+    acct = _exit_account(t_qty=1_000, t_cost=100_000.0, today_t_qty=0)
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 10, 40), 101.0)  # 未达净利目标
+    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
+
+
+def test_t_exit_config_validation():
+    """新配置项校验：净利止盈须在 (0,1)，截止时间须为合法 HH:MM。"""
+    import pytest
+    with pytest.raises(ValueError):
+        StrategyConfig(t_target_net_spread=0.0)
+    with pytest.raises(ValueError):
+        StrategyConfig(t_target_net_spread=1.5)
+    with pytest.raises(ValueError):
+        StrategyConfig(t_exit_cutoff="25:00")
+    with pytest.raises(ValueError):
+        StrategyConfig(t_exit_cutoff="not-a-time")
+    # 合法值可正常构造
+    ok = StrategyConfig(t_target_net_spread=0.03, t_exit_cutoff="14:50")
+    assert ok.t_target_net_spread == 0.03 and ok.t_exit_cutoff == "14:50"

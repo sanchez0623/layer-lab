@@ -162,15 +162,15 @@ class AccountConfigRequest(BaseModel):
     """POST /api/paper/accounts/{id}/config 的局部更新：只接受策略（非费率）字段。
 
     费率字段（commission_rate 等）归 /fees 端点管，这里显式拒绝，避免两处写同一
-    状态打架。改完立刻生效：策略每根 K 线都从 account.config 读取（如 T 仓
-    t_target_spread），下一根 K 的操作即用新值。
+    状态打架。改完立刻生效：策略每根 K 线都从 account.config 读取（如做T净利止盈
+    t_target_net_spread、T+1截止 t_exit_cutoff），下一根 K 的操作即用新值。
     """
 
     model_config = ConfigDict(extra="forbid")
 
     enable_t: bool | None = None
-    t_target_spread: float | None = Field(default=None, ge=0, le=1)
-    t_order_amount: float | None = Field(default=None, gt=0)
+    t_target_net_spread: float | None = Field(default=None, ge=0, le=1)
+    t_exit_cutoff: str | None = Field(default=None, pattern=r"^\d{1,2}:\d{2}$")
 
 
 class PaperOrderRequest(BaseModel):
@@ -263,7 +263,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.4.1",
+        version="1.5.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1273,8 +1273,8 @@ def create_app() -> FastAPI:
     def apply_paper_config(account_id: str, request: AccountConfigRequest):
         """局部更新模拟账户的策略配置（非费率）；下一根 K 线起的新操作立刻生效。
 
-        策略每根 K 线都从 account.config 读取（如做T目标价差 t_target_spread），
-        因此改完无需重启或重建账户。费率字段请走 /fees 端点，这里不收。
+        策略每根 K 线都从 account.config 读取（如做T净利止盈 t_target_net_spread、
+        T+1截止 t_exit_cutoff），因此改完无需重启或重建账户。费率字段请走 /fees 端点，这里不收。
         """
         account = get_paper(account_id)
         patch = request.model_dump(exclude_none=True)
