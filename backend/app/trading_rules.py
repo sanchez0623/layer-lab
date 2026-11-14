@@ -230,6 +230,60 @@ def validate_order_amount(
     return ""
 
 
+def order_share_cap(symbol: str, order_type: str = "MARKET") -> float:
+    """该标的该委托类型的单笔申报上限（股）；0 表示未建模（合成标的回退口径）。"""
+    rules = rules_for(symbol)
+    return rules.limit_order_cap if order_type.upper() == "LIMIT" else rules.market_order_cap
+
+
+def split_quantity(symbol: str, quantity: int, order_type: str = "MARKET") -> list[int]:
+    """把一笔委托数量按板块单笔申报上限拆成多笔合规子单数量。
+
+    背景：清仓/止盈常需一次卖出整个持仓（如创业板 176,200 股），但交易所对
+    单笔市价申报有上限（创业板/科创板市价 5 万股），整笔提交必被拒。此函数
+    返回每笔都 ``<= cap`` 且满足 ``min_qty``/``step`` 的子单数量，供 broker
+    逐笔提交。
+
+    规则：
+    - ``quantity <= 0`` → ``[]``；未超额或该板块未建模上限（合成标的）→ 原样一笔。
+    - 每笔按 ``cap`` 向下取整到 ``step`` 的整数倍，保证子单自身合法。
+    - 余数不足 ``min_qty`` 时，从上一笔「借」``step`` 的整数倍补齐；借不出且
+      能并入上一笔且仍在上限内时并入。
+    - 整笔持仓低于 ``min_qty`` 的零股清仓 → 单笔返回，走 broker 零股整笔卖出通道。
+    """
+    qty = int(quantity)
+    if qty <= 0:
+        return []
+    rules = rules_for(symbol)
+    cap = order_share_cap(symbol, order_type)
+    if cap <= 0 or qty <= cap:
+        return [qty]
+    step = max(1, rules.step)
+    min_qty = rules.min_qty
+    chunk = int(cap) - (int(cap) % step) if step > 1 else int(cap)
+    if chunk < min_qty:
+        # 上限连最小申报都放不下：无法拆分，交回原数量由 broker 给出拒绝原因。
+        return [qty]
+    chunks: list[int] = []
+    remaining = qty
+    while remaining > chunk:
+        chunks.append(chunk)
+        remaining -= chunk
+    if remaining > 0:
+        if remaining < min_qty and chunks:
+            need = min_qty - remaining
+            borrow = ((need + step - 1) // step) * step if step > 1 else need
+            if chunks[-1] - borrow >= min_qty:
+                chunks[-1] -= borrow
+                remaining += borrow
+            elif chunks[-1] + remaining <= chunk:
+                chunks[-1] += remaining
+                remaining = 0
+        if remaining > 0:
+            chunks.append(remaining)
+    return chunks
+
+
 def limit_pct_for(symbol: str) -> float:
     """标的的涨跌幅限制（小数）。合成标的回退 0.20，由调用方再叠加 config 覆盖。"""
     return rules_for(symbol).limit_pct

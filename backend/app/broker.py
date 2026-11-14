@@ -9,7 +9,7 @@ from .domain import (
     Bar, FeeBreakdown, Fill, Order, OrderRequest, Position, StrategyConfig, money, price, utc_now,
 )
 from .trading_rules import (
-    BoardRules, rules_for, validate_order_amount, validate_quantity,
+    BoardRules, rules_for, split_quantity, validate_order_amount, validate_quantity,
 )
 
 
@@ -239,6 +239,25 @@ class BrokerAccount:
                 order.message = f"T+1可卖数量不足: 请求{quantity}, 可卖{sellable}"
         self.orders.append(order)
         return order
+
+    def submit_split(self, request: OrderRequest, timestamp: datetime | str | None = None) -> list[Order]:
+        """按板块单笔申报上限拆分后逐笔提交策略委托。
+
+        策略层（清仓/止盈/做 T）按「整笔数量」生成请求，但交易所对单笔市价/限价
+        申报有股数上限（创业板/科创板市价 5 万股），整笔提交会被拒。这里统一
+        拆分，保证回测与模拟盘自动策略共用同一口径；手工委托仍走 ``submit``，
+        保持「超额即拒绝」的真实反馈。子单复用同一 reason/execution_mode，
+        成交与费用在撮合时逐笔累计。
+        """
+        orders: list[Order] = []
+        for quantity in split_quantity(request.symbol, request.quantity, request.order_type):
+            orders.append(self.submit(OrderRequest(
+                symbol=request.symbol, side=request.side, quantity=quantity,
+                order_type=request.order_type, limit_price=request.limit_price,
+                purpose=request.purpose, execution_mode=request.execution_mode,
+                reason=request.reason,
+            ), timestamp))
+        return orders
 
     def cancel(self, order_id: str) -> bool:
         for order in self.orders:

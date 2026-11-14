@@ -55,6 +55,10 @@ export interface StrategyConfig {
   t_exit_cutoff?: string;
   /** 已废弃：做T金额现跟随当前加仓档 installment_amounts[sequence_index]（满仓后取最大档），本字段不再参与做T计算，仅为兼容后端 config 保留 */
   t_order_amount?: number;
+  /** 超期降阈：持有 ≥ 该交易日数后，价格轨/账户轨止盈阈值降为 holding_tp_override；与 holding_tp_override 必须同时配置 */
+  max_holding_days?: number | null;
+  /** 超期降阈后的止盈阈值（小数，0.03 = 3%）；与 max_holding_days 必须同时配置 */
+  holding_tp_override?: number | null;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {

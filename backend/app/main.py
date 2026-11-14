@@ -188,6 +188,10 @@ class AccountConfigRequest(BaseModel):
     enable_t: bool | None = None
     t_target_net_spread: float | None = Field(default=None, ge=0, le=1)
     t_exit_cutoff: str | None = Field(default=None, pattern=r"^\d{1,2}:\d{2}$")
+    # 超期降阈：持有 ≥N 交易日后止盈降到 override。两项需同时配置才生效
+    # （strategy._effective_take_profit 任一为 None 即维持原止盈）。
+    max_holding_days: int | None = Field(default=None, ge=1, le=250)
+    holding_tp_override: float | None = Field(default=None, ge=0, le=1)
 
 
 class ApplyConfigRequest(BaseModel):
@@ -618,8 +622,8 @@ def create_app() -> FastAPI:
                     index_history=index_history, session_index=session_index,
                 )
                 for request in intraday_requests:
-                    if request.quantity >= 100:
-                        account.submit(request, bar.timestamp)
+                    if request.quantity > 0:
+                        account.submit_split(request, bar.timestamp)
 
             if daily_close:
                 daily_close_history = [item for item in (daily_history or []) if item.date <= bar.date]
@@ -638,8 +642,8 @@ def create_app() -> FastAPI:
                         bar.timeframe != "daily",
                     )
                     for request in daily_requests:
-                        if request.quantity >= 100:
-                            account.submit(request, bar.timestamp)
+                        if request.quantity > 0:
+                            account.submit_split(request, bar.timestamp)
                     account.last_daily_signal_date = bar.date
             account.strategy_state = strategy.state_dict()
             account.armed_state = "ARMED" if strategy.armed else ("EXIT" if strategy.liquidating else "OFF")
