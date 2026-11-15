@@ -228,3 +228,88 @@ def test_main_report_is_slimmed_no_full_records(api):
     # 分页端点仍能读到全量（落库未瘦身）
     paged = client.get("/api/backtests/bt_12/records/trades?page=1&page_size=45").json()
     assert paged["total"] == 45 and len(paged["items"]) == 45
+
+
+# ------------------------------------------------- 成交明细 symbol/purpose 过滤 --
+
+def _report_with_mixed_trades(report_id: str) -> dict:
+    """造一份多标的、多用途的回测报告，供搜索过滤测试。"""
+    trades = [
+        {"id": "t0", "symbol": "sh.688200", "side": "buy", "purpose": "PERMANENT",
+         "timestamp": "2026-01-05T09:30:00", "price": 10.0, "quantity": 100, "amount": 1000.0},
+        {"id": "t1", "symbol": "sz.000001", "side": "sell", "purpose": "T",
+         "timestamp": "2026-01-06T09:30:00", "price": 11.0, "quantity": 100, "amount": 1100.0},
+        {"id": "t2", "symbol": "sh.600519", "side": "buy", "purpose": "T",
+         "timestamp": "2026-01-07T09:30:00", "price": 12.0, "quantity": 100, "amount": 1200.0},
+        {"id": "t3", "symbol": "sz.159915", "side": "buy", "purpose": "BETA",
+         "timestamp": "2026-01-08T09:30:00", "price": 13.0, "quantity": 100, "amount": 1300.0},
+    ]
+    return {
+        "id": report_id, "name": "成交明细搜索测试", "status": "COMPLETED",
+        "created_at": "2026-11-15T00:00:00", "config": {}, "metrics": {},
+        "equity_curve": [], "trades": trades, "orders": [], "rounds": [],
+        "events": [], "warnings": [], "data_info": {"mode": "single"},
+    }
+
+
+def test_records_filter_by_symbol_substring(api):
+    """标的子串匹配：6 位代码 / 带前缀代码都能命中，大小写不敏感。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_20"))
+
+    body = client.get("/api/backtests/bt_20/records/trades?symbol=688200").json()
+    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t0"]
+
+    body = client.get("/api/backtests/bt_20/records/trades?symbol=SH.600519").json()
+    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t2"]
+
+    # 无命中
+    body = client.get("/api/backtests/bt_20/records/trades?symbol=999999").json()
+    assert body["total"] == 0 and body["items"] == []
+
+
+def test_records_filter_by_purpose_raw_and_label(api):
+    """用途过滤：原始枚举值（T / BETA）与中文标签（永久仓）都可命中。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_21"))
+
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=T").json()
+    assert body["total"] == 2 and [t["id"] for t in body["items"]] == ["t1", "t2"]
+
+    # 中文标签「永久仓」映射回 PERMANENT
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=%E6%B0%B8%E4%B9%85%E4%BB%93").json()
+    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t0"]
+
+    # 中文标签「t仓」命中两个 T 仓
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=t%E4%BB%93").json()
+    assert body["total"] == 2
+
+    # BETA 无中文标签，按原始值命中
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=beta").json()
+    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t3"]
+
+
+def test_records_filter_combined_and_total_reflects_filter(api):
+    """symbol + purpose 组合过滤；total / 分页口径基于过滤后条数。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_22"))
+
+    body = client.get("/api/backtests/bt_22/records/trades?symbol=sz&purpose=T").json()
+    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t1"]
+
+    # 组合无命中
+    body = client.get("/api/backtests/bt_22/records/trades?symbol=688200&purpose=T").json()
+    assert body["total"] == 0 and body["total_pages"] == 0
+
+    # 不带过滤参数时行为不变（回归）
+    body = client.get("/api/backtests/bt_22/records/trades?page=1&page_size=2").json()
+    assert body["total"] == 4 and len(body["items"]) == 2
+
+
+def test_records_filter_blank_params_ignored(api):
+    """空串 / 纯空白的过滤参数视同不过滤。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_23"))
+
+    body = client.get("/api/backtests/bt_23/records/trades?symbol=&purpose=%20%20").json()
+    assert body["total"] == 4

@@ -326,6 +326,30 @@ def _slim_records(report: dict) -> dict:
     return report
 
 
+# 用途（purpose）的中文展示标签，与前端 lib/format.ts purposeLabel 口径一致，
+# 仅供成交明细搜索框把「永久仓 / T仓」这类中文关键词映射回原始枚举值做子串匹配。
+_PURPOSE_LABELS: dict[str, str] = {
+    "permanent": "永久仓",
+    "t": "t仓",
+    "t_buy": "t仓买入",
+    "t_sell": "t仓卖出",
+    "open": "建仓",
+    "close": "清仓",
+    "take_profit": "止盈",
+}
+
+
+def _purpose_matches(purpose: Any, query: str) -> bool:
+    """用途过滤：原始枚举值全等（大小写不敏感）或中文标签子串命中。
+
+    不对原始值做子串匹配——'T' 是 'PERMANENT'/'BETA' 的子串，会误命中。
+    标签（永久仓 / T仓 / T仓买入…）允子串，方便只输「永久」「t仓」这类前缀。
+    """
+    raw = str(purpose or "").strip().lower()
+    label = _PURPOSE_LABELS.get(raw, "")
+    return bool(query) and (query == raw or (label != "" and query in label))
+
+
 def create_app() -> FastAPI:
     data_dir = Path(os.environ.get("WB_DATA_DIR", str(BASE_DIR / "data")))
     upload_dir = data_dir / "uploads"
@@ -333,7 +357,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.0.5",
+        version="2.0.6",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1495,16 +1519,26 @@ def create_app() -> FastAPI:
         backtest_id: str,
         kind: Literal["trades", "orders", "rounds", "events"],
         params: tuple[int, int] = Depends(page_params),
+        symbol: str | None = Query(None, description="按标的过滤（子串匹配，如 688200 / sh.688200）"),
+        purpose: str | None = Query(None, description="按用途过滤：原始值（T/BETA/PERMANENT）全等，中文标签（永久仓/T仓）支持子串"),
     ):
         """成交明细 / 委托记录 / 已结束轮次 / 事件 分页：后台切片返回。
 
         主报告已瘦身不含全量明细（只留 ``*_total``），这里按页下发，
         避免长回测一次性传输 / 渲染成千上万行导致 REPORT 卡顿。
+        支持可选 ``symbol`` / ``purpose`` 子串过滤（成交明细页搜索框用），
+        过滤在切片前完成，total 反映过滤后条数，分页口径不变。
         """
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
         rows = report.get(kind) or []
+        symbol_q = (symbol or "").strip().lower()
+        purpose_q = (purpose or "").strip().lower()
+        if symbol_q:
+            rows = [r for r in rows if symbol_q in str(r.get("symbol") or "").lower()]
+        if purpose_q:
+            rows = [r for r in rows if _purpose_matches(r.get("purpose"), purpose_q)]
         page, page_size = params
         return paginate(rows, page=page, page_size=page_size)
 

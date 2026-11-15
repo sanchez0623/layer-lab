@@ -152,12 +152,18 @@ export const api = {
       `/backtests/${encodeURIComponent(id)}/rotation-trail${query({ page: String(page), page_size: String(pageSize) })}`,
     ),
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
+  // filters 可选（仅成交明细用）：symbol / purpose 后端子串过滤，total 为过滤后条数。
   backtestRecords: <K extends 'trades' | 'orders' | 'rounds'>(
     id: string, kind: K, page = 1, pageSize = 20,
-  ) =>
-    request<Paginated<{ trades: Trade; orders: Order; rounds: Round }[K]>>(
-      `/backtests/${encodeURIComponent(id)}/records/${kind}${query({ page: String(page), page_size: String(pageSize) })}`,
-    ),
+    filters?: { symbol?: string; purpose?: string },
+  ) => {
+    const params: Record<string, string> = { page: String(page), page_size: String(pageSize) };
+    if (filters?.symbol) params.symbol = filters.symbol;
+    if (filters?.purpose) params.purpose = filters.purpose;
+    return request<Paginated<{ trades: Trade; orders: Order; rounds: Round }[K]>>(
+      `/backtests/${encodeURIComponent(id)}/records/${kind}${query(params)}`,
+    );
+  },
   createAccount: (payload: CreateAccountRequest) => request<AccountState>('/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   currentAccount: () => request<AccountState>('/paper/accounts/current'),
   account: (id: string) => request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}`),

@@ -163,6 +163,10 @@ export default function BacktestPage() {
   const [recordPage, setRecordPage] = useState(1);
   const [recordPageSize, setRecordPageSize] = useState(20);
   const [recordLoading, setRecordLoading] = useState(false);
+  // 成交明细搜索（标的 / 用途）：草稿即时回显，防抖 300ms 后提交服务端过滤并回到第一页。
+  const [tradeFilterDraft, setTradeFilterDraft] = useState({ symbol: '', purpose: '' });
+  const [tradeFilter, setTradeFilter] = useState({ symbol: '', purpose: '' });
+  const tradeFilterActive = Boolean(tradeFilter.symbol.trim() || tradeFilter.purpose.trim());
   // 工作台视图：运行回测 / 回测报告。报告列表走后台分页 + 服务端搜索，列表项只含轻量摘要。
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('run');
   const [viewingReport, setViewingReport] = useState(false);
@@ -541,16 +545,26 @@ export default function BacktestPage() {
   // 成交 / 委托 / 轮次 明细分页：切 tab 或翻页时按需拉取当前 tab 的一页。
   useEffect(() => { setRecordPage(1); }, [report?.id, tableTab]);
 
+  // 成交明细搜索：切 tab / 换报告时清空；草稿防抖 300ms 后才提交服务端过滤。
+  useEffect(() => { setTradeFilterDraft({ symbol: '', purpose: '' }); setTradeFilter({ symbol: '', purpose: '' }); }, [report?.id, tableTab]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setTradeFilter(tradeFilterDraft), 300);
+    return () => window.clearTimeout(timer);
+  }, [tradeFilterDraft]);
+
   useEffect(() => {
     if (!report) { setRecordData(null); return; }
     let cancelled = false;
     setRecordLoading(true);
-    api.backtestRecords(report.id, tableTab, recordPage, recordPageSize)
+    const filters = tableTab === 'trades' && tradeFilterActive
+      ? { symbol: tradeFilter.symbol.trim(), purpose: tradeFilter.purpose.trim() }
+      : undefined;
+    api.backtestRecords(report.id, tableTab, recordPage, recordPageSize, filters)
       .then((paged) => { if (!cancelled) setRecordData(paged); })
       .catch(() => { if (!cancelled) setRecordData(null); })
       .finally(() => { if (!cancelled) setRecordLoading(false); });
     return () => { cancelled = true; };
-  }, [report, tableTab, recordPage, recordPageSize]);
+  }, [report, tableTab, recordPage, recordPageSize, tradeFilter, tradeFilterActive]);
 
   // 报告搜索防抖：输入 300ms 后才提交服务端查询，并回到第一页。
   useEffect(() => {
@@ -580,13 +594,29 @@ export default function BacktestPage() {
     return () => { cancelled = true; };
   }, [workspaceTab, viewingReport, reportQuery, reportPage, reportPageSize, reportListVersion]);
 
-  // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片）。
-  const recordItems = useMemo<any[]>(() => {
-    if (recordData) return recordData.items;
+  // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片；成交明细搜索在本地同样过滤）。
+  const { recordItems, filteredTotal } = useMemo(() => {
+    if (recordData) return { recordItems: recordData.items, filteredTotal: recordData.total };
     const local = tableTab === 'rounds' ? report?.rounds : tableTab === 'trades' ? report?.trades : report?.orders;
+    let list: any[] = local ?? [];
+    if (tableTab === 'trades' && tradeFilterActive) {
+      const sym = tradeFilter.symbol.trim().toLowerCase();
+      const pur = tradeFilter.purpose.trim().toLowerCase();
+      list = list.filter((item: any) => {
+        if (sym && !String(item.symbol ?? '').toLowerCase().includes(sym)) return false;
+        if (pur) {
+          // 与后端口径一致：原始枚举值全等，或中文标签（永久仓/T仓…）子串命中；
+          // 不对原始值做子串匹配——'t' 会误命中 permanent / beta。
+          const raw = String(item.purpose ?? '').trim().toLowerCase();
+          const label = purposeLabel(item.purpose).toLowerCase();
+          if (pur !== raw && (label === '—' || !label.includes(pur))) return false;
+        }
+        return true;
+      });
+    }
     const start = (recordPage - 1) * recordPageSize;
-    return (local ?? []).slice(start, start + recordPageSize);
-  }, [recordData, tableTab, report, recordPage, recordPageSize]);
+    return { recordItems: list.slice(start, start + recordPageSize), filteredTotal: list.length };
+  }, [recordData, tableTab, report, recordPage, recordPageSize, tradeFilter, tradeFilterActive]);
 
   return (
     <div className="animate-[page-in_.22s_ease-out]">
@@ -912,6 +942,13 @@ export default function BacktestPage() {
                       </TabsList>
                     </Tabs>
                     <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"><Clock3 className="size-3" />按时间顺序记录</span>
+                    {tableTab === 'trades' && (
+                      <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
+                        <div className="relative w-36"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={tradeFilterDraft.symbol} onChange={(event) => setTradeFilterDraft((current) => ({ ...current, symbol: event.target.value }))} placeholder="标的代码" aria-label="按标的搜索成交明细" className="pl-8 text-[12px]" /></div>
+                        <Input value={tradeFilterDraft.purpose} onChange={(event) => setTradeFilterDraft((current) => ({ ...current, purpose: event.target.value }))} placeholder="用途（如 永久仓 / T仓）" aria-label="按用途搜索成交明细" className="w-44 text-[12px]" />
+                        {tradeFilterActive && <button className="text-[11px] text-primary hover:underline" type="button" onClick={() => setTradeFilterDraft({ symbol: '', purpose: '' })}>清空搜索</button>}
+                      </div>
+                    )}
                   </div>
                   {tableTab === 'rounds' && <Table><TableHeader><TableRow><TableHead>轮次</TableHead><TableHead>开始时间</TableHead><TableHead>结束时间</TableHead><TableHead className="text-right">最大投入</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead className="text-right">收益率</TableHead><TableHead className="text-right">成交数</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
                     {roundsTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : recordItems.map((round, index) => {
@@ -922,13 +959,13 @@ export default function BacktestPage() {
                     })}
                   </TableBody></Table>}
                   {tableTab === 'trades' && <Table><TableHeader><TableRow><TableHead>成交时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>用途</TableHead><TableHead className="text-right">价格</TableHead><TableHead className="text-right">数量</TableHead><TableHead className="text-right">成交额</TableHead><TableHead className="text-right">费用</TableHead><TableHead className="text-right">已实现盈亏</TableHead></TableRow></TableHeader><TableBody>
-                    {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : recordItems.map((trade, index) => <TableRow key={String(trade.id ?? `${trade.timestamp}-${index}`)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
+                    {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : tradeFilterActive && recordItems.length === 0 ? <TableEmpty colSpan={9} message="没有符合条件的成交记录" /> : recordItems.map((trade, index) => <TableRow key={String(trade.id ?? `${trade.timestamp}-${index}`)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
                   </TableBody></Table>}
                   {tableTab === 'orders' && <Table><TableHeader><TableRow><TableHead>委托时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>类型</TableHead><TableHead className="text-right">限价</TableHead><TableHead className="text-right">委托数量</TableHead><TableHead className="text-right">已成交</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
                     {ordersTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : recordItems.map((order) => <TableRow key={order.id}><TableCell>{dateTime(order.created_at || order.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={order.symbol}>{displaySymbol(order.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(order.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(order.side)}</span></TableCell><TableCell>{orderTypeLabel(order.order_type || order.type)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(order.limit_price ?? order.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.filled_quantity ?? order.filled_qty)}</TableCell><TableCell><Badge>{statusLabel(order.status)}</Badge></TableCell></TableRow>)}
                   </TableBody></Table>}
                   <div className="px-4 pb-4">
-                    <PaginationBar page={recordData?.page ?? recordPage} pageSize={recordData?.page_size ?? recordPageSize} total={tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal} totalPages={recordData?.total_pages ?? Math.max(1, Math.ceil((tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal) / recordPageSize))} onPageChange={setRecordPage} onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }} disabled={recordLoading} />
+                    <PaginationBar page={recordData?.page ?? recordPage} pageSize={recordData?.page_size ?? recordPageSize} total={tableTab === 'trades' && tradeFilterActive ? filteredTotal : (tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal)} totalPages={recordData?.total_pages ?? Math.max(1, Math.ceil((tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal) / recordPageSize))} onPageChange={setRecordPage} onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }} disabled={recordLoading} />
                   </div>
                 </Panel>
               </div>
