@@ -13,9 +13,14 @@ services:
     container_name: layer-lab
     restart: unless-stopped
     # OOM 豁免：宿主机仅 1.8G RAM，夜间 quan 数据更新器的全表 flush 会顶高内存。
-    # 调低 oom_score_adj 让内核 OOM 时优先杀可断点续跑的更新器，而不是本容器后端。
-    # （更新器脚本同时把自己 oom_score_adj 设为 1000，双保险。）
-    oom_score_adj: -800
+    # docker compose v2.27 不把 service 级 oom_score_adj 传给 HostConfig（实测 config 无此字段），
+    # 因此改用「容器启动时自设」：command 里先 echo -800 > /proc/self/oom_score_adj 再 exec 原入口。
+    # - cap_add SYS_RESOURCE：写负 oom_score_adj 需要该 cap（容器默认没有，实测写 -500 失败）
+    # - command 覆盖：sh 设自身 -800 后 exec /app/deploy/start.sh，uvicorn/nginx 继承 -800
+    # 更新器侧另有 oom_protect.sh 把自己 oom_score_adj 设 1000（OOM 时优先被杀、可续跑），双保险。
+    cap_add:
+      - SYS_RESOURCE
+    command: ["/bin/sh", "-c", "echo -800 > /proc/self/oom_score_adj; exec /app/deploy/start.sh"]
     ports:
       - "${HOST_PORT:-3011}:3000"
     environment:
