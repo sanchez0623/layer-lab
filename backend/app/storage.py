@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .domain import Dataset, utc_now
+from .pagination import paginate
 
 
 class SQLiteStorage:
@@ -109,25 +110,48 @@ class SQLiteStorage:
             row = connection.execute("SELECT payload FROM backtests WHERE id=?", (backtest_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
 
-    def list_backtests(self) -> list[dict[str, Any]]:
+    def query_backtests(
+        self, query: str | None = None, page: int = 1, page_size: int = 20
+    ) -> dict[str, Any]:
+        """回测报告列表：按 Report ID / 名称筛选 + 后台分页。
+
+        只查摘要列，不解析 payload：长回测单份 payload 可能达十几 MB，
+        列表若逐份读取并 JSON 解析会拖慢接口；指标与 data_info 由详情端点下发。
+        """
+        where = ""
+        args: list[Any] = []
+        text = (query or "").strip()
+        if text:
+            # 先转义反斜杠，再转义 LIKE 通配符，避免用户输入的 % / _ 被当成通配符。
+            escaped = text.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern = f"%{escaped}%"
+            where = " WHERE lower(id) LIKE ? ESCAPE '\\' OR lower(name) LIKE ? ESCAPE '\\'"
+            args = [pattern, pattern]
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id,name,status,created_at,payload FROM backtests ORDER BY created_at DESC,id"
+                f"SELECT id,name,status,created_at FROM backtests{where} ORDER BY created_at DESC,id",
+                args,
             ).fetchall()
-        result = []
-        for row in rows:
-            report = json.loads(row["payload"])
-            metrics = report.get("metrics", {})
-            result.append({
-                "id": row["id"], "name": row["name"], "status": row["status"],
-                "created_at": row["created_at"],
-                "final_equity": metrics.get("final_equity"),
-                "total_return": metrics.get("total_return"),
-                "max_drawdown": metrics.get("max_drawdown"),
-                "total_trades": metrics.get("total_trades"),
-                "data_info": report.get("data_info", {}),
-            })
-        return result
+        headers = [
+            {
+                "id": row["id"], "name": row["name"],
+                "status": row["status"], "created_at": row["created_at"],
+            }
+            for row in rows
+        ]
+        return paginate(headers, page=page, page_size=page_size)
+
+    def delete_backtest(self, backtest_id: str) -> bool:
+        """删除回测报告，并级联清理同 ID 的后台任务与断点。
+
+        报告 payload 本身已包含成交 / 委托 / 轮次 / 事件 / 换票轨迹，删行即一并清除；
+        数据集、选股运行记录、模拟账户属于共享资源，不在此处删除。
+        """
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute("DELETE FROM backtests WHERE id=?", (backtest_id,))
+            connection.execute("DELETE FROM backtest_checkpoints WHERE job_id=?", (backtest_id,))
+            connection.execute("DELETE FROM backtest_jobs WHERE id=?", (backtest_id,))
+        return cursor.rowcount > 0
 
     def save_paper(self, state: dict[str, Any]) -> None:
         payload = json.dumps(state, ensure_ascii=False, allow_nan=False)

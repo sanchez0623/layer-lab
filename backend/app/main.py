@@ -325,7 +325,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.6.1",
+        version="1.7.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1331,8 +1331,25 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc))
 
     @application.get("/api/backtests")
-    def backtests():
-        return storage.list_backtests()
+    def backtests(
+        q: str | None = Query(None, max_length=200),
+        params: tuple[int, int] = Depends(page_params),
+    ):
+        """回测报告列表：支持按 Report ID / 名称搜索，后台分页返回轻量摘要。"""
+        page, page_size = params
+        return storage.query_backtests((q or "").strip() or None, page, page_size)
+
+    @application.delete("/api/backtests/{backtest_id}")
+    def delete_backtest(backtest_id: str):
+        """删除回测报告，并级联清理同 ID 的后台任务与断点。运行中的任务禁止删除。"""
+        job = storage.get_job(backtest_id)
+        if job is not None and job["status"] in {"RUNNING", "CANCELLING"}:
+            raise HTTPException(status_code=409, detail="回测正在运行，不能删除；请先停止或等待完成。")
+        if storage.get_backtest(backtest_id) is None:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        if not storage.delete_backtest(backtest_id):
+            raise HTTPException(status_code=404, detail="回测不存在")
+        return {"deleted": True, "id": backtest_id}
 
     @application.get("/api/backtests/{backtest_id}")
     def backtest(backtest_id: str):

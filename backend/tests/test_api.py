@@ -51,7 +51,8 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     assert report["data_info"]["is_synthetic"] is True
     assert any("降级" in item for item in report["warnings"])
     assert client.get(f"/api/backtests/{report['id']}").status_code == 200
-    assert len(client.get("/api/backtests").json()) == 1
+    listed = client.get("/api/backtests").json()
+    assert listed["total"] == 1 and len(listed["items"]) == 1
     exported = client.get(f"/api/backtests/{report['id']}/export?kind=orders")
     assert exported.status_code == 200
     assert "text/csv" in exported.headers["content-type"]

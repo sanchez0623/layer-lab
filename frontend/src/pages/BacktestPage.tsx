@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowDownToLine, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Play, RotateCcw, ShieldAlert, Square, TrendingDown, WalletCards,
+  Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Play, RefreshCw, RotateCcw, Search, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -37,6 +37,9 @@ const fallbackConfig: StrategyConfig = {
 /** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
 type BacktestMode = 'funnel' | 'single';
 
+/** 工作台子视图：run = 运行回测（配置 / 进度），reports = 回测报告（列表 / 搜索 / 删除 / 详情）。 */
+type WorkspaceTab = 'run' | 'reports';
+
 /** 后台作业终态：轮询到这些状态即停止。CANCELLED / INTERRUPTED / FAILED 可续跑。 */
 const JOB_TERMINAL_STATUSES = ['COMPLETED', 'CANCELLED', 'FAILED', 'INTERRUPTED'];
 const JOB_RESUMABLE_STATUSES = ['CANCELLED', 'INTERRUPTED', 'FAILED'];
@@ -69,7 +72,6 @@ const roundNumber = (round: Round, keys: string[]): number | undefined => {
 
 export default function BacktestPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
-  const [history, setHistory] = useState<BacktestSummary[]>([]);
   const [config, setConfig] = useState<StrategyConfig>(fallbackConfig);
   const [fees, setFees] = useState<FeeConfig>(defaultFeeConfig);
   const [datasetId, setDatasetId] = useState('');
@@ -109,12 +111,24 @@ export default function BacktestPage() {
   const [recordPage, setRecordPage] = useState(1);
   const [recordPageSize, setRecordPageSize] = useState(20);
   const [recordLoading, setRecordLoading] = useState(false);
+  // 工作台视图：运行回测 / 回测报告。报告列表走后台分页 + 服务端搜索，列表项只含轻量摘要。
+  const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('run');
+  const [viewingReport, setViewingReport] = useState(false);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportList, setReportList] = useState<Paginated<BacktestSummary> | null>(null);
+  const [reportPage, setReportPage] = useState(1);
+  const [reportPageSize, setReportPageSize] = useState(20);
+  const [reportSearch, setReportSearch] = useState('');
+  const [reportQuery, setReportQuery] = useState('');
+  const [reportListLoading, setReportListLoading] = useState(false);
+  const [reportListVersion, setReportListVersion] = useState(0);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadInitial = async () => {
     setLoading(true);
     setError('');
     try {
-      const [datasetResult, defaults, reports] = await Promise.all([api.datasets(), api.strategyDefaults(), api.backtests()]);
+      const [datasetResult, defaults] = await Promise.all([api.datasets(), api.strategyDefaults()]);
       setDatasets(datasetResult);
       // 重挂载时重新挂到仍在跑的后台作业（导航离开后服务端继续跑），避免丢失进度条。
       try {
@@ -196,8 +210,7 @@ export default function BacktestPage() {
           // 忽略损坏的 sessionStorage 数据
         }
       }
-      setHistory(reports);
-      if (reports.length > 0) setReport(await api.backtest(reports[0].id));
+      // 报告列表按需在「回测报告」tab 加载，进入页面不再自动拉取最新报告（大 payload 只在打开详情时读取）。
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '初始化失败，请检查后端服务。');
     } finally {
@@ -220,7 +233,7 @@ export default function BacktestPage() {
     }
   };
 
-  /** 作业到达终态后的收尾：COMPLETED 拉全量报告并刷新历史；终态保留在 jobView 供继续/放弃，直到用户处理。 */
+  /** 作业到达终态后的收尾：COMPLETED 拉全量报告并切到报告详情；终态保留在 jobView 供继续/放弃，直到用户处理。 */
   const settleJob = async (view: BacktestJobView) => {
     stopPolling();
     jobIdRef.current = view.id;
@@ -231,12 +244,17 @@ export default function BacktestPage() {
       try {
         const result = await api.backtest(view.id);
         setReport(result);
+        setViewingReport(true);
+        setWorkspaceTab('reports');
         setTableTab('rounds');
+        // 新报告是最新一份：清空搜索并刷新列表，返回列表时立即可见。
+        setReportSearch('');
+        setReportQuery('');
+        setReportPage(1);
+        setReportListVersion((current) => current + 1);
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : '回测报告读取失败。');
       }
-      const reports = await api.backtests().catch(() => null);
-      if (reports) setHistory(reports); else setHistory((current) => current);
     }
   };
 
@@ -359,11 +377,46 @@ export default function BacktestPage() {
 
   const loadReport = async (id: string) => {
     if (!id) return;
-    setLoading(true);
+    setWorkspaceTab('reports');
+    setViewingReport(true);
+    setReportLoading(true);
     setError('');
     try { setReport(await api.backtest(id)); }
     catch (cause) { setError(cause instanceof Error ? cause.message : '报告读取失败。'); }
-    finally { setLoading(false); }
+    finally { setReportLoading(false); }
+  };
+
+  /** 删除报告：二次确认后调用 DELETE，成功则清理当前详情 / 作业展示并刷新列表。 */
+  const removeReport = async (id: string, reportName: string) => {
+    if (!window.confirm(
+      `确定删除回测报告「${reportName}」吗？\n`
+      + `Report ID: ${id}\n`
+      + '将同步删除该报告的后台任务与检查点数据，且无法恢复。',
+    )) return;
+    setDeletingId(id);
+    setError('');
+    try {
+      const result = await api.deleteBacktest(id);
+      if (!result.deleted) setError('后端未找到该报告，可能已被其他会话删除。');
+      if (report?.id === id) {
+        setReport(null);
+        setViewingReport(false);
+        setTrailData(null);
+        setRecordData(null);
+      }
+      if (jobView?.id === id) {
+        settledJobIdsRef.current.add(id);
+        if (jobIdRef.current === id) jobIdRef.current = null;
+        setJobView(null);
+        setRunning(false);
+      }
+      setPendingNotice('回测报告已删除。');
+      setReportListVersion((current) => current + 1);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '删除回测报告失败。');
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   const exportCsv = async (kind: 'trades' | 'orders') => {
@@ -384,6 +437,11 @@ export default function BacktestPage() {
   // 漏斗轮动回测专属：每轮换票轨迹（选中日期/标的/入选依据/进出日期/盈亏）。
   // 主报告已瘦身不含全量 trail，改走 GET /backtests/{id}/rotation-trail 后台分页。
   const isFunnel = String(report?.data_info?.mode) === 'funnel_rotation';
+  // 数据血缘只读报告自身快照，避免查看旧报告时混入当前配置表单的数据集选择。
+  const reportDailySource = report ? String(report.data_info.daily_source || '—') : '—';
+  const reportIntradaySource = report?.data_info.intraday_source ? String(report.data_info.intraday_source) : null;
+  const reportIndexSource = report?.data_info.index_source ? String(report.data_info.index_source) : null;
+  const reportSynthetic = Boolean(report?.data_info.is_synthetic);
   const rotationTrail = useMemo<RotationTrailItem[]>(() => trailData?.items ?? [], [trailData]);
   // 换票轨迹行展开：查看该选股日的逐轮决策日志（为什么开门/关门/空仓/旁路几只）+ 漏斗计数。
   const [expandedTrails, setExpandedTrails] = useState<Set<string>>(new Set());
@@ -423,6 +481,34 @@ export default function BacktestPage() {
     return () => { cancelled = true; };
   }, [report, tableTab, recordPage, recordPageSize]);
 
+  // 报告搜索防抖：输入 300ms 后才提交服务端查询，并回到第一页。
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setReportPage(1);
+      setReportQuery(reportSearch.trim());
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [reportSearch]);
+
+  // 回测报告列表：仅在「回测报告」tab 的列表视图下按需加载；翻页 / 搜索 / 删除后刷新走同一入口。
+  useEffect(() => {
+    if (workspaceTab !== 'reports' || viewingReport) return;
+    let cancelled = false;
+    setReportListLoading(true);
+    api.backtests({ q: reportQuery || undefined, page: reportPage, pageSize: reportPageSize })
+      .then((data) => {
+        if (cancelled) return;
+        setReportList(data);
+        // 删除当前页最后一条时后端会把越界页收敛到上一页，这里同步回写触发重取。
+        if (data.page !== reportPage) setReportPage(data.page);
+      })
+      .catch((cause) => {
+        if (!cancelled) setError(cause instanceof Error ? cause.message : '回测报告列表读取失败。');
+      })
+      .finally(() => { if (!cancelled) setReportListLoading(false); });
+    return () => { cancelled = true; };
+  }, [workspaceTab, viewingReport, reportQuery, reportPage, reportPageSize, reportListVersion]);
+
   // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片）。
   const recordItems = useMemo<any[]>(() => {
     if (recordData) return recordData.items;
@@ -436,18 +522,36 @@ export default function BacktestPage() {
       <PageHeader
         eyebrow="RESEARCH / BACKTEST"
         title="回测工作台"
-        description="用可复核的数据与费用假设，检验分层双账本策略的完整生命周期。"
-        actions={history.length > 0 ? (
-          <select className="history-select" value={report?.id || ''} onChange={(event) => void loadReport(event.target.value)} aria-label="读取历史报告">
-            <option value="">读取历史报告</option>
-            {history.map((item) => <option key={item.id} value={item.id}>{item.name} · {shortDate(item.created_at)}</option>)}
-          </select>
-        ) : undefined}
+        description="运行新的策略实验，或检索、复查与清理历史回测报告。"
       />
 
       {error && <ErrorBanner message={error} onRetry={!report && !loading ? () => void loadInitial() : undefined} onClose={() => setError('')} />}
       {pendingNotice && <SuccessBanner onClose={() => setPendingNotice('')}>{pendingNotice}</SuccessBanner>}
 
+      <div className="workspace-tabs" role="tablist" aria-label="回测工作台视图">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={workspaceTab === 'run'}
+          className={`workspace-tab ${workspaceTab === 'run' ? 'active' : ''}`}
+          onClick={() => setWorkspaceTab('run')}
+        >
+          <Play size={15} />运行回测
+          {jobActive && <span className="workspace-tab-dot" title="有回测任务在运行" />}
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={workspaceTab === 'reports'}
+          className={`workspace-tab ${workspaceTab === 'reports' ? 'active' : ''}`}
+          onClick={() => setWorkspaceTab('reports')}
+        >
+          <BarChart3 size={15} />回测报告
+          {reportList && <span className="workspace-tab-count">{reportList.total}</span>}
+        </button>
+      </div>
+
+      {workspaceTab === 'run' && (
       <Panel className="config-panel">
         <form onSubmit={(event) => { event.preventDefault(); void run(); }} noValidate>
           <div className="config-topline">
@@ -620,21 +724,22 @@ export default function BacktestPage() {
           )}
         </form>
       </Panel>
+      )}
 
-      {loading && !report ? <Panel><Loading label="正在连接研究环境" /></Panel> : !report ? (
-        <Panel className="report-empty-panel">
-          <EmptyState
-            icon={<BarChart3 size={28} />}
-            title="等待第一组实验结果"
-            description="选择数据集并运行回测后，这里将呈现权益曲线、风险诊断与逐笔成交。未连接后端时不会生成替代结果。"
-            action={<div className="empty-steps"><span><b>1</b>配置数据</span><i /><span><b>2</b>运行实验</span><i /><span><b>3</b>复核风险</span></div>}
-          />
-        </Panel>
-      ) : metrics && (
-        <div className="report-content">
+      {workspaceTab === 'reports' && (
+        viewingReport ? (
+          reportLoading ? (
+            <Panel><Loading label="正在读取回测报告" /></Panel>
+          ) : report && metrics ? (
+            <div className="report-content">
+              <div className="report-detail-toolbar">
+                <button className="button secondary" type="button" onClick={() => setViewingReport(false)}>
+                  <ArrowLeft size={15} />返回报告列表
+                </button>
+              </div>
           <div className="report-titlebar">
             <div><div className="report-kicker"><Badge tone="indigo">{statusLabel(report.status)}</Badge><span>REPORT / {report.id.slice(0, 8).toUpperCase()}</span></div><h2>{report.name}</h2><p>生成于 {dateTime(report.created_at)} · 初始资金 {money(metrics.initial_cash, 0)}</p></div>
-            <div className="report-export"><button className="button secondary" onClick={() => void exportCsv('trades')} disabled={exporting !== null}><ArrowDownToLine size={15} />{exporting === 'trades' ? '导出中' : '导出成交'}</button><button className="button secondary" onClick={() => void exportCsv('orders')} disabled={exporting !== null}><ArrowDownToLine size={15} />{exporting === 'orders' ? '导出中' : '导出委托'}</button></div>
+            <div className="report-export"><button className="button secondary" onClick={() => void exportCsv('trades')} disabled={exporting !== null}><ArrowDownToLine size={15} />{exporting === 'trades' ? '导出中' : '导出成交'}</button><button className="button secondary" onClick={() => void exportCsv('orders')} disabled={exporting !== null}><ArrowDownToLine size={15} />{exporting === 'orders' ? '导出中' : '导出委托'}</button><button className="button danger-soft" onClick={() => void removeReport(report.id, report.name)} disabled={deletingId === report.id}><Trash2 size={15} />{deletingId === report.id ? '删除中' : '删除报告'}</button></div>
           </div>
 
           <div className="metrics-grid six">
@@ -683,7 +788,7 @@ export default function BacktestPage() {
           <Panel className="data-lineage-panel">
             <div className="data-lineage">
               <div className="lineage-title"><Layers3 size={17} /><div><strong>数据血缘与口径</strong><span>本报告基于后端实际返回的数据元信息</span></div></div>
-              <div className="lineage-tags"><Badge>{String(report.data_info.daily_source || selectedDataset?.source || 'baostock')} 日线</Badge>{intradayId && <Badge tone="indigo">{String(report.data_info.intraday_source || 'tencent')} 5分钟</Badge>}{indexId && <Badge tone="green">指数大盘门</Badge>}{selectedDataset?.is_synthetic && <SyntheticNotice compact />}</div>
+              <div className="lineage-tags"><Badge>{reportDailySource} 日线</Badge>{reportIntradaySource && <Badge tone="indigo">{reportIntradaySource} 5分钟</Badge>}{reportIndexSource && <Badge tone="green">指数大盘门</Badge>}{reportSynthetic && <SyntheticNotice compact />}</div>
             </div>
             {Object.keys(report.data_info || {}).length > 0 && <div className="data-info-grid">{Object.entries(report.data_info).map(([key, value]) => <div key={key}><span>{key}</span><strong title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
             {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><small>全程不变的口径 / 数据边界；逐轮决策日志见下方「换票轨迹」展开行</small><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
@@ -796,7 +901,85 @@ export default function BacktestPage() {
               disabled={recordLoading}
             />
           </Panel>
-        </div>
+            </div>
+          ) : (
+            <Panel>
+              <EmptyState
+                icon={<BarChart3 size={28} />}
+                title="报告数据不可用"
+                description="该报告缺少指标数据，可能仍在生成或已被删除。"
+                action={<button className="button secondary" type="button" onClick={() => setViewingReport(false)}>返回报告列表</button>}
+              />
+            </Panel>
+          )
+        ) : (
+          <Panel
+            className="report-list-panel"
+            title="回测报告"
+            description={reportQuery ? `搜索「${reportQuery}」 · 共 ${reportList?.total ?? 0} 份` : `共 ${reportList?.total ?? 0} 份报告 · 可按 Report ID 或名称搜索`}
+            action={<button className="button secondary" type="button" onClick={() => setReportListVersion((current) => current + 1)} disabled={reportListLoading}><RefreshCw size={15} />刷新</button>}
+          >
+            <div className="report-list-toolbar">
+              <div className="input-icon report-search">
+                <Search size={15} />
+                <input
+                  value={reportSearch}
+                  onChange={(event) => setReportSearch(event.target.value)}
+                  placeholder="搜索 Report ID 或名称"
+                  aria-label="搜索回测报告"
+                />
+              </div>
+              {reportQuery && (
+                <button className="text-button" type="button" onClick={() => setReportSearch('')}>清空搜索</button>
+              )}
+            </div>
+            <div className="table-scroll">
+              {reportListLoading && !reportList ? (
+                <Loading label="正在载入回测报告" />
+              ) : (
+                <table>
+                  <thead><tr><th>Report ID</th><th>名称</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
+                  <tbody>
+                    {(reportList?.items.length ?? 0) === 0 ? (
+                      <TableEmpty colSpan={5} message={reportQuery ? `没有匹配「${reportQuery}」的报告` : '暂无回测报告，先去运行一组实验吧'} />
+                    ) : reportList?.items.map((item) => (
+                      <tr key={item.id}>
+                        <td><code className="report-id" title={item.id}>{item.id}</code></td>
+                        <td><strong>{item.name}</strong></td>
+                        <td><Badge tone={lower(item.status) === 'completed' ? 'green' : 'neutral'}>{statusLabel(item.status)}</Badge></td>
+                        <td>{dateTime(item.created_at)}</td>
+                        <td>
+                          <div className="report-row-actions">
+                            <button className="report-link-button" type="button" onClick={() => void loadReport(item.id)} disabled={deletingId === item.id}>查看</button>
+                            <button className="report-link-button danger" type="button" onClick={() => void removeReport(item.id, item.name)} disabled={deletingId === item.id}>
+                              {deletingId === item.id ? '删除中' : '删除'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            <PaginationBar
+              page={reportList?.page ?? reportPage}
+              pageSize={reportList?.page_size ?? reportPageSize}
+              total={reportList?.total ?? 0}
+              totalPages={reportList?.total_pages ?? 0}
+              onPageChange={setReportPage}
+              onPageSizeChange={(size) => { setReportPageSize(size); setReportPage(1); }}
+              disabled={reportListLoading}
+            />
+            {(reportList?.items.length ?? 0) === 0 && !reportQuery && !reportListLoading && (
+              <div className="report-list-empty-action">
+                <button className="button primary" type="button" onClick={() => setWorkspaceTab('run')}>
+                  <Play size={15} fill="currentColor" />去运行回测
+                </button>
+              </div>
+            )}
+          </Panel>
+        )
       )}
     </div>
   );

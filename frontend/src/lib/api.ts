@@ -124,8 +124,16 @@ export const api = {
   runBacktest: (payload: BacktestRequest) => request<Report>('/backtests', { method: 'POST', body: JSON.stringify(payload) }),
   // 漏斗轮动回测：每次清仓后按选股漏斗重新选票，与模拟盘 rotation v2 语义一致。
   runFunnelBacktest: (payload: FunnelBacktestRequest) => request<Report>('/backtests/funnel', { method: 'POST', body: JSON.stringify(payload) }),
-  backtests: () => request<BacktestSummary[]>('/backtests'),
+  // 回测报告列表：按 Report ID / 名称搜索 + 后台分页（列表只返回轻量摘要）。
+  backtests: (params: { q?: string; page?: number; pageSize?: number } = {}) =>
+    request<Paginated<BacktestSummary>>(`/backtests${query({
+      q: params.q, page: params.page === undefined ? undefined : String(params.page),
+      page_size: params.pageSize === undefined ? undefined : String(params.pageSize),
+    })}`),
   backtest: (id: string) => request<Report>(`/backtests/${encodeURIComponent(id)}`),
+  // 删除报告并级联清理同 ID 的后台任务 / 检查点；运行中任务后端返回 409。
+  deleteBacktest: (id: string) =>
+    request<{ deleted: boolean; id: string }>(`/backtests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   /* ---------- 后台回测作业（进度 / 取消 / 续跑） ----------
      复用 request<T>，409（已有回测在跑）等错误会抛 ApiError 且带 .status，由调用方识别「忙」。 */
   runBacktestJob: (payload: BacktestJobRequest) =>
