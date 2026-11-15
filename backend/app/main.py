@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .backtest import BacktestEngine, FunnelRotationBacktest, run_backtest, run_funnel_backtest
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
-from .beta_sleeve import entry_allowed, exit_reason, target_quantity
+from .beta_sleeve import entry_allowed, exit_reason, reentry_cooldown_ready, target_quantity
 from .broker import BrokerAccount
 from .calendar_api import FuyaoCalendar
 from .data import dataset_from_bars, read_csv_bars, save_demo_datasets
@@ -200,6 +200,9 @@ class AccountConfigRequest(BaseModel):
     etf_entry_ma_days: int | None = Field(default=None, ge=2, le=250)
     etf_exit_ma_days: int | None = Field(default=None, ge=2, le=250)
     etf_hard_stop_pct: float | None = Field(default=None, gt=0, lt=1)
+    # 入场保护：不追高（相对入场均线偏离上限，0 关闭）+ 清仓后冷却（交易日，0 关闭）。
+    etf_entry_max_deviation: float | None = Field(default=None, ge=0, lt=1)
+    etf_reentry_cooldown_days: int | None = Field(default=None, ge=0, le=60)
 
 
 class ApplyConfigRequest(BaseModel):
@@ -357,7 +360,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.0.6",
+        version="2.1.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -813,6 +816,33 @@ def create_app() -> FastAPI:
             return str(account.rotation_pool[index].get("symbol") or "") or None
         return None
 
+    def _beta_last_exit_date(account: BrokerAccount) -> str | None:
+        """最近一次 ETF 清仓日：取 BETA 账本卖出成交日期的最大值。
+
+        beta 持仓清空后才会进入再入场分支，因此「最近一笔 BETA 卖出」就是最近
+        一次清仓（ETF 只做整仓进出，不会在空仓状态下卖出）。
+        """
+        dates = [
+            str(fill.timestamp)[:10] for fill in account.trades
+            if fill.purpose == "BETA" and fill.side == "SELL"
+        ]
+        return max(dates) if dates else None
+
+    def _beta_cooldown_ready(account: BrokerAccount, today: str) -> bool:
+        """清仓后冷却（交易日）：日历不可用时放行，避免因数据缺失永久空仓。"""
+        cooldown = int(account.config.etf_reentry_cooldown_days or 0)
+        exit_date = _beta_last_exit_date(account)
+        if cooldown <= 0 or not exit_date:
+            return True
+        quan = application.state.quan_store
+        trade_days = None
+        if quan is not None:
+            try:
+                trade_days = quan.trade_days(exit_date, today)
+            except Exception:  # noqa: BLE001 - 日历异常按「已满足冷却」降级
+                trade_days = None
+        return reentry_cooldown_ready(exit_date, today, cooldown, trade_days)
+
     def apply_beta_bar(
         account: BrokerAccount, bar: Bar, index_history: list[Bar] | None = None,
     ) -> None:
@@ -858,8 +888,11 @@ def create_app() -> FastAPI:
             and order.status in {"PENDING", "PARTIALLY_FILLED"}
             for order in account.orders
         )
-        if pending_buy or not entry_allowed(
+        if pending_buy or not _beta_cooldown_ready(account, bar.date):
+            return
+        if not entry_allowed(
             series, config.etf_entry_ma_days, config.etf_exit_ma_days,
+            max_deviation=config.etf_entry_max_deviation,
         ):
             return
         rules = rules_for(bar.symbol)

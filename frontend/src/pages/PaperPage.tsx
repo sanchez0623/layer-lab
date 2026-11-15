@@ -550,6 +550,8 @@ export default function PaperPage() {
   const [etfEntryMaInput, setEtfEntryMaInput] = useState('');
   const [etfExitMaInput, setEtfExitMaInput] = useState('');
   const [etfStopInput, setEtfStopInput] = useState('');
+  const [etfDevInput, setEtfDevInput] = useState('');
+  const [etfCooldownInput, setEtfCooldownInput] = useState('');
   const [savingEtf, setSavingEtf] = useState(false);
   const etfEnabled = Boolean(account?.config?.etf_beta_enabled);
   const etfSymbol = account?.config?.etf_symbol ?? 'sz.159915';
@@ -557,6 +559,8 @@ export default function PaperPage() {
   const etfEntryMa = account?.config?.etf_entry_ma_days ?? 60;
   const etfExitMa = account?.config?.etf_exit_ma_days ?? 20;
   const etfStop = account?.config?.etf_hard_stop_pct ?? 0.06;
+  const etfDev = account?.config?.etf_entry_max_deviation ?? 0;
+  const etfCooldown = account?.config?.etf_reentry_cooldown_days ?? 0;
 
   const saveTNetSpread = async () => {
     if (!account) return;
@@ -657,6 +661,16 @@ export default function PaperPage() {
       if (!Number.isFinite(value) || value <= 0 || value >= 100) { setError('ETF 硬止损需为 0–100 之间的百分数。'); return; }
       patch.etf_hard_stop_pct = value / 100;
     }
+    if (etfDevInput !== '') {
+      const value = Number(etfDevInput);
+      if (!Number.isFinite(value) || value < 0 || value >= 100) { setError('不追高上限需为 0–100 之间的百分数（0 关闭）。'); return; }
+      patch.etf_entry_max_deviation = value / 100;
+    }
+    if (etfCooldownInput !== '') {
+      const value = Number(etfCooldownInput);
+      if (!Number.isInteger(value) || value < 0 || value > 60) { setError('清仓后冷却需为 0–60 的整数交易日（0 关闭）。'); return; }
+      patch.etf_reentry_cooldown_days = value;
+    }
     if (!Object.keys(patch).length) { setError('没有要更新的 ETF 配置字段。'); return; }
     setSavingEtf(true); setError('');
     try {
@@ -664,6 +678,7 @@ export default function PaperPage() {
       setAccount(next);
       setEtfSymbolInput(''); setEtfPctInput(''); setEtfEntryMaInput('');
       setEtfExitMaInput(''); setEtfStopInput('');
+      setEtfDevInput(''); setEtfCooldownInput('');
       toast.success('ETF beta 腿配置已更新，下一根 K 线起生效。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'ETF 配置更新失败。');
@@ -809,6 +824,8 @@ export default function PaperPage() {
                 <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfEntryMa)} value={etfEntryMaInput} onChange={setEtfEntryMaInput} disabled={savingEtf || !etfEnabled} /></Field>
                 <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfExitMa)} value={etfExitMaInput} onChange={setEtfExitMaInput} disabled={savingEtf || !etfEnabled} /></Field>
                 <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`}><UnitInput unit="%" min={0.1} max={99} step={0.1} placeholder={number(etfStop * 100, 1)} value={etfStopInput} onChange={setEtfStopInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="不追高上限（偏离均线 %）" hint={`当前 ${etfDev > 0 ? `${number(etfDev * 100, 1)}%（关闭=0）` : '关闭'}`}><UnitInput unit="%" min={0} max={50} step={0.5} placeholder={number(etfDev * 100, 1)} value={etfDevInput} onChange={setEtfDevInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="清仓后冷却（交易日）" hint={`当前 ${etfCooldown > 0 ? `${etfCooldown} 个交易日（关闭=0）` : '关闭'}`}><UnitInput unit="日" min={0} max={60} step={1} placeholder={String(etfCooldown)} value={etfCooldownInput} onChange={setEtfCooldownInput} disabled={savingEtf || !etfEnabled} /></Field>
               </FormGrid>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Button size="sm" className="h-8" onClick={() => void saveEtfConfig()} disabled={savingEtf || !etfEnabled}>{savingEtf ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingEtf ? '正在保存' : '保存 ETF'}</Button>

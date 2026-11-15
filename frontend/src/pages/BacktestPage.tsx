@@ -48,6 +48,9 @@ const fallbackConfig: StrategyConfig = {
   etf_entry_ma_days: 60,
   etf_exit_ma_days: 20,
   etf_hard_stop_pct: 0.06,
+  // 入场保护（回测默认开启，可置 0 关闭）：不追高 8% + 清仓后冷却 5 个交易日。
+  etf_entry_max_deviation: 0.08,
+  etf_reentry_cooldown_days: 5,
 };
 
 /** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
@@ -209,10 +212,14 @@ export default function BacktestPage() {
       } catch { /* 作业列表不可用时静默忽略，不影响页面初始化 */ }
       const defaultConfig = defaults.config || defaults;
       // 超期降阈默认预填 22 天 / 3%（后端默认 None = 关闭，UI 侧给推荐值，可由用户改空关闭）。
+      // ETF 入场保护同理：后端 StrategyConfig 默认 0（关闭，保证旧账户/接口调用方行为不变），
+      // 回测表单默认预填推荐值 8% / 5 个交易日，用户可改成 0 关闭。
       setConfig((current) => ({
         ...current, ...defaultConfig,
         max_holding_days: defaultConfig.max_holding_days ?? 22,
         holding_tp_override: defaultConfig.holding_tp_override ?? 0.03,
+        etf_entry_max_deviation: defaultConfig.etf_entry_max_deviation || 0.08,
+        etf_reentry_cooldown_days: defaultConfig.etf_reentry_cooldown_days || 5,
       }));
       setFees(defaults.fees || strategyToFeeConfig(defaultConfig));
       if (defaults.initial_cash) setInitialCash(defaults.initial_cash);
@@ -517,6 +524,12 @@ export default function BacktestPage() {
   const reportIntradaySource = report?.data_info.intraday_source ? String(report.data_info.intraday_source) : null;
   const reportIndexSource = report?.data_info.index_source ? String(report.data_info.index_source) : null;
   const reportSynthetic = Boolean(report?.data_info.is_synthetic);
+  // 「数据与近似口径提醒」只放数据/口径类说明：委托被拒属于交易执行流水（拒绝仍可在
+  // 事件/委托里查到），其中 T+1 可卖数量不足是隔夜单提交时点的瞬时限制，不进这份提醒
+  // （个股与 ETF 一致口径）。
+  const visibleWarnings = (report?.warnings ?? []).filter(
+    (warning) => !String(warning).includes('T+1可卖数量不足'),
+  );
   const rotationTrail = useMemo<RotationTrailItem[]>(() => trailData?.items ?? [], [trailData]);
   // 换票轨迹行展开：查看该选股日的逐轮决策日志（为什么开门/关门/空仓/旁路几只）+ 漏斗计数。
   const [expandedTrails, setExpandedTrails] = useState<Set<string>>(new Set());
@@ -688,6 +701,8 @@ export default function BacktestPage() {
                         <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
                         <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
                         <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓"><UnitInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
+                        <Field label="不追高上限（偏离均线 %）" hint="指数收盘高于入场均线超过该幅度时不建仓，等回踩再买；0 关闭"><UnitInput unit="%" min={0} max={50} step={0.5} value={Number(((config.etf_entry_max_deviation ?? 0) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_entry_max_deviation', Number(value) / 100)} /></Field>
+                        <Field label="清仓后冷却（交易日）" hint="ETF 清仓后至少 N 个交易日内不再建仓，抑制均线附近反复打脸；0 关闭"><UnitInput unit="日" min={0} max={60} step={1} value={config.etf_reentry_cooldown_days ?? 0} onChange={(value) => updateConfig('etf_reentry_cooldown_days', Number(value))} /></Field>
                       </FormGrid>
                     )}
                   </div>
@@ -876,11 +891,11 @@ export default function BacktestPage() {
                 <Panel className="mb-3" title="数据血缘与口径" description="本报告基于后端实际返回的数据元信息" action={<Layers3 className="size-4" />}>
                   <div className="mb-2 flex flex-wrap gap-1.5"><Badge>{reportDailySource} 日线</Badge>{reportIntradaySource && <Badge tone="indigo">{reportIntradaySource} 5分钟</Badge>}{reportIndexSource && <Badge tone="green">指数大盘门</Badge>}{reportSynthetic && <SyntheticNotice compact />}</div>
                   {Object.keys(report.data_info || {}).length > 0 && <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">{Object.entries(report.data_info).map(([key, value]) => <div key={key} className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-2 py-1 text-[10px]"><span className="text-muted-foreground">{key}</span><strong className="truncate font-mono text-foreground" title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
-                  {report.warnings.length > 0 ? (
+                  {visibleWarnings.length > 0 ? (
                     <Alert className="mt-2 border-warning/25 bg-warning/5 text-warning">
                       <AlertTriangle />
                       <AlertTitle>数据与近似口径提醒</AlertTitle>
-                      <AlertDescription className="text-warning/80"><ul className="list-disc space-y-0.5 pl-4">{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></AlertDescription>
+                      <AlertDescription className="text-warning/80"><ul className="list-disc space-y-0.5 pl-4">{visibleWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></AlertDescription>
                     </Alert>
                   ) : <div className="mt-2 flex items-center gap-1.5 text-[10px] text-muted-foreground"><FlaskConical className="size-3.5" />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
                 </Panel>

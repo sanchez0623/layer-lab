@@ -82,6 +82,43 @@ def test_apply_config_preserves_unspecified_fields(client, account_id):
     assert after["installment_amounts"] == before["installment_amounts"]
 
 
+def test_apply_config_etf_entry_guard_fields(client, account_id):
+    """ETF 入场保护（不追高上限 / 清仓冷却）可整套应用到模拟账户并持久化。"""
+    resp = client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {
+            "etf_beta_enabled": True,
+            "etf_entry_max_deviation": 0.08,
+            "etf_reentry_cooldown_days": 5,
+        },
+    })
+    assert resp.status_code == 200, resp.text
+    config = resp.json()["config"]
+    assert config["etf_entry_max_deviation"] == pytest.approx(0.08)
+    assert config["etf_reentry_cooldown_days"] == 5
+    reloaded = client.get(f"/api/paper/accounts/{account_id}").json()["config"]
+    assert reloaded["etf_entry_max_deviation"] == pytest.approx(0.08)
+    assert reloaded["etf_reentry_cooldown_days"] == 5
+
+    # 局部更新端点允许把两项置 0 关闭（0 = 关闭保护，不是 None）
+    resp = client.post(f"/api/paper/accounts/{account_id}/config", json={
+        "etf_entry_max_deviation": 0, "etf_reentry_cooldown_days": 0,
+    })
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["config"]["etf_entry_max_deviation"] == 0
+    assert resp.json()["config"]["etf_reentry_cooldown_days"] == 0
+
+    # 越界值必须被拒绝
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"etf_entry_max_deviation": 1.5},
+    }).status_code == 400
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"etf_reentry_cooldown_days": -1},
+    }).status_code == 400
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"etf_reentry_cooldown_days": 61},
+    }).status_code == 400
+
+
 def test_apply_config_empty_rejected(client, account_id):
     """空 config 且空 fees → 400（没有要应用的内容）。"""
     assert client.post(f"/api/paper/accounts/{account_id}/apply-config",

@@ -531,3 +531,99 @@ def test_funnel_without_quan_stays_daily(tmp_path):
 
     assert any("日线口径" in item for item in report["warnings"])
     assert len(intraday_calls) == 0, f"无 quan 时 on_intraday 不应被调用，实际 {len(intraday_calls)} 次"
+
+
+# ---------------------------------------------------------------------------
+# ETF beta 腿：入场「不追高」过滤 + 清仓冷却 + 委托被拒日志口径
+# ---------------------------------------------------------------------------
+
+
+def _beta_engine(tmp_path, monkeypatch, *, config: StrategyConfig,
+                 index_closes: list[float], etf_days=("2025-08-22",)) -> FunnelRotationBacktest:
+    """构造一个手工 beta 引擎：只关心收盘决策，不跑完整 run。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    engine = FunnelRotationBacktest(
+        store=store, market=_DummyMarket(),
+        screener_config=ScreenerConfig(boards=[BOARD_GEM], enable_fundamental_veto=False),
+        initial_cash=1_000_000.0,
+        config=StrategyConfig(etf_beta_enabled=False),
+        start_date="2025-08-20", end_date="2025-08-25", name="beta保护测试",
+    )
+    engine.etf_enabled = True
+    engine.etf_symbol = "sz.159915"
+    engine.config = config
+    engine.index_history = {"创业板": _bars("sz.399006", index_closes)}
+    engine.etf_bars_by_date = {
+        day: Bar(
+            timestamp=datetime.fromisoformat(f"{day}T15:00:00"), symbol="sz.159915",
+            open=3.0, high=3.0, low=3.0, close=3.0, volume=1e7, amount=3e7,
+            timeframe="daily",
+        )
+        for day in etf_days
+    }
+    return engine
+
+
+def test_etf_entry_deviation_guard_blocks_chasing(tmp_path, monkeypatch):
+    """指数偏离入场均线 > 阈值时不建仓；阈值置 0 时恢复旧行为（站上均线就买）。"""
+    closes = [100.0] * 9 + [130.0]   # 均线 103 → 偏离 +26%
+    guarded = _beta_engine(
+        tmp_path / "a", monkeypatch,
+        config=StrategyConfig(etf_entry_ma_days=10, etf_exit_ma_days=5, etf_entry_max_deviation=0.08),
+        index_closes=closes,
+    )
+    guarded._current_symbol = None
+    guarded._manage_beta("2025-08-22")
+    assert not [o for o in guarded.account.orders if o.purpose == "BETA"], "追高入场应被拦下"
+
+    legacy = _beta_engine(
+        tmp_path / "b", monkeypatch,
+        config=StrategyConfig(etf_entry_ma_days=10, etf_exit_ma_days=5, etf_entry_max_deviation=0.0),
+        index_closes=closes,
+    )
+    legacy._current_symbol = None
+    legacy._manage_beta("2025-08-22")
+    buys = [o for o in legacy.account.orders if o.purpose == "BETA" and o.side == "BUY"]
+    assert buys, "关闭保护后仍应在站上均线时建仓"
+
+
+def test_etf_reentry_cooldown_blocks_then_releases(tmp_path, monkeypatch):
+    """清仓后冷却 N 个交易日内不建仓，满 N 日后放行。"""
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0]
+    engine = _beta_engine(
+        tmp_path, monkeypatch,
+        config=StrategyConfig(etf_entry_ma_days=5, etf_exit_ma_days=3, etf_reentry_cooldown_days=3),
+        index_closes=closes,
+        etf_days=("2025-08-22", "2025-08-23"),
+    )
+    engine._current_symbol = None
+    engine._beta_fills = [{"date": "2025-08-20", "side": "SELL"}]
+    # 冷却第 2 个交易日：仍处冷却期
+    assert engine._beta_cooldown_ready("2025-08-22") is False
+    engine._manage_beta("2025-08-22")
+    assert not [o for o in engine.account.orders if o.purpose == "BETA"]
+    # 冷却第 3 个交易日：放行
+    assert engine._beta_cooldown_ready("2025-08-23") is True
+    engine._manage_beta("2025-08-23")
+    assert [o for o in engine.account.orders if o.purpose == "BETA" and o.side == "BUY"]
+
+
+def test_transient_t1_reject_not_in_global_warnings(tmp_path, monkeypatch):
+    """T+1 可卖数量不足属于瞬时执行限制：只记 SIGNAL，不进「数据与近似口径提醒」。"""
+    closes = [100.0, 101.0, 102.0, 103.0, 104.0]
+    engine = _beta_engine(
+        tmp_path, monkeypatch,
+        config=StrategyConfig(etf_entry_ma_days=3, etf_exit_ma_days=3),
+        index_closes=closes,
+    )
+    # 无 ETF 持仓时卖出 → broker 以「T+1可卖数量不足」拒绝
+    engine._submit_beta_order("2025-08-22", "SELL", 1000, "测试拒单")
+    rejected = [e for e in engine.events if e["type"] == "SIGNAL" and e["status"] == "REJECTED"]
+    assert rejected, "拒单仍应留痕在 SIGNAL 事件里"
+    assert not [w for w in engine.warnings if "ETF委托被拒" in w or "委托被拒" in w]
+
+    # 非瞬时原因（如申量不足最小申报单位）仍进 warnings，避免掩盖真实规则问题
+    engine._submit_beta_order("2025-08-22", "BUY", 50, "测试不合规申报")
+    assert [w for w in engine.warnings if "ETF委托被拒" in w]

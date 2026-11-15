@@ -9,7 +9,8 @@ from .domain import (
     Bar, FeeBreakdown, Fill, Order, OrderRequest, Position, StrategyConfig, money, price, utc_now,
 )
 from .trading_rules import (
-    BoardRules, rules_for, split_quantity, validate_order_amount, validate_quantity,
+    BoardRules, is_etf_code, rules_for, split_quantity, validate_order_amount,
+    validate_quantity,
 )
 
 
@@ -318,13 +319,20 @@ class BrokerAccount:
                 order.status = "CANCELLED"
                 order.message = message
 
-    def _fees(self, side: str, amount: float) -> FeeBreakdown:
-        """五项费用分项计算后相加；最低佣金只兜底佣金项；印花税仅卖出收取。"""
+    def _fees(self, side: str, amount: float, symbol: str = "") -> FeeBreakdown:
+        """五项费用分项计算后相加；最低佣金只兜底佣金项。
+
+        场内 ETF/LOF（代码段判定）与股票费用口径不同：**免征印花税、免过户费**，
+        只收佣金、经手费、证管费。旧实现不分标的、一律按股票口径收卖出印花税 +
+        过户费，导致 ETF beta 腿被多扣成本（回测复盘中 beta 腿 4 年多扣约 1.5 万元）。
+        合成标的（TEST/SYNTH001 等非 6 位代码）按普通股票口径，保持旧行为。
+        """
+        fund = is_etf_code(symbol)
         commission = money(max(self.config.min_commission, amount * self.config.commission_rate))
-        stamp_tax = money(amount * self.config.stamp_tax_rate) if side == "SELL" else 0.0
+        stamp_tax = money(amount * self.config.stamp_tax_rate) if side == "SELL" and not fund else 0.0
         handling_fee = money(amount * self.config.handling_fee_rate)
         regulatory_fee = money(amount * self.config.regulatory_fee_rate)
-        transfer_fee = money(amount * self.config.transfer_fee_rate)
+        transfer_fee = 0.0 if fund else money(amount * self.config.transfer_fee_rate)
         return FeeBreakdown(
             commission=commission, stamp_tax=stamp_tax,
             handling_fee=handling_fee, regulatory_fee=regulatory_fee,
@@ -417,13 +425,13 @@ class BrokerAccount:
             if not self._tradable(order.side, execution, bar.prev_close or previous_close, order.symbol):
                 continue
             amount = money(execution * quantity)
-            fees = self._fees(order.side, amount)
+            fees = self._fees(order.side, amount, order.symbol)
             if order.side == "BUY":
                 while quantity >= step and amount + fees.total_fee > self.cash:
                     quantity -= step
                     if quantity:
                         amount = money(execution * quantity)
-                        fees = self._fees(order.side, amount)
+                        fees = self._fees(order.side, amount, order.symbol)
                 if quantity < step:
                     order.message = "可用资金不足"
                     continue

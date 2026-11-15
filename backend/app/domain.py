@@ -174,6 +174,13 @@ class StrategyConfig:
     etf_exit_ma_days: int = 20
     # 硬止损：ETF 收盘较建仓成本回撤达到该比例即清仓（0~1）。
     etf_hard_stop_pct: float = 0.06
+    # 入场「不追高」保护：指数收盘相对入场均线的偏离上限（0~1 小数，0.08 = 8%）。
+    # 超过则本次不建仓，等回踩到均线附近再确认；0 表示关闭（旧行为）。
+    # 依据：回测复盘里偏离 MA60 >8% 的追高入场几乎全是亏损单。
+    etf_entry_max_deviation: float = 0.0
+    # 再入场冷却：ETF 清仓后至少 N 个交易日内不再建仓（0 表示关闭）。
+    # 目的：抑制指数在均线附近来回摆动导致的连续「买-卖-买」磨损。
+    etf_reentry_cooldown_days: int = 0
 
     def __post_init__(self) -> None:
         if len(self.installment_amounts) != 16:
@@ -205,6 +212,13 @@ class StrategyConfig:
             raise ValueError("etf_position_pct 必须在 (0,1] 内（占账户权益比例）")
         if not 0 < float(self.etf_hard_stop_pct) < 1:
             raise ValueError("etf_hard_stop_pct 必须在 (0,1) 内")
+        if not 0 <= float(self.etf_entry_max_deviation or 0.0) < 1:
+            raise ValueError("etf_entry_max_deviation 必须在 [0,1) 内（0 表示关闭不追高保护）")
+        self.etf_entry_max_deviation = float(self.etf_entry_max_deviation or 0.0)
+        cooldown = int(self.etf_reentry_cooldown_days or 0)
+        if not 0 <= cooldown <= 60:
+            raise ValueError("etf_reentry_cooldown_days 必须在 0~60 个交易日之间（0 表示关闭冷却）")
+        self.etf_reentry_cooldown_days = cooldown
         for name in ("etf_entry_ma_days", "etf_exit_ma_days"):
             value = int(getattr(self, name))
             if not 2 <= value <= 250:

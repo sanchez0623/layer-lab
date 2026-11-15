@@ -70,6 +70,10 @@ export interface StrategyConfig {
   etf_exit_ma_days?: number;
   /** ETF 硬止损：较建仓成本回撤达到该比例清仓（小数，0.06 = 6%） */
   etf_hard_stop_pct?: number;
+  /** 入场不追高：指数相对入场均线的偏离上限（小数，0.08 = 8%）；0 表示关闭 */
+  etf_entry_max_deviation?: number;
+  /** 清仓后冷却：至少 N 个交易日内不再建仓；0 表示关闭 */
+  etf_reentry_cooldown_days?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {

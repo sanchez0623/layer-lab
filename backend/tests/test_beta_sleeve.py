@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.beta_sleeve import entry_allowed, exit_reason, sma, target_quantity
+from app.beta_sleeve import (
+    entry_allowed, exit_reason, reentry_cooldown_ready, sma, target_quantity,
+)
 from app.domain import Bar
 
 
@@ -38,6 +40,35 @@ def test_entry_refuses_below_exit_ma():
     bars = _bars([20, 20, 10, 10, 10, 12])
     assert entry_allowed(bars, 3) is True
     assert entry_allowed(bars, 3, 5) is False
+
+
+def test_entry_max_deviation_blocks_chasing():
+    """不追高：指数偏离入场均线超过阈值时不建仓；0 = 关闭（保持旧行为）。"""
+    # 前 9 根 10、最后一根 20：均线 11，偏离 +81.8%
+    chased = _bars([10] * 9 + [20])
+    assert entry_allowed(chased, 10) is True                     # 旧行为：站上均线就买
+    assert entry_allowed(chased, 10, max_deviation=0.08) is False
+    # 小幅偏离（均线 10.05，收盘 10.5 → +4.5%）允许入场
+    mild = _bars([10] * 9 + [10.5])
+    assert entry_allowed(mild, 10, max_deviation=0.08) is True
+    # 未站上均线时与偏离保护无关，仍然拒绝
+    below = _bars([10] * 10 + [9.5])
+    assert entry_allowed(below, 10, max_deviation=0.08) is False
+
+
+def test_reentry_cooldown_counts_trading_days():
+    """清仓后冷却按交易日计；无平仓日 / 冷却关闭 / 日历缺失都放行。"""
+    days = ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08"]
+    assert reentry_cooldown_ready(None, "2025-01-08", 3, days) is True
+    assert reentry_cooldown_ready("2025-01-02", "2025-01-08", 0, days) is True
+    # 只过了 2 个交易日（01-03、01-06）→ 未满足 3 日冷却
+    assert reentry_cooldown_ready("2025-01-02", "2025-01-06", 3, days) is False
+    # 已过 3 个交易日（01-03、01-06、01-07）→ 满足
+    assert reentry_cooldown_ready("2025-01-02", "2025-01-07", 3, days) is True
+    # 同一天不清仓（today <= exit_date）→ 未满足
+    assert reentry_cooldown_ready("2025-01-07", "2025-01-07", 3, days) is False
+    # 交易日历不可用 → 放行（避免因数据缺失永久空仓）
+    assert reentry_cooldown_ready("2025-01-02", "2025-01-07", 3, None) is True
 
 
 def test_exit_ma_break():

@@ -9,7 +9,7 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Any, Callable
 
-from .beta_sleeve import entry_allowed, exit_reason, target_quantity
+from .beta_sleeve import entry_allowed, exit_reason, reentry_cooldown_ready, target_quantity
 from .broker import BrokerAccount
 from .domain import Bar, Fill, OrderRequest, StrategyConfig, money, utc_now
 from .etf_data import cache_path as etf_cache_path
@@ -45,6 +45,16 @@ _INDEX_LOOKBACK_BUFFER_DAYS = 45
 _DAILY_LOOKBACK_BUFFER_DAYS = 420
 _DAILY_WINDOW_MAX_ROWS = 2000
 
+# 「T+1 可卖数量不足」属于隔夜单提交时点的瞬时限制（真实券商次日也会放行，
+# 见 broker 的 NEXT_OPEN 次日口径），是交易执行细节而不是数据/近似口径，
+# 不进报告顶部「数据与近似口径提醒」（个股与 ETF 一视同仁；拒绝仍记 SIGNAL 事件）。
+_TRANSIENT_REJECT_MARKERS = ("T+1可卖数量不足",)
+
+
+def _is_transient_reject(message: str | None) -> bool:
+    text = str(message or "")
+    return any(marker in text for marker in _TRANSIENT_REJECT_MARKERS)
+
 
 def submit_split_requests(
     account: BrokerAccount, requests, timestamp: datetime,
@@ -68,7 +78,7 @@ def submit_split_requests(
                 "quantity": order.quantity, "reason": order.reason, "status": order.status,
                 "execution_mode": order.execution_mode,
             })
-            if order.status == "REJECTED":
+            if order.status == "REJECTED" and not _is_transient_reject(order.message):
                 message = f"[委托被拒] {order.symbol} {order.side} {order.quantity}股：{order.message}"
                 if message not in warnings:
                     warnings.append(message)
@@ -496,6 +506,10 @@ class FunnelRotationBacktest:
         self._beta_last_exit_reason: str | None = None
         self._beta_source = ""
         self._prepare_data()
+        # 交易日 → 序号：beta 冷却按「平仓后第 N 个交易日」计，避免逐日扫 timeline。
+        self._timeline_index: dict[str, int] = {
+            day: index for index, day in enumerate(self.timeline)
+        }
         if self.etf_enabled:
             self._prepare_etf()
 
@@ -539,10 +553,21 @@ class FunnelRotationBacktest:
                 f"ETF beta 腿：{self.etf_symbol} 日线本地缓存缺失，已联网补采并写入 "
                 f"{path.name}（之后回测只读本地缓存）"
             )
+        guards: list[str] = []
+        if self.config.etf_entry_max_deviation > 0:
+            guards.append(
+                f"指数偏离入场均线 >{self.config.etf_entry_max_deviation * 100:.0f}% 不追高建仓"
+            )
+        if self.config.etf_reentry_cooldown_days > 0:
+            guards.append(
+                f"清仓后冷却 {self.config.etf_reentry_cooldown_days} 个交易日再入场"
+            )
+        guard_text = f"；入场保护：{'、'.join(guards)}" if guards else ""
         self.warnings.append(
             f"ETF beta 腿已启用：{self.etf_symbol}，仓位 {self.config.etf_position_pct * 100:.0f}% 权益，"
             f"入场 指数>{self.config.etf_entry_ma_days}日线，出场 指数<{self.config.etf_exit_ma_days}日线 "
-            f"或 ETF 硬止损 {self.config.etf_hard_stop_pct * 100:.1f}%；个股空仓期间持有、选到个股后卖出换股"
+            f"或 ETF 硬止损 {self.config.etf_hard_stop_pct * 100:.1f}%{guard_text}；"
+            f"个股空仓期间持有、选到个股后卖出换股"
         )
 
     def _etf_bar_for(self, day: str) -> Bar | None:
@@ -570,6 +595,25 @@ class FunnelRotationBacktest:
     def _beta_qty(self) -> int:
         position = self._beta_position()
         return position.beta_qty if position else 0
+
+    def _beta_last_exit_date(self) -> str | None:
+        """最近一次 ETF 清仓日（按 BETA 卖出成交日期取最大值）。"""
+        dates = [item["date"] for item in self._beta_fills if item["side"] == "SELL"]
+        return dates[-1] if dates else None
+
+    def _beta_cooldown_ready(self, day: str) -> bool:
+        """清仓后冷却：按交易日数判断是否已过再入场冷却期。"""
+        cooldown = int(self.config.etf_reentry_cooldown_days or 0)
+        exit_date = self._beta_last_exit_date()
+        if cooldown <= 0 or not exit_date:
+            return True
+        start = self._timeline_index.get(exit_date)
+        end = self._timeline_index.get(day)
+        if start is None or end is None:
+            return True
+        return reentry_cooldown_ready(
+            exit_date, day, cooldown, self.timeline[start:end + 1],
+        )
 
     def _manage_beta(self, day: str) -> None:
         """收盘后的 ETF 决策：先处理出场/换股，再处理空仓入场。"""
@@ -601,8 +645,13 @@ class FunnelRotationBacktest:
             return
         if self._has_pending_beta("BUY"):
             return
-        if not entry_allowed(index_bars, self.config.etf_entry_ma_days,
-                             self.config.etf_exit_ma_days):
+        if not self._beta_cooldown_ready(day):
+            return
+        if not entry_allowed(
+            index_bars, self.config.etf_entry_ma_days,
+            self.config.etf_exit_ma_days,
+            max_deviation=self.config.etf_entry_max_deviation,
+        ):
             return
         if etf_bar is None or etf_bar.close <= 0:
             return
@@ -635,7 +684,7 @@ class FunnelRotationBacktest:
                 "quantity": order.quantity, "reason": order.reason,
                 "status": order.status, "execution_mode": order.execution_mode,
             })
-            if order.status == "REJECTED":
+            if order.status == "REJECTED" and not _is_transient_reject(order.message):
                 message = f"[ETF委托被拒] {order.symbol} {order.side} {order.quantity}份：{order.message}"
                 if message not in self.warnings:
                     self.warnings.append(message)
