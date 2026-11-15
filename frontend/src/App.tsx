@@ -1,6 +1,8 @@
 import { lazy, Suspense, useEffect, useState } from 'react';
 import Layout from './components/Layout';
 import { Loading } from './components/Ui';
+import { Toaster } from '@/components/ui/sonner';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import type { PageKey } from './types';
 
 const BacktestPage = lazy(() => import('./pages/BacktestPage'));
@@ -31,14 +33,17 @@ export default function App() {
   };
 
   return (
-    <Layout page={page} onNavigate={navigate}>
-      <Suspense fallback={<Loading label="正在载入工作空间" />}>
-        {page === 'screener' && <ScreenerPage />}
-        {page === 'backtest' && <BacktestPage />}
-        {page === 'paper' && <PaperPage />}
-        {page === 'data' && <DataPage />}
-        {page === 'strategy' && <StrategyPage />}
-      </Suspense>
-    </Layout>
+    <TooltipProvider>
+      <Layout page={page} onNavigate={navigate}>
+        <Suspense fallback={<Loading label="正在载入工作空间" />}>
+          {page === 'screener' && <ScreenerPage />}
+          {page === 'backtest' && <BacktestPage />}
+          {page === 'paper' && <PaperPage />}
+          {page === 'data' && <DataPage />}
+          {page === 'strategy' && <StrategyPage />}
+        </Suspense>
+      </Layout>
+      <Toaster position="top-right" richColors closeButton />
+    </TooltipProvider>
   );
 }

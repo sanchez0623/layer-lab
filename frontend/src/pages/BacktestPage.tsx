@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Play, RefreshCw, RotateCcw, Search, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Loader2, Play, RefreshCw, RotateCcw, Search, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -11,10 +11,20 @@ import {
   dateTime, displaySymbol, integer, lower, money, number, orderTypeLabel, percent, purposeLabel, shortDate, sideLabel,
   signedMoney, signedPercent, statusLabel,
 } from '../lib/format';
+import { toast } from 'sonner';
 import FeeConfigPanel from '../components/FeeConfigPanel';
 import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
 import PaginationBar from '../components/PaginationBar';
-import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SuccessBanner, SyntheticNotice, TableEmpty } from '../components/Ui';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Progress } from '@/components/ui/progress';
+import { Switch } from '@/components/ui/switch';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Order, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
@@ -76,6 +86,25 @@ const roundNumber = (round: Round, keys: string[]): number | undefined => {
   return typeof value === 'number' ? value : value === undefined ? undefined : Number(value);
 };
 
+function UnitInput({
+  value, onChange, unit, min, max, step, type = 'number',
+}: {
+  value: string | number;
+  onChange: (value: string) => void;
+  unit: string;
+  min?: number;
+  max?: number;
+  step?: number;
+  type?: string;
+}) {
+  return (
+    <div className="relative">
+      <Input type={type} min={min} max={max} step={step} value={value} onChange={(event) => onChange(event.target.value)} className="pr-10" />
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
+    </div>
+  );
+}
+
 export default function BacktestPage() {
   const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [config, setConfig] = useState<StrategyConfig>(fallbackConfig);
@@ -93,7 +122,7 @@ export default function BacktestPage() {
   const [applying, setApplying] = useState(false);
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState('');
-  const [pendingNotice, setPendingNotice] = useState('');
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; name: string } | null>(null);
   // 后台回测作业：submitting=提交中，jobView=轮询到的最新进度，jobBusy=取消/续跑请求在途。
   // 轮询只由 jobView 驱动（jobId 存进 ref 避免闭包过期），卸载时清 interval，导航离开后服务端仍继续跑。
   const [submitting, setSubmitting] = useState(false);
@@ -208,7 +237,7 @@ export default function BacktestPage() {
           }
           const code = pending.candidate?.code || pendingDaily?.symbol || '';
           const name = pending.candidate?.name || pendingDaily?.name || '';
-          setPendingNotice(
+          toast.success(
             `已从选股结果带入：${[code, name].filter(Boolean).join(' ')}（运行 ${pending.runId || '—'}）`
             + (missing > 0 ? `；${missing} 个数据集未在后端找到，已保留默认选择` : '，可直接运行回测'),
           );
@@ -317,7 +346,7 @@ export default function BacktestPage() {
     try {
       const current = await api.currentAccount();
       await api.applyAccountConfig(current.id, { config: stripFeeFields(config), fees });
-      setPendingNotice(`已把回测配置应用到模拟盘账户「${current.name}」，下一根 K 线起生效。`);
+      toast.success(`已把回测配置应用到模拟盘账户「${current.name}」，下一根 K 线起生效。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '应用到模拟盘失败，请确认模拟盘服务可用。');
     } finally {
@@ -393,30 +422,28 @@ export default function BacktestPage() {
   };
 
   /** 删除报告：二次确认后调用 DELETE，成功则清理当前详情 / 作业展示并刷新列表。 */
-  const removeReport = async (id: string, reportName: string) => {
-    if (!window.confirm(
-      `确定删除回测报告「${reportName}」吗？\n`
-      + `Report ID: ${id}\n`
-      + '将同步删除该报告的后台任务与检查点数据，且无法恢复。',
-    )) return;
-    setDeletingId(id);
+  const performDeleteReport = async () => {
+    const target = pendingDelete;
+    if (!target) return;
+    setDeletingId(target.id);
     setError('');
     try {
-      const result = await api.deleteBacktest(id);
+      const result = await api.deleteBacktest(target.id);
       if (!result.deleted) setError('后端未找到该报告，可能已被其他会话删除。');
-      if (report?.id === id) {
+      if (report?.id === target.id) {
         setReport(null);
         setViewingReport(false);
         setTrailData(null);
         setRecordData(null);
       }
-      if (jobView?.id === id) {
-        settledJobIdsRef.current.add(id);
-        if (jobIdRef.current === id) jobIdRef.current = null;
+      if (jobView?.id === target.id) {
+        settledJobIdsRef.current.add(target.id);
+        if (jobIdRef.current === target.id) jobIdRef.current = null;
         setJobView(null);
         setRunning(false);
       }
-      setPendingNotice('回测报告已删除。');
+      toast.success('回测报告已删除。');
+      setPendingDelete(null);
       setReportListVersion((current) => current + 1);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '删除回测报告失败。');
@@ -529,7 +556,7 @@ export default function BacktestPage() {
   }, [recordData, tableTab, report, recordPage, recordPageSize]);
 
   return (
-    <div className="page backtest-page">
+    <div className="animate-[page-in_.22s_ease-out]">
       <PageHeader
         eyebrow="RESEARCH / BACKTEST"
         title="回测工作台"
@@ -537,518 +564,393 @@ export default function BacktestPage() {
       />
 
       {error && <ErrorBanner message={error} onRetry={!report && !loading ? () => void loadInitial() : undefined} onClose={() => setError('')} />}
-      {pendingNotice && <SuccessBanner onClose={() => setPendingNotice('')}>{pendingNotice}</SuccessBanner>}
 
-      <div className="workspace-tabs" role="tablist" aria-label="回测工作台视图">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={workspaceTab === 'run'}
-          className={`workspace-tab ${workspaceTab === 'run' ? 'active' : ''}`}
-          onClick={() => setWorkspaceTab('run')}
-        >
-          <Play size={15} />运行回测
-          {jobActive && <span className="workspace-tab-dot" title="有回测任务在运行" />}
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={workspaceTab === 'reports'}
-          className={`workspace-tab ${workspaceTab === 'reports' ? 'active' : ''}`}
-          onClick={() => setWorkspaceTab('reports')}
-        >
-          <BarChart3 size={15} />回测报告
-          {reportList && <span className="workspace-tab-count">{reportList.total}</span>}
-        </button>
-      </div>
+      <Tabs value={workspaceTab} onValueChange={(value) => setWorkspaceTab(value as WorkspaceTab)}>
+        <TabsList className="mb-3">
+          <TabsTrigger value="run" className="gap-1.5 px-3"><Play className="size-3.5" />运行回测{jobActive && <span className="size-1.5 rounded-full bg-primary" />}</TabsTrigger>
+          <TabsTrigger value="reports" className="gap-1.5 px-3"><BarChart3 className="size-3.5" />回测报告{reportList && <span className="rounded bg-muted px-1 font-mono text-[10px] text-muted-foreground">{reportList.total}</span>}</TabsTrigger>
+        </TabsList>
 
-      {workspaceTab === 'run' && (
-      <Panel className="config-panel">
-        <form onSubmit={(event) => { event.preventDefault(); void run(); }} noValidate>
-          <div className="config-topline">
-            <div className="config-title"><span className="step-index">01</span><div><h2>实验配置</h2><p>定义数据边界与交易摩擦，再启动本地回测。</p></div></div>
-            <div className="backtest-mode-toggle" role="tablist" aria-label="回测模式">
-              <button
-                type="button"
-                role="tab"
-                className={`backtest-mode-tab ${mode === 'funnel' ? 'active' : ''}`}
-                aria-selected={mode === 'funnel'}
-                onClick={() => setMode('funnel')}
-              >
-                <Layers3 size={15} />漏斗轮动回测
-              </button>
-              <button
-                type="button"
-                role="tab"
-                className={`backtest-mode-tab ${mode === 'single' ? 'active' : ''}`}
-                aria-selected={mode === 'single'}
-                onClick={() => setMode('single')}
-              >
-                <BarChart3 size={15} />单标的回测
-              </button>
-            </div>
-          </div>
-          <label className="switch-row enable-t-row">
-            <span><strong>启用做 T</strong><small>可选，不占用 16 笔序列</small></span>
-            <input type="checkbox" checked={config.enable_t} onChange={(event) => updateConfig('enable_t', event.target.checked)} />
-            <span className="switch" />
-          </label>
-          {config.enable_t && (
-            <div className="form-grid t-params-grid">
-              <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T" className="span-3">
-                <div className="input-with-unit">
-                  <input type="number" min="0" max="100" step="0.1" value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(event) => updateConfig('t_target_net_spread', Number(event.target.value) / 100)} />
-                  <span>%</span>
+        {workspaceTab === 'run' && (
+          <Panel className="mb-3" flush>
+            <form onSubmit={(event) => { event.preventDefault(); void run(); }} noValidate className="p-4">
+              <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="grid size-7 place-items-center rounded-md bg-accent font-mono text-[11px] text-accent-foreground">01</span>
+                  <div><h2 className="text-[15px] font-semibold">实验配置</h2><p className="text-[12px] text-muted-foreground">定义数据边界与交易摩擦，再启动本地回测。</p></div>
                 </div>
-              </Field>
-              <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平" className="span-3">
-                <div className="input-with-unit">
-                  <input type="time" step="300" value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
+                <div className="flex gap-1 rounded-lg bg-muted p-0.5">
+                  <button type="button" className={cn('inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] transition-colors', mode === 'funnel' ? 'bg-card text-primary shadow-xs' : 'text-muted-foreground')} onClick={() => setMode('funnel')}><Layers3 className="size-3.5" />漏斗轮动回测</button>
+                  <button type="button" className={cn('inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] transition-colors', mode === 'single' ? 'bg-card text-primary shadow-xs' : 'text-muted-foreground')} onClick={() => setMode('single')}><BarChart3 className="size-3.5" />单标的回测</button>
                 </div>
-              </Field>
-            </div>
-          )}
-          <div className="form-grid t-params-grid">
-            <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降到右侧阈值；留空=关闭" className="span-3">
-              <div className="input-with-unit">
-                <input
-                  type="number" min="1" max="250" step="1"
-                  value={config.max_holding_days ?? ''}
-                  onChange={(event) => updateConfig('max_holding_days', event.target.value === '' ? null : Number(event.target.value))}
-                />
-                <span>交易日</span>
               </div>
-            </Field>
-            <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值；与左侧天数需同时填写" className="span-3">
-              <div className="input-with-unit">
-                <input
-                  type="number" min="0" max="100" step="0.1"
-                  value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''}
-                  onChange={(event) => updateConfig('holding_tp_override', event.target.value === '' ? null : Number(event.target.value) / 100)}
-                />
-                <span>%</span>
-              </div>
-            </Field>
-          </div>
-          {mode === 'funnel' && (
-            <div className="etf-beta-panel">
-              <label className="switch-row">
-                <span>
-                  <strong>指数 beta 腿（创业板 ETF）</strong>
-                  <small>个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列</small>
-                </span>
-                <input type="checkbox" checked={Boolean(config.etf_beta_enabled)} onChange={(event) => updateConfig('etf_beta_enabled', event.target.checked)} />
-                <span className="switch" />
-              </label>
-              {config.etf_beta_enabled && (
-                <div className="form-grid t-params-grid">
-                  <Field label="ETF 代码" hint="默认创业板 ETF 159915" className="span-3">
-                    <select value={config.etf_symbol ?? 'sz.159915'} onChange={(event) => updateConfig('etf_symbol', event.target.value)}>
-                      <option value="sz.159915">sz.159915 · 创业板ETF易方达</option>
-                      <option value="sz.159952">sz.159952 · 创业板ETF广发</option>
-                      <option value="sz.159964">sz.159964 · 创业板ETF平安</option>
-                    </select>
+
+              <div className="grid gap-2.5">
+                <SwitchRow label="启用做 T" description="可选，不占用 16 笔序列" checked={config.enable_t} onCheckedChange={(checked) => updateConfig('enable_t', checked)} />
+
+                {config.enable_t && (
+                  <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                    <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T" className="lg:col-span-2">
+                      <UnitInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
+                    </Field>
+                    <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平" className="lg:col-span-2">
+                      <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
+                    </Field>
+                  </div>
+                )}
+
+                <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                  <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降到右侧阈值；留空=关闭" className="lg:col-span-2">
+                    <UnitInput unit="交易日" min={1} max={250} step={1} value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
                   </Field>
-                  <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例" className="span-3">
-                    <div className="input-with-unit">
-                      <input type="number" min="1" max="100" step="1" value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(event) => updateConfig('etf_position_pct', Number(event.target.value) / 100)} />
-                      <span>%</span>
-                    </div>
-                  </Field>
-                  <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF" className="span-3">
-                    <div className="input-with-unit">
-                      <input type="number" min="2" max="250" step="1" value={config.etf_entry_ma_days ?? 60} onChange={(event) => updateConfig('etf_entry_ma_days', Number(event.target.value))} />
-                      <span>日</span>
-                    </div>
-                  </Field>
-                  <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF" className="span-3">
-                    <div className="input-with-unit">
-                      <input type="number" min="2" max="250" step="1" value={config.etf_exit_ma_days ?? 20} onChange={(event) => updateConfig('etf_exit_ma_days', Number(event.target.value))} />
-                      <span>日</span>
-                    </div>
-                  </Field>
-                  <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓" className="span-3">
-                    <div className="input-with-unit">
-                      <input type="number" min="0.1" max="99" step="0.1" value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(event) => updateConfig('etf_hard_stop_pct', Number(event.target.value) / 100)} />
-                      <span>%</span>
-                    </div>
+                  <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值；与左侧天数需同时填写" className="lg:col-span-2">
+                    <UnitInput unit="%" min={0} max={100} step={0.1} value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
                   </Field>
                 </div>
-              )}
-            </div>
-          )}
-          {mode === 'funnel' && (
-            <div className="funnel-mode-note">
-              <Layers3 size={15} />
-              <span>
-                漏斗轮动回测：<strong>不再锁定单一标的</strong>，而是每次清仓后按下方选股漏斗（L0→L4）重跑、取当时第一名换票，与模拟盘「清仓后重新选股」口径一致；
-                行情取自本地 universe.db 缓存（双创日线），为日线口径（5 分钟做 T 与 tick 级风控降级）。
-              </span>
-            </div>
-          )}
-          <div className={`form-grid ${mode === 'funnel' ? 'backtest-basics-grid' : 'backtest-form-grid'}`}>
-            <Field label="实验名称" className={mode === 'funnel' ? 'backtest-name-field' : 'span-2'}><input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" /></Field>
-            {mode === 'single' && (
-              <Field label="主数据集" hint="quan_parquet / baostock 日线" className="span-2">
-                <select value={datasetId} onChange={(event) => {
-                  const next = datasets.find((item) => item.id === event.target.value);
-                  setDatasetId(event.target.value);
-                  if (next) {
-                    setStartDate(next.start?.slice(0, 10));
-                    setEndDate(next.end?.slice(0, 10));
-                    const minute = datasets.find((item) => item.timeframe === '5m' && item.symbol === next.symbol);
-                    if (minute) setIntradayId(minute.id);
-                  }
-                }} required>
-                  <option value="">请选择数据集</option>
-                  {datasets.filter((item) => item.timeframe === 'daily').map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)} · {item.source}</option>)}
-                </select>
-              </Field>
-            )}
-            <Field label="开始日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={startDate} min={mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined} max={endDate || (mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined)} onChange={(event) => setStartDate(event.target.value)} /></div></Field>
-            <Field label="结束日期"><div className="input-icon"><CalendarDays size={15} /><input type="date" value={endDate} min={startDate || (mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined)} max={mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined} onChange={(event) => setEndDate(event.target.value)} /></div></Field>
-            <Field label="初始资金" className={mode === 'funnel' ? 'backtest-cash-field' : ''}><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => { const parsed = Number(event.target.value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} required /><span>CNY</span></div></Field>
-            {mode === 'single' && (
-              <>
-                <Field label="5 分钟数据集" hint="腾讯 / quan_parquet 5 分钟"><select value={intradayId} onChange={(event) => setIntradayId(event.target.value)}><option value="">不使用（日线降级）</option>{intradayOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.timeframe} · {item.source}</option>)}</select></Field>
-                <Field label="指数数据集" hint="大盘门（日线）"><select value={indexId} onChange={(event) => setIndexId(event.target.value)}><option value="">不使用</option>{indexOptions.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)}</option>)}</select></Field>
-              </>
-            )}
-          </div>
-          {mode === 'funnel' && <ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff />}
-          <button type="button" className="advanced-toggle" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
-            <span><Gauge size={15} />交易摩擦与撮合参数</span>{advanced ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-          </button>
-          {advanced && (
-            <>
-              <FeeConfigPanel value={fees} onChange={setFees} />
-              <div className="form-grid advanced-grid">
-                <Field label="滑点" className="span-3"><div className="input-with-unit"><input type="number" min="0" step="1" value={config.slippage_bps} onChange={(event) => updateConfig('slippage_bps', Number(event.target.value))} /><span>bps</span></div></Field>
-                <Field label="成交量参与上限" className="span-3"><div className="input-with-unit"><input type="number" min="0" max="100" step="1" value={config.volume_participation * 100} onChange={(event) => updateConfig('volume_participation', Number(event.target.value) / 100)} /><span>%</span></div></Field>
-              </div>
-            </>
-          )}
-          <div className="config-footer">
-            <div className="dataset-hint">
-              {mode === 'funnel' ? (
-                <span>漏斗轮动 · {screener.boards.join(' / ')} · 每次清仓后重跑 L0→L4 取第一名换票（日线口径）</span>
-              ) : selectedDataset ? (
-                <><span>{selectedDataset.rows.toLocaleString('zh-CN')} 行</span><i /> <span>{selectedDataset.timeframe} 粒度</span><i /><span>{shortDate(selectedDataset.start)} — {shortDate(selectedDataset.end)}</span>{selectedDataset.is_synthetic && <SyntheticNotice compact />}</>
-              ) : (
-                <span>请选择主数据集以查看数据边界</span>
-              )}
-            </div>
-            <button className="button secondary" type="button" onClick={() => void applyToPaper()} disabled={applying || jobActive}>
-              {applying ? <><span className="button-spinner" />正在应用</> : <><ArrowDownToLine size={16} />应用到模拟盘</>}
-            </button>
-            <button className="button primary run-button" type="submit" disabled={jobActive || (mode === 'single' && !datasetId)}>
-              {jobActive ? <><span className="button-spinner" />正在运行回测</> : <><Play size={16} fill="currentColor" />运行回测</>}
-            </button>
-          </div>
-          {jobView && (
-            <div className="job-progress" role="status">
-              <div className="job-progress-topline">
-                <span className="job-progress-label">
-                  {jobView.status === 'RUNNING' ? '回测进行中' : `回测${statusLabel(jobView.status)}`}
-                  {' · '}
-                  {jobView.name || '后台回测'}
-                </span>
-                <div className="job-progress-actions">
-                  {jobView.status === 'RUNNING' && (
-                    <button type="button" className="button secondary" onClick={() => void cancelJob()} disabled={jobBusy}>
-                      <Square size={14} fill="currentColor" />停止
-                    </button>
+
+                {mode === 'funnel' && (
+                  <div className="rounded-xl border bg-muted/25 p-3">
+                    <SwitchRow label="指数 beta 腿（创业板 ETF）" description="个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列" checked={Boolean(config.etf_beta_enabled)} onCheckedChange={(checked) => updateConfig('etf_beta_enabled', checked)} />
+                    {config.etf_beta_enabled && (
+                      <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                        <Field label="ETF 代码" hint="默认创业板 ETF 159915" className="lg:col-span-2">
+                          <SelectField value={config.etf_symbol ?? 'sz.159915'} onValueChange={(value) => updateConfig('etf_symbol', value)} options={[
+                            { value: 'sz.159915', label: 'sz.159915 · 创业板ETF易方达' },
+                            { value: 'sz.159952', label: 'sz.159952 · 创业板ETF广发' },
+                            { value: 'sz.159964', label: 'sz.159964 · 创业板ETF平安' },
+                          ]} />
+                        </Field>
+                        <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例" className="lg:col-span-2">
+                          <UnitInput unit="%" min={1} max={100} step={1} value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(value) => updateConfig('etf_position_pct', Number(value) / 100)} />
+                        </Field>
+                        <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
+                        <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
+                        <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓"><UnitInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {mode === 'funnel' && (
+                  <div className="flex items-start gap-2 rounded-lg border border-primary/15 bg-accent/40 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+                    <Layers3 className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                    <span>漏斗轮动回测：<strong className="text-foreground">不再锁定单一标的</strong>，每次清仓后按下方选股漏斗（L0→L4）重跑、取当时第一名换票；行情取自本地 universe.db 缓存（双创日线），为日线口径。</span>
+                  </div>
+                )}
+
+                <div className={cn('grid gap-2.5', mode === 'funnel' ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-2 lg:grid-cols-4')}>
+                  <Field label="实验名称" className={mode === 'funnel' ? 'sm:col-span-2' : 'sm:col-span-2'}>
+                    <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" />
+                  </Field>
+                  {mode === 'single' && (
+                    <Field label="主数据集" hint="quan_parquet / baostock 日线" className="sm:col-span-2">
+                      <SelectField
+                        value={datasetId}
+                        onValueChange={(value) => {
+                          const next = datasets.find((item) => item.id === value);
+                          setDatasetId(value);
+                          if (next) {
+                            setStartDate(next.start?.slice(0, 10) || '');
+                            setEndDate(next.end?.slice(0, 10) || '');
+                            const minute = datasets.find((item) => item.timeframe === '5m' && item.symbol === next.symbol);
+                            if (minute) setIntradayId(minute.id);
+                          }
+                        }}
+                        options={datasets.filter((item) => item.timeframe === 'daily').map((item) => ({ value: item.id, label: `${item.name} · ${displaySymbol(item.symbol)} · ${item.source}` }))}
+                        placeholder="请选择数据集"
+                        ariaLabel="主数据集"
+                      />
+                    </Field>
                   )}
-                  {JOB_RESUMABLE_STATUSES.includes(jobView.status) && (
+                  <Field label="开始日期">
+                    <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={startDate} min={mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined} max={endDate || (mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined)} onChange={(event) => setStartDate(event.target.value)} className="pl-8" /></div>
+                  </Field>
+                  <Field label="结束日期">
+                    <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={endDate} min={startDate || (mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined)} max={mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined} onChange={(event) => setEndDate(event.target.value)} className="pl-8" /></div>
+                  </Field>
+                  <Field label="初始资金">
+                    <UnitInput unit="CNY" min={1} step={10000} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} />
+                  </Field>
+                  {mode === 'single' && (
                     <>
-                      <button type="button" className="button secondary" onClick={() => void resumeJob()} disabled={jobBusy}>
-                        <Play size={14} fill="currentColor" />继续
-                      </button>
-                      <button type="button" className="button secondary" onClick={dismissJob} disabled={jobBusy}>放弃</button>
+                      <Field label="5 分钟数据集" hint="腾讯 / quan_parquet 5 分钟">
+                        <SelectField value={intradayId || '__none__'} onValueChange={(value) => setIntradayId(value === '__none__' ? '' : value)} options={[{ value: '__none__', label: '不使用（日线降级）' }, ...intradayOptions.map((item) => ({ value: item.id, label: `${item.name} · ${item.timeframe} · ${item.source}` }))]} ariaLabel="5 分钟数据集" />
+                      </Field>
+                      <Field label="指数数据集" hint="大盘门（日线）">
+                        <SelectField value={indexId || '__none__'} onValueChange={(value) => setIndexId(value === '__none__' ? '' : value)} options={[{ value: '__none__', label: '不使用' }, ...indexOptions.map((item) => ({ value: item.id, label: `${item.name} · ${displaySymbol(item.symbol)}` }))]} ariaLabel="指数数据集" />
+                      </Field>
                     </>
                   )}
                 </div>
-              </div>
-              <div className="job-progress-track" aria-hidden="true">
-                <div className="job-progress-fill" style={{ width: `${Math.max(0, Math.min(100, jobView.progress))}%` }} />
-              </div>
-              <div className="job-progress-meta">
-                <span>{jobView.progress.toFixed(1)}%</span>
-                <span>{jobView.cursor_date ? `已跑至 ${jobView.cursor_date}` : '等待首个交易日完成'}</span>
-                {jobView.total_days ? <span>共 {integer(jobView.total_days)} 交易日</span> : null}
-                {jobView.error ? <span className="negative">{jobView.error}</span> : null}
-              </div>
-            </div>
-          )}
-        </form>
-      </Panel>
-      )}
 
-      {workspaceTab === 'reports' && (
-        viewingReport ? (
-          reportLoading ? (
-            <Panel><Loading label="正在读取回测报告" /></Panel>
-          ) : report && metrics ? (
-            <div className="report-content">
-              <div className="report-detail-toolbar">
-                <button className="button secondary" type="button" onClick={() => setViewingReport(false)}>
-                  <ArrowLeft size={15} />返回报告列表
+                {mode === 'funnel' && <ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff />}
+
+                <button type="button" className="flex items-center justify-between rounded-lg border bg-card px-3 py-2 text-left text-[12px] font-medium text-foreground/80 hover:bg-muted/40" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
+                  <span className="inline-flex items-center gap-2"><Gauge className="size-3.5" />交易摩擦与撮合参数</span>{advanced ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
                 </button>
-              </div>
-          <div className="report-titlebar">
-            <div><div className="report-kicker"><Badge tone="indigo">{statusLabel(report.status)}</Badge><span>REPORT / {report.id.slice(0, 8).toUpperCase()}</span></div><h2>{report.name}</h2><p>生成于 {dateTime(report.created_at)} · 初始资金 {money(metrics.initial_cash, 0)}</p></div>
-            <div className="report-export"><button className="button secondary" onClick={() => void exportCsv('trades')} disabled={exporting !== null}><ArrowDownToLine size={15} />{exporting === 'trades' ? '导出中' : '导出成交'}</button><button className="button secondary" onClick={() => void exportCsv('orders')} disabled={exporting !== null}><ArrowDownToLine size={15} />{exporting === 'orders' ? '导出中' : '导出委托'}</button><button className="button danger-soft" onClick={() => void removeReport(report.id, report.name)} disabled={deletingId === report.id}><Trash2 size={15} />{deletingId === report.id ? '删除中' : '删除报告'}</button></div>
-          </div>
-
-          <div className="metrics-grid six">
-            <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={`期末权益 ${money(metrics.final_equity)}`} />
-            <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={`买入持有 ${signedPercent(metrics.buy_hold_return)}`} />
-            <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}`} />
-            <Metric label="夏普比率" value={number(metrics.sharpe_ratio)} sub={`波动率 ${percent(metrics.volatility)}`} />
-            <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
-            <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`} />
-          </div>
-
-          <div className="report-main-grid">
-            <Panel className="chart-panel" title="权益与风险轨迹" description="账户权益、实际投入与回撤随时间的变化" action={<div className="chart-legend"><span className="legend-equity">账户权益</span><span className="legend-invested">实际投入</span><span className="legend-drawdown">回撤</span></div>}>
-              <div className="equity-chart">
-                {report.equity_curve.length > 0 ? (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={report.equity_curve} margin={{ top: 12, right: 4, left: 4, bottom: 0 }}>
-                      <defs><linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#4f46e5" stopOpacity={0.14} /><stop offset="100%" stopColor="#4f46e5" stopOpacity={0} /></linearGradient></defs>
-                      <CartesianGrid stroke="#ececf1" strokeDasharray="3 4" vertical={false} />
-                      <XAxis dataKey="date" tickFormatter={(value: string) => value.slice(5, 10)} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={48} dy={8} />
-                      <YAxis yAxisId="money" tickFormatter={(value: number) => `${(value / 10000).toFixed(0)}万`} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} width={52} domain={['auto', 'auto']} />
-                      <YAxis yAxisId="drawdown" orientation="right" tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`} tick={{ fill: '#9a9aa3', fontSize: 11 }} axisLine={false} tickLine={false} width={42} domain={['auto', 0]} />
-                      <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="chart-tooltip"><strong>{label}</strong><div><span>账户权益</span><b>{money(payload[0].payload.equity)}</b></div><div><span>实际投入</span><b>{money(payload[0].payload.invested)}</b></div><div><span>可用现金</span><b>{money(payload[0].payload.cash)}</b></div><div><span>持仓市值</span><b>{money(payload[0].payload.market_value)}</b></div><div><span>回撤</span><b className="negative">{percent(payload[0].payload.drawdown)}</b></div><div><span>持仓数量</span><b>{integer(payload[0].payload.position_qty)}</b></div></div> : null} />
-                      <Area yAxisId="money" type="monotone" dataKey="equity" stroke="#4f46e5" strokeWidth={2.2} fill="url(#equityFill)" activeDot={{ r: 4, fill: '#4f46e5', stroke: '#fff', strokeWidth: 2 }} />
-                      <Line yAxisId="money" type="monotone" dataKey="invested" stroke="#8b8b98" strokeWidth={1.5} dot={false} strokeDasharray="5 4" />
-                      <Line yAxisId="drawdown" type="stepAfter" dataKey="drawdown" stroke="#159a77" strokeWidth={1.4} dot={false} />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                ) : <EmptyState compact title="暂无权益曲线" description="报告未返回可绘制的时序数据。" />}
-              </div>
-              <div className="chart-footnote"><span><i className="line-swatch indigo" />左轴：资金（万元）</span><span><i className="line-swatch green" />右轴：回撤（%）</span><span>期末 {report.equity_curve[report.equity_curve.length - 1]?.date || '—'}</span></div>
-            </Panel>
-
-            <Panel className="risk-panel" title="本轮风险诊断" description="从资金占用到尾部风险的横向检查" action={<ShieldAlert size={18} />}>
-              <div className="risk-list">
-                <div><span className="risk-icon"><WalletCards size={17} /></span><div><small>最大资金投入</small><strong>{money(metrics.max_invested)}</strong></div><span className="risk-note">峰值占用</span></div>
-                <div><span className="risk-icon"><TrendingDown size={17} /></span><div><small>最大浮亏</small><strong className="negative">{money(metrics.max_float_loss)}</strong></div><span className="risk-note">未实现口径</span></div>
-                <div><span className="risk-icon"><RotateCcw size={17} /></span><div><small>做 T 净贡献</small><strong className={metrics.t_net_profit >= 0 ? 'positive' : 'negative'}>{signedMoney(metrics.t_net_profit)}</strong></div><span className="risk-note">{integer(metrics.t_trade_count)} 笔</span></div>
-                {betaInfo?.enabled && (
-                  <div>
-                    <span className="risk-icon"><Layers3 size={17} /></span>
-                    <div>
-                      <small>ETF beta 净贡献</small>
-                      <strong className={Number(betaInfo.pnl ?? 0) >= 0 ? 'positive' : 'negative'}>{signedMoney(Number(betaInfo.pnl ?? 0))}</strong>
+                {advanced && (
+                  <div className="grid gap-2.5">
+                    <FeeConfigPanel value={fees} onChange={setFees} />
+                    <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                      <Field label="滑点"><UnitInput unit="bps" min={0} step={1} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
+                      <Field label="成交量参与上限"><UnitInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
                     </div>
-                    <span className="risk-note">{integer(Number(betaInfo.trade_count ?? 0))} 笔 · {betaInfo.exit_reason || '持仓中'}</span>
                   </div>
                 )}
-                <div><span className="risk-icon"><CircleDollarSign size={17} /></span><div><small>累计交易费用</small><strong>{money(metrics.total_fees)}</strong></div><span className="risk-note">五项分项相加，滑点另计</span></div>
-                <div><span className="risk-icon"><Activity size={17} /></span><div><small>平均资金敞口</small><strong>{percent(metrics.exposure)}</strong></div><span className="risk-note">权益占比</span></div>
               </div>
-              <div className="risk-summary"><Gauge size={16} /><span>风险表现需结合数据粒度、成交假设与样本区间共同判断。</span></div>
-            </Panel>
-          </div>
 
-          <Panel className="data-lineage-panel">
-            <div className="data-lineage">
-              <div className="lineage-title"><Layers3 size={17} /><div><strong>数据血缘与口径</strong><span>本报告基于后端实际返回的数据元信息</span></div></div>
-              <div className="lineage-tags"><Badge>{reportDailySource} 日线</Badge>{reportIntradaySource && <Badge tone="indigo">{reportIntradaySource} 5分钟</Badge>}{reportIndexSource && <Badge tone="green">指数大盘门</Badge>}{reportSynthetic && <SyntheticNotice compact />}</div>
-            </div>
-            {Object.keys(report.data_info || {}).length > 0 && <div className="data-info-grid">{Object.entries(report.data_info).map(([key, value]) => <div key={key}><span>{key}</span><strong title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
-            {report.warnings.length > 0 ? <div className="warning-box"><AlertTriangle size={18} /><div><strong>数据与近似口径提醒</strong><small>全程不变的口径 / 数据边界；逐轮决策日志见下方「换票轨迹」展开行</small><ul>{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></div></div> : <div className="no-warning"><FlaskConical size={15} />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
+              <div className="mt-3 flex flex-col gap-2 border-t pt-3 lg:flex-row lg:items-center lg:justify-between">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
+                  {mode === 'funnel' ? (
+                    <span>漏斗轮动 · {screener.boards.join(' / ')} · 每次清仓后重跑 L0→L4 取第一名换票（日线口径）</span>
+                  ) : selectedDataset ? (
+                    <><span>{selectedDataset.rows.toLocaleString('zh-CN')} 行</span><i className="size-1 rounded-full bg-border" /><span>{selectedDataset.timeframe} 粒度</span><i className="size-1 rounded-full bg-border" /><span>{shortDate(selectedDataset.start)} — {shortDate(selectedDataset.end)}</span>{selectedDataset.is_synthetic && <SyntheticNotice compact />}</>
+                  ) : <span>请选择主数据集以查看数据边界</span>}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" type="button" onClick={() => void applyToPaper()} disabled={applying || jobActive}>
+                    {applying ? <><Loader2 className="animate-spin" />正在应用</> : <><ArrowDownToLine />应用到模拟盘</>}
+                  </Button>
+                  <Button size="sm" type="submit" disabled={jobActive || (mode === 'single' && !datasetId)}>
+                    {jobActive ? <><Loader2 className="animate-spin" />正在运行回测</> : <><Play />运行回测</>}
+                  </Button>
+                </div>
+              </div>
+
+              {jobView && (
+                <div className="mt-3 rounded-xl border bg-muted/30 p-3" role="status">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-[12px] font-semibold">{jobView.status === 'RUNNING' ? '回测进行中' : `回测${statusLabel(jobView.status)}`} · {jobView.name || '后台回测'}</span>
+                    <div className="flex items-center gap-1.5">
+                      {jobView.status === 'RUNNING' && <Button variant="outline" size="sm" onClick={() => void cancelJob()} disabled={jobBusy}><Square className="size-3.5" />停止</Button>}
+                      {JOB_RESUMABLE_STATUSES.includes(jobView.status) && <><Button variant="outline" size="sm" onClick={() => void resumeJob()} disabled={jobBusy}><Play />继续</Button><Button variant="ghost" size="sm" onClick={dismissJob} disabled={jobBusy}>放弃</Button></>}
+                    </div>
+                  </div>
+                  <Progress value={Math.max(0, Math.min(100, jobView.progress))} className="mt-2" />
+                  <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] text-muted-foreground">
+                    <span>{jobView.progress.toFixed(1)}%</span>
+                    <span>{jobView.cursor_date ? `已跑至 ${jobView.cursor_date}` : '等待首个交易日完成'}</span>
+                    {jobView.total_days ? <span>共 {integer(jobView.total_days)} 交易日</span> : null}
+                    {jobView.error ? <span className="text-destructive">{jobView.error}</span> : null}
+                  </div>
+                </div>
+              )}
+            </form>
           </Panel>
+        )}
 
-          {isFunnel && trailData && trailData.total > 0 && (
-            <Panel className="rotation-trail-panel" title="换票轨迹" description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待 · 点行首箭头展开该轮决策日志 · 共 ${trailData.total} 次筛选`} action={<Layers3 size={18} />}>
-              <div className="table-scroll">
-                <table>
-                  <thead><tr><th></th><th>轮次</th><th>选股日</th><th>标的</th><th>名称</th><th className="num">入选 Chg20D</th><th>L0 门</th><th className="num">入场</th><th className="num">出场</th><th className="num">净盈亏</th><th>状态</th></tr></thead>
-                  <tbody>
-                    {rotationTrail.map((item, index) => {
-                      const trailKey = item.round || `${item.select_date}-${index}`;
-                      const expanded = expandedTrails.has(trailKey);
-                      return (
-                        <Fragment key={trailKey}>
-                          <tr className={item.status === 'WAITING' ? 'trail-waiting' : ''}>
-                            <td>
-                              <button className="trail-expand-btn" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>
-                                {expanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                              </button>
-                            </td>
-                            <td><strong className="round-id">{item.round || `#${(trailPage - 1) * trailPageSize + index + 1}`}</strong></td>
-                            <td>{shortDate(item.select_date)}</td>
-                            <td>{item.symbol ? <strong title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="muted">空仓等待</span>}</td>
-                            <td>{item.name || '—'}</td>
-                            <td className={`num ${item.chg20d_at_select != null ? (item.chg20d_at_select >= 0 ? 'positive' : 'negative') : ''}`}>{item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</td>
-                            <td><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></td>
-                            <td className="num">{item.entry_date ? shortDate(item.entry_date) : '—'}</td>
-                            <td className="num">{item.exit_date ? shortDate(item.exit_date) : '—'}</td>
-                            <td className={`num ${item.pnl != null ? (item.pnl >= 0 ? 'positive' : 'negative') : ''}`}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</td>
-                            <td><Badge tone={item.status === 'CLOSED' ? 'green' : item.status === 'OPEN' ? 'indigo' : 'amber'}>{item.status === 'CLOSED' ? '已结束' : item.status === 'OPEN' ? '持仓中' : '空仓等待'}</Badge></td>
-                          </tr>
-                          {expanded && (
-                            <tr className="trail-detail-row">
-                              <td></td>
-                              <td colSpan={10}>
-                                <div className="trail-detail">
-                                  <div className="trail-funnel">
-                                    {[
-                                      { tag: '全市场', value: item.funnel?.universe },
-                                      { tag: 'L0 大盘门', value: item.funnel?.after_l0 },
-                                      { tag: 'L1 超跌', value: item.funnel?.after_l1 },
-                                      { tag: 'L2 否决', value: item.funnel?.after_l2 },
-                                      { tag: 'L3 容量', value: item.funnel?.after_l3 },
-                                      { tag: '可用候选', value: item.funnel?.eligible },
-                                    ].map((stage) => (
-                                      <span className="trail-funnel-stage" key={stage.tag}><small>{stage.tag}</small><strong>{stage.value ?? '—'}</strong></span>
-                                    ))}
-                                  </div>
-                                  {item.screen_warnings && item.screen_warnings.length > 0 ? (
-                                    <ul className="trail-warnings">
-                                      {item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}
-                                    </ul>
-                                  ) : <p className="trail-no-warning">本轮选股无逐轮决策提示。</p>}
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </Fragment>
-                      );
+        {workspaceTab === 'reports' && (
+          viewingReport ? (
+            reportLoading ? <Panel><Loading label="正在读取回测报告" /></Panel> : report && metrics ? (
+              <div>
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <Button variant="outline" size="sm" type="button" onClick={() => setViewingReport(false)}><ArrowLeft />返回报告列表</Button>
+                </div>
+                <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                  <div>
+                    <div className="mb-1 flex items-center gap-2 font-mono text-[10px] tracking-wide text-muted-foreground"><Badge tone="indigo">{statusLabel(report.status)}</Badge><span>REPORT / {report.id.slice(0, 8).toUpperCase()}</span></div>
+                    <h2 className="text-xl font-semibold tracking-tight">{report.name}</h2>
+                    <p className="mt-1 text-[12px] text-muted-foreground">生成于 {dateTime(report.created_at)} · 初始资金 {money(metrics.initial_cash, 0)}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={() => void exportCsv('trades')} disabled={exporting !== null}><ArrowDownToLine />{exporting === 'trades' ? '导出中' : '导出成交'}</Button>
+                    <Button variant="outline" size="sm" onClick={() => void exportCsv('orders')} disabled={exporting !== null}><ArrowDownToLine />{exporting === 'orders' ? '导出中' : '导出委托'}</Button>
+                    <Button variant="destructive" size="sm" onClick={() => setPendingDelete({ id: report.id, name: report.name })} disabled={deletingId === report.id}><Trash2 />{deletingId === report.id ? '删除中' : '删除报告'}</Button>
+                  </div>
+                </div>
+
+                <MetricGrid columns={6}>
+                  <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={`期末权益 ${money(metrics.final_equity)}`} />
+                  <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={`买入持有 ${signedPercent(metrics.buy_hold_return)}`} />
+                  <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}`} />
+                  <Metric label="夏普比率" value={number(metrics.sharpe_ratio)} sub={`波动率 ${percent(metrics.volatility)}`} />
+                  <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
+                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`} />
+                </MetricGrid>
+
+                <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
+                  <Panel title="权益与风险轨迹" description="账户权益、实际投入与回撤随时间的变化" action={<div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-primary" />账户权益</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-muted-foreground" />实际投入</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-success" />回撤</span></div>}>
+                    <div className="h-[320px] w-full">
+                      {report.equity_curve.length > 0 ? (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <ComposedChart data={report.equity_curve} margin={{ top: 12, right: 4, left: 4, bottom: 0 }}>
+                            <defs><linearGradient id="equityFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#5046d8" stopOpacity={0.14} /><stop offset="100%" stopColor="#5046d8" stopOpacity={0} /></linearGradient></defs>
+                            <CartesianGrid stroke="#ececf1" strokeDasharray="3 4" vertical={false} />
+                            <XAxis dataKey="date" tickFormatter={(value: string) => value.slice(5, 10)} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={48} dy={8} />
+                            <YAxis yAxisId="money" tickFormatter={(value: number) => `${(value / 10000).toFixed(0)}万`} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} width={52} domain={['auto', 'auto']} />
+                            <YAxis yAxisId="drawdown" orientation="right" tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`} tick={{ fill: '#9a9aa3', fontSize: 11 }} axisLine={false} tickLine={false} width={42} domain={['auto', 0]} />
+                            <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="rounded-lg border bg-popover p-3 text-xs shadow-md"><strong className="block text-foreground">{label}</strong>{[['账户权益', money(payload[0].payload.equity)], ['实际投入', money(payload[0].payload.invested)], ['可用现金', money(payload[0].payload.cash)], ['持仓市值', money(payload[0].payload.market_value)], ['回撤', percent(payload[0].payload.drawdown)], ['持仓数量', integer(payload[0].payload.position_qty)]].map(([k, v]) => <div key={String(k)} className="mt-1 flex items-center justify-between gap-4"><span className="text-muted-foreground">{k}</span><b className="font-mono text-foreground">{v}</b></div>)}</div> : null} />
+                            <Area yAxisId="money" type="monotone" dataKey="equity" stroke="#5046d8" strokeWidth={2.2} fill="url(#equityFill)" activeDot={{ r: 4, fill: '#5046d8', stroke: '#fff', strokeWidth: 2 }} />
+                            <Line yAxisId="money" type="monotone" dataKey="invested" stroke="#8b8b98" strokeWidth={1.5} dot={false} strokeDasharray="5 4" />
+                            <Line yAxisId="drawdown" type="stepAfter" dataKey="drawdown" stroke="#138064" strokeWidth={1.4} dot={false} />
+                          </ComposedChart>
+                        </ResponsiveContainer>
+                      ) : <EmptyState compact title="暂无权益曲线" description="报告未返回可绘制的时序数据。" />}
+                    </div>
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>左轴：资金（万元） · 右轴：回撤（%）</span><span>期末 {report.equity_curve[report.equity_curve.length - 1]?.date || '—'}</span></div>
+                  </Panel>
+
+                  <Panel title="本轮风险诊断" description="从资金占用到尾部风险的横向检查" action={<ShieldAlert className="size-4" />}>
+                    <div className="grid gap-1.5">
+                      {[
+                        { icon: WalletCards, label: '最大资金投入', value: money(metrics.max_invested), note: '峰值占用' },
+                        { icon: TrendingDown, label: '最大浮亏', value: money(metrics.max_float_loss), note: '未实现口径', tone: 'text-success' },
+                        { icon: RotateCcw, label: '做 T 净贡献', value: signedMoney(metrics.t_net_profit), note: `${integer(metrics.t_trade_count)} 笔`, tone: metrics.t_net_profit >= 0 ? 'text-destructive' : 'text-success' },
+                        ...(betaInfo?.enabled ? [{ icon: Layers3, label: 'ETF beta 净贡献', value: signedMoney(Number(betaInfo.pnl ?? 0)), note: `${integer(Number(betaInfo.trade_count ?? 0))} 笔 · ${betaInfo.exit_reason || '持仓中'}`, tone: Number(betaInfo.pnl ?? 0) >= 0 ? 'text-destructive' : 'text-success' }] : []),
+                        { icon: CircleDollarSign, label: '累计交易费用', value: money(metrics.total_fees), note: '五項分项相加，滑点另计' },
+                        { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
+                      ].map(({ icon: Icon, label, value, note, tone }) => (
+                        <div key={label} className="flex items-center gap-2 rounded-lg border bg-card px-2.5 py-2">
+                          <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
+                          <div className="min-w-0 flex-1"><small className="block text-[10px] text-muted-foreground">{label}</small><strong className={cn('block font-mono text-[13px]', tone)}>{value}</strong></div>
+                          <span className="text-right text-[10px] text-muted-foreground">{note}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-muted/60 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground"><Gauge className="mt-0.5 size-3 shrink-0" /><span>风险表现需结合数据粒度、成交假设与样本区间共同判断。</span></div>
+                  </Panel>
+                </div>
+
+                <Panel className="mb-3" title="数据血缘与口径" description="本报告基于后端实际返回的数据元信息" action={<Layers3 className="size-4" />}>
+                  <div className="mb-2 flex flex-wrap gap-1.5"><Badge>{reportDailySource} 日线</Badge>{reportIntradaySource && <Badge tone="indigo">{reportIntradaySource} 5分钟</Badge>}{reportIndexSource && <Badge tone="green">指数大盘门</Badge>}{reportSynthetic && <SyntheticNotice compact />}</div>
+                  {Object.keys(report.data_info || {}).length > 0 && <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-3">{Object.entries(report.data_info).map(([key, value]) => <div key={key} className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-2 py-1 text-[10px]"><span className="text-muted-foreground">{key}</span><strong className="truncate font-mono text-foreground" title={typeof value === 'object' ? JSON.stringify(value) : String(value)}>{typeof value === 'object' ? JSON.stringify(value) : String(value)}</strong></div>)}</div>}
+                  {report.warnings.length > 0 ? (
+                    <Alert className="mt-2 border-warning/25 bg-warning/5 text-warning">
+                      <AlertTriangle />
+                      <AlertTitle>数据与近似口径提醒</AlertTitle>
+                      <AlertDescription className="text-warning/80"><ul className="list-disc space-y-0.5 pl-4">{report.warnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul></AlertDescription>
+                    </Alert>
+                  ) : <div className="mt-2 flex items-center gap-1.5 text-[10px] text-muted-foreground"><FlaskConical className="size-3.5" />后端未返回额外警告；仍请留意日线无法还原精确 tick 成交路径。</div>}
+                </Panel>
+
+                {isFunnel && trailData && trailData.total > 0 && (
+                  <Panel className="mb-3" title="换票轨迹" description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待 · 共 ${trailData.total} 次筛选`} action={<Layers3 className="size-4" />} flush>
+                    <Table>
+                      <TableHeader><TableRow><TableHead className="w-8" /><TableHead>轮次</TableHead><TableHead>选股日</TableHead><TableHead>标的</TableHead><TableHead>名称</TableHead><TableHead className="text-right">入选 Chg20D</TableHead><TableHead>L0 门</TableHead><TableHead className="text-right">入场</TableHead><TableHead className="text-right">出场</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead>状态</TableHead></TableRow></TableHeader>
+                      <TableBody>
+                        {rotationTrail.map((item, index) => {
+                          const trailKey = item.round || `${item.select_date}-${index}`;
+                          const expanded = expandedTrails.has(trailKey);
+                          return (
+                            <Fragment key={trailKey}>
+                              <TableRow className={item.status === 'WAITING' ? 'bg-muted/25' : ''}>
+                                <TableCell><button className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>{expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</button></TableCell>
+                                <TableCell><strong className="font-mono text-[11px] text-primary">{item.round || `#${(trailPage - 1) * trailPageSize + index + 1}`}</strong></TableCell>
+                                <TableCell>{shortDate(item.select_date)}</TableCell>
+                                <TableCell>{item.symbol ? <strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
+                                <TableCell>{item.name || '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.chg20d_at_select != null && (item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success'))}>{item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</TableCell>
+                                <TableCell><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></TableCell>
+                                <TableCell className="text-right">{item.entry_date ? shortDate(item.entry_date) : '—'}</TableCell>
+                                <TableCell className="text-right">{item.exit_date ? shortDate(item.exit_date) : '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
+                                <TableCell><Badge tone={item.status === 'CLOSED' ? 'green' : item.status === 'OPEN' ? 'indigo' : 'amber'}>{item.status === 'CLOSED' ? '已结束' : item.status === 'OPEN' ? '持仓中' : '空仓等待'}</Badge></TableCell>
+                              </TableRow>
+                              {expanded && (
+                                <TableRow className="bg-muted/20">
+                                  <TableCell />
+                                  <TableCell colSpan={10}>
+                                    <div className="py-1">
+                                      <div className="flex flex-wrap gap-1.5">
+                                        {[{ tag: '全市场', value: item.funnel?.universe }, { tag: 'L0 大盘门', value: item.funnel?.after_l0 }, { tag: 'L1 超跌', value: item.funnel?.after_l1 }, { tag: 'L2 否决', value: item.funnel?.after_l2 }, { tag: 'L3 容量', value: item.funnel?.after_l3 }, { tag: '可用候选', value: item.funnel?.eligible }].map((stage) => (
+                                          <span key={stage.tag} className="rounded-md border bg-card px-2 py-1 text-[10px]"><small className="mr-1 text-muted-foreground">{stage.tag}</small><strong className="font-mono">{stage.value ?? '—'}</strong></span>
+                                        ))}
+                                      </div>
+                                      {item.screen_warnings && item.screen_warnings.length > 0 ? <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-muted-foreground">{item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}</ul> : <p className="mt-1.5 text-[10px] text-muted-foreground">本轮选股无逐轮决策提示。</p>}
+                                    </div>
+                                  </TableCell>
+                                </TableRow>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                    <div className="px-4 pb-4"><PaginationBar page={trailData.page} pageSize={trailData.page_size} total={trailData.total} totalPages={trailData.total_pages} onPageChange={setTrailPage} onPageSizeChange={(size) => { setTrailPageSize(size); setTrailPage(1); }} disabled={trailLoading} /></div>
+                  </Panel>
+                )}
+
+                <Panel className="mb-3" flush>
+                  <div className="flex flex-col gap-2 border-b px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                    <Tabs value={tableTab} onValueChange={(value) => setTableTab(value as 'rounds' | 'trades' | 'orders')}>
+                      <TabsList>
+                        <TabsTrigger value="rounds">已结束轮次<span className="ml-1 font-mono text-[10px] text-muted-foreground">{roundsTotal}</span></TabsTrigger>
+                        <TabsTrigger value="trades">成交明细<span className="ml-1 font-mono text-[10px] text-muted-foreground">{tradesTotal}</span></TabsTrigger>
+                        <TabsTrigger value="orders">委托记录<span className="ml-1 font-mono text-[10px] text-muted-foreground">{ordersTotal}</span></TabsTrigger>
+                      </TabsList>
+                    </Tabs>
+                    <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"><Clock3 className="size-3" />按时间顺序记录</span>
+                  </div>
+                  {tableTab === 'rounds' && <Table><TableHeader><TableRow><TableHead>轮次</TableHead><TableHead>开始时间</TableHead><TableHead>结束时间</TableHead><TableHead className="text-right">最大投入</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead className="text-right">收益率</TableHead><TableHead className="text-right">成交数</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
+                    {roundsTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : recordItems.map((round, index) => {
+                      const pnl = roundNumber(round, ['net_profit', 'pnl', 'realized_pnl']);
+                      const returns = roundNumber(round, ['return_rate', 'total_return', 'return']);
+                      const seq = (recordPage - 1) * recordPageSize + index + 1;
+                      return <TableRow key={String(round.id ?? index)}><TableCell><strong className="font-mono text-[11px] text-primary">#{String(roundValue(round, ['round', 'index']) ?? seq).padStart(2, '0')}</strong></TableCell><TableCell>{shortDate(String(roundValue(round, ['start_date', 'start', 'opened_at']) || ''))}</TableCell><TableCell>{shortDate(String(roundValue(round, ['end_date', 'end', 'closed_at']) || ''))}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(roundNumber(round, ['max_invested', 'invested']))}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', pnl !== undefined && (pnl >= 0 ? 'text-destructive' : 'text-success'))}>{signedMoney(pnl)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', returns !== undefined && (returns >= 0 ? 'text-destructive' : 'text-success'))}>{signedPercent(returns)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(roundNumber(round, ['trade_count', 'trades_count', 'total_trades']))}</TableCell><TableCell><Badge tone={lower(round.status) === 'closed' ? 'green' : 'neutral'}>{statusLabel(round.status || 'closed')}</Badge></TableCell></TableRow>;
                     })}
-                  </tbody>
-                </table>
+                  </TableBody></Table>}
+                  {tableTab === 'trades' && <Table><TableHeader><TableRow><TableHead>成交时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>用途</TableHead><TableHead className="text-right">价格</TableHead><TableHead className="text-right">数量</TableHead><TableHead className="text-right">成交额</TableHead><TableHead className="text-right">费用</TableHead><TableHead className="text-right">已实现盈亏</TableHead></TableRow></TableHeader><TableBody>
+                    {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : recordItems.map((trade, index) => <TableRow key={String(trade.id ?? `${trade.timestamp}-${index}`)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
+                  </TableBody></Table>}
+                  {tableTab === 'orders' && <Table><TableHeader><TableRow><TableHead>委托时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>类型</TableHead><TableHead className="text-right">限价</TableHead><TableHead className="text-right">委托数量</TableHead><TableHead className="text-right">已成交</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
+                    {ordersTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : recordItems.map((order) => <TableRow key={order.id}><TableCell>{dateTime(order.created_at || order.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={order.symbol}>{displaySymbol(order.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(order.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(order.side)}</span></TableCell><TableCell>{orderTypeLabel(order.order_type || order.type)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(order.limit_price ?? order.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.filled_quantity ?? order.filled_qty)}</TableCell><TableCell><Badge>{statusLabel(order.status)}</Badge></TableCell></TableRow>)}
+                  </TableBody></Table>}
+                  <div className="px-4 pb-4">
+                    <PaginationBar page={recordData?.page ?? recordPage} pageSize={recordData?.page_size ?? recordPageSize} total={tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal} totalPages={recordData?.total_pages ?? Math.max(1, Math.ceil((tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal) / recordPageSize))} onPageChange={setRecordPage} onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }} disabled={recordLoading} />
+                  </div>
+                </Panel>
               </div>
-              <PaginationBar
-                page={trailData.page}
-                pageSize={trailData.page_size}
-                total={trailData.total}
-                totalPages={trailData.total_pages}
-                onPageChange={setTrailPage}
-                onPageSizeChange={(size) => { setTrailPageSize(size); setTrailPage(1); }}
-                disabled={trailLoading}
-              />
-            </Panel>
-          )}
-
-          <Panel className="records-panel">
-            <div className="records-header">
-              <div className="tabs" role="tablist">
-                <button className={tableTab === 'rounds' ? 'active' : ''} onClick={() => setTableTab('rounds')} role="tab">已结束轮次<span>{roundsTotal}</span></button>
-                <button className={tableTab === 'trades' ? 'active' : ''} onClick={() => setTableTab('trades')} role="tab">成交明细<span>{tradesTotal}</span></button>
-                <button className={tableTab === 'orders' ? 'active' : ''} onClick={() => setTableTab('orders')} role="tab">委托记录<span>{ordersTotal}</span></button>
-              </div>
-              <span className="records-caption"><Clock3 size={14} />按时间顺序记录</span>
-            </div>
-            <div className="table-scroll">
-              {tableTab === 'rounds' && <table><thead><tr><th>轮次</th><th>开始时间</th><th>结束时间</th><th className="num">最大投入</th><th className="num">净盈亏</th><th className="num">收益率</th><th className="num">成交数</th><th>状态</th></tr></thead><tbody>
-                {roundsTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : recordItems.map((round, index) => {
-                  const pnl = roundNumber(round, ['net_profit', 'pnl', 'realized_pnl']);
-                  const returns = roundNumber(round, ['return_rate', 'total_return', 'return']);
-                  const seq = (recordPage - 1) * recordPageSize + index + 1;
-                  return <tr key={String(round.id ?? index)}><td><strong className="round-id">#{String(roundValue(round, ['round', 'index']) ?? seq).padStart(2, '0')}</strong></td><td>{shortDate(String(roundValue(round, ['start_date', 'start', 'opened_at']) || ''))}</td><td>{shortDate(String(roundValue(round, ['end_date', 'end', 'closed_at']) || ''))}</td><td className="num">{money(roundNumber(round, ['max_invested', 'invested']))}</td><td className={`num ${pnl !== undefined ? pnl >= 0 ? 'positive' : 'negative' : ''}`}>{signedMoney(pnl)}</td><td className={`num ${returns !== undefined ? returns >= 0 ? 'positive' : 'negative' : ''}`}>{signedPercent(returns)}</td><td className="num">{integer(roundNumber(round, ['trade_count', 'trades_count', 'total_trades']))}</td><td><Badge tone={lower(round.status) === 'closed' ? 'green' : 'neutral'}>{statusLabel(round.status || 'closed')}</Badge></td></tr>;
-                })}
-              </tbody></table>}
-              {tableTab === 'trades' && <table><thead><tr><th>成交时间</th><th>标的</th><th>方向</th><th>用途</th><th className="num">价格</th><th className="num">数量</th><th className="num">成交额</th><th className="num">费用</th><th className="num">已实现盈亏</th></tr></thead><tbody>
-                {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : recordItems.map((trade, index) => <tr key={String(trade.id ?? `${trade.timestamp}-${index}`)}><td>{dateTime(trade.timestamp)}</td><td><strong title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></td><td><span className={`side-label ${lower(trade.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(trade.side)}</span></td><td>{purposeLabel(trade.purpose)}</td><td className="num">{money(trade.price)}</td><td className="num">{integer(trade.quantity)}</td><td className="num">{money(trade.amount ?? trade.notional)}</td><td className="num" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</td><td className={`num ${(trade.realized_pnl || 0) >= 0 ? 'positive' : 'negative'}`}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</td></tr>)}
-              </tbody></table>}
-              {tableTab === 'orders' && <table><thead><tr><th>委托时间</th><th>标的</th><th>方向</th><th>类型</th><th className="num">限价</th><th className="num">委托数量</th><th className="num">已成交</th><th>状态</th></tr></thead><tbody>
-                {ordersTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : recordItems.map((order) => <tr key={order.id}><td>{dateTime(order.created_at || order.timestamp)}</td><td><strong title={order.symbol}>{displaySymbol(order.symbol)}</strong></td><td><span className={`side-label ${lower(order.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(order.side)}</span></td><td>{orderTypeLabel(order.order_type || order.type)}</td><td className="num">{money(order.limit_price ?? order.price)}</td><td className="num">{integer(order.quantity)}</td><td className="num">{integer(order.filled_quantity ?? order.filled_qty)}</td><td><Badge>{statusLabel(order.status)}</Badge></td></tr>)}
-              </tbody></table>}
-            </div>
-            <PaginationBar
-              page={recordData?.page ?? recordPage}
-              pageSize={recordData?.page_size ?? recordPageSize}
-              total={tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal}
-              totalPages={recordData?.total_pages ?? Math.max(1, Math.ceil((tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal) / recordPageSize))}
-              onPageChange={setRecordPage}
-              onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }}
-              disabled={recordLoading}
-            />
-          </Panel>
-            </div>
+            ) : (
+              <Panel>
+                <EmptyState icon={<BarChart3 className="size-6" />} title="报告数据不可用" description="该报告缺少指标数据，可能仍在生成或已被删除。" action={<Button variant="outline" size="sm" type="button" onClick={() => setViewingReport(false)}>返回报告列表</Button>} />
+              </Panel>
+            )
           ) : (
-            <Panel>
-              <EmptyState
-                icon={<BarChart3 size={28} />}
-                title="报告数据不可用"
-                description="该报告缺少指标数据，可能仍在生成或已被删除。"
-                action={<button className="button secondary" type="button" onClick={() => setViewingReport(false)}>返回报告列表</button>}
-              />
+            <Panel title="回测报告" description={reportQuery ? `搜索「${reportQuery}」 · 共 ${reportList?.total ?? 0} 份` : `共 ${reportList?.total ?? 0} 份报告 · 可按 Report ID 或名称搜索`} action={<Button variant="outline" size="sm" type="button" onClick={() => setReportListVersion((current) => current + 1)} disabled={reportListLoading}><RefreshCw className={reportListLoading ? 'animate-spin' : ''} />刷新</Button>} flush>
+              <div className="flex flex-wrap items-center gap-2 px-4 pb-2 pt-1">
+                <div className="relative w-full max-w-sm"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} placeholder="搜索 Report ID 或名称" aria-label="搜索回测报告" className="pl-8" /></div>
+                {reportQuery && <button className="text-[11px] text-primary hover:underline" type="button" onClick={() => setReportSearch('')}>清空搜索</button>}
+              </div>
+              {reportListLoading && !reportList ? <div className="px-4 pb-4"><Loading label="正在载入回测报告" /></div> : (
+                <Table>
+                  <TableHeader><TableRow><TableHead>Report ID</TableHead><TableHead>名称</TableHead><TableHead>状态</TableHead><TableHead>创建时间</TableHead><TableHead>操作</TableHead></TableRow></TableHeader>
+                  <TableBody>
+                    {(reportList?.items.length ?? 0) === 0 ? <TableEmpty colSpan={5} message={reportQuery ? `没有匹配「${reportQuery}」的报告` : '暂无回测报告，先去运行一组实验吧'} /> : reportList?.items.map((item) => (
+                      <TableRow key={item.id}>
+                        <TableCell><code className="font-mono text-[10px] text-muted-foreground" title={item.id}>{item.id}</code></TableCell>
+                        <TableCell><strong className="text-[12px]">{item.name}</strong></TableCell>
+                        <TableCell><Badge tone={lower(item.status) === 'completed' ? 'green' : 'neutral'}>{statusLabel(item.status)}</Badge></TableCell>
+                        <TableCell className="text-[12px]">{dateTime(item.created_at)}</TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1">
+                            <button className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent" type="button" onClick={() => void loadReport(item.id)} disabled={deletingId === item.id}>查看</button>
+                            <button className="rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10" type="button" onClick={() => setPendingDelete({ id: item.id, name: item.name })} disabled={deletingId === item.id}>{deletingId === item.id ? '删除中' : '删除'}</button>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+              <div className="px-4 pb-4"><PaginationBar page={reportList?.page ?? reportPage} pageSize={reportList?.page_size ?? reportPageSize} total={reportList?.total ?? 0} totalPages={reportList?.total_pages ?? 0} onPageChange={setReportPage} onPageSizeChange={(size) => { setReportPageSize(size); setReportPage(1); }} disabled={reportListLoading} /></div>
+              {(reportList?.items.length ?? 0) === 0 && !reportQuery && !reportListLoading && (
+                <div className="flex justify-center pb-4"><Button type="button" onClick={() => setWorkspaceTab('run')}><Play />去运行回测</Button></div>
+              )}
             </Panel>
           )
-        ) : (
-          <Panel
-            className="report-list-panel"
-            title="回测报告"
-            description={reportQuery ? `搜索「${reportQuery}」 · 共 ${reportList?.total ?? 0} 份` : `共 ${reportList?.total ?? 0} 份报告 · 可按 Report ID 或名称搜索`}
-            action={<button className="button secondary" type="button" onClick={() => setReportListVersion((current) => current + 1)} disabled={reportListLoading}><RefreshCw size={15} />刷新</button>}
-          >
-            <div className="report-list-toolbar">
-              <div className="input-icon report-search">
-                <Search size={15} />
-                <input
-                  value={reportSearch}
-                  onChange={(event) => setReportSearch(event.target.value)}
-                  placeholder="搜索 Report ID 或名称"
-                  aria-label="搜索回测报告"
-                />
-              </div>
-              {reportQuery && (
-                <button className="text-button" type="button" onClick={() => setReportSearch('')}>清空搜索</button>
-              )}
-            </div>
-            <div className="table-scroll">
-              {reportListLoading && !reportList ? (
-                <Loading label="正在载入回测报告" />
-              ) : (
-                <table>
-                  <thead><tr><th>Report ID</th><th>名称</th><th>状态</th><th>创建时间</th><th>操作</th></tr></thead>
-                  <tbody>
-                    {(reportList?.items.length ?? 0) === 0 ? (
-                      <TableEmpty colSpan={5} message={reportQuery ? `没有匹配「${reportQuery}」的报告` : '暂无回测报告，先去运行一组实验吧'} />
-                    ) : reportList?.items.map((item) => (
-                      <tr key={item.id}>
-                        <td><code className="report-id" title={item.id}>{item.id}</code></td>
-                        <td><strong>{item.name}</strong></td>
-                        <td><Badge tone={lower(item.status) === 'completed' ? 'green' : 'neutral'}>{statusLabel(item.status)}</Badge></td>
-                        <td>{dateTime(item.created_at)}</td>
-                        <td>
-                          <div className="report-row-actions">
-                            <button className="report-link-button" type="button" onClick={() => void loadReport(item.id)} disabled={deletingId === item.id}>查看</button>
-                            <button className="report-link-button danger" type="button" onClick={() => void removeReport(item.id, item.name)} disabled={deletingId === item.id}>
-                              {deletingId === item.id ? '删除中' : '删除'}
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-            </div>
-            <PaginationBar
-              page={reportList?.page ?? reportPage}
-              pageSize={reportList?.page_size ?? reportPageSize}
-              total={reportList?.total ?? 0}
-              totalPages={reportList?.total_pages ?? 0}
-              onPageChange={setReportPage}
-              onPageSizeChange={(size) => { setReportPageSize(size); setReportPage(1); }}
-              disabled={reportListLoading}
-            />
-            {(reportList?.items.length ?? 0) === 0 && !reportQuery && !reportListLoading && (
-              <div className="report-list-empty-action">
-                <button className="button primary" type="button" onClick={() => setWorkspaceTab('run')}>
-                  <Play size={15} fill="currentColor" />去运行回测
-                </button>
-              </div>
-            )}
-          </Panel>
-        )
-      )}
+        )}
+      </Tabs>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(open) => { if (!open) setPendingDelete(null); }}
+        title="删除回测报告"
+        description={pendingDelete ? <>确定删除报告「{pendingDelete.name}」吗？<br />Report ID: <span className="font-mono">{pendingDelete.id}</span><br />将同步删除该报告的后台任务与检查点数据，且无法恢复。</> : ''}
+        confirmLabel="删除"
+        destructive
+        busy={deletingId !== null}
+        onConfirm={performDeleteReport}
+      />
     </div>
   );
 }

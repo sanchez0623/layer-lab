@@ -1,12 +1,21 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowDownLeft, ArrowUpRight, CircleDollarSign, FastForward, Landmark, Pause, Play,
+  Activity, AlertTriangle, ArrowDownLeft, ArrowUpRight, CircleDollarSign, FastForward, Landmark, Loader2, Pause, Play,
   Plus, Radio, RefreshCw, Repeat2, RotateCcw, Send, ShieldCheck, StepForward, Timer, Wallet, XCircle,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import { ApiError, api } from '../lib/api';
 import { cleanSymbolInput, dateTime, displaySymbol, integer, lower, money, number, orderTypeLabel, purposeLabel, shortDate, sideLabel, signedMoney, signedPercent, statusLabel } from '../lib/format';
 import FeeConfigPanel from '../components/FeeConfigPanel';
-import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, PageHeader, Panel, SyntheticNotice, TableEmpty } from '../components/Ui';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Progress } from '@/components/ui/progress';
+import { Switch } from '@/components/ui/switch';
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import type { AccountState, BoardRules, Dataset, FeeConfig, OrderPurpose, OrderSide, OrderType, PositionQuote, RotationPoolItem, SchedulerStatus, StrategyConfig, TradingRulesResponse, TradingSession } from '../types';
 
@@ -62,6 +71,30 @@ const defaultConfig: StrategyConfig = {
   slippage_bps: 1, volume_participation: 0.2,
 };
 
+function UnitInput({
+  value, onChange, unit, min, max, step, type = 'number', placeholder, disabled,
+}: {
+  value: string | number; onChange: (value: string) => void; unit: string;
+  min?: number; max?: number; step?: number; type?: string; placeholder?: string; disabled?: boolean;
+}) {
+  return (
+    <div className="relative">
+      <Input type={type} min={min} max={max} step={step} value={value} placeholder={placeholder} disabled={disabled} onChange={(event) => onChange(event.target.value)} className="pr-10" />
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
+    </div>
+  );
+}
+
+function Segmented({ options, value, onChange }: { options: Array<{ value: string; label: string }>; value: string; onChange: (value: string) => void }) {
+  return (
+    <div className="flex gap-0.5 rounded-lg bg-muted p-0.5">
+      {options.map((option) => (
+        <button key={option.value} type="button" onClick={() => onChange(option.value)} className={cn('rounded-md px-2.5 py-1 text-[11px] transition-colors', value === option.value ? 'bg-card text-foreground shadow-xs' : 'text-muted-foreground hover:text-foreground')}>{option.label}</button>
+      ))}
+    </div>
+  );
+}
+
 export default function PaperPage() {
   const [account, setAccount] = useState<AccountState | null>(null);
   const [datasets, setDatasets] = useState<Dataset[]>([]);
@@ -69,7 +102,7 @@ export default function PaperPage() {
   const [fees, setFees] = useState<FeeConfig>(defaultFeeConfig);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
+  const [pendingReset, setPendingReset] = useState(false);
   const [accountName, setAccountName] = useState('本地模拟账户');
   const [initialCash, setInitialCash] = useState(4000000);
   const [datasetId, setDatasetId] = useState('');
@@ -177,7 +210,7 @@ export default function PaperPage() {
             if (code) { setSymbol(code); broughtIn = true; }
             const label = [code, pending.candidate?.name].filter(Boolean).join(' ');
             const rotationText = current.rotation?.enabled ? '，已自动开启轮动（每次清仓后重新选股）' : '';
-            setSuccess(`已从选股结果建立模拟账户：${label || '候选标的'}（运行 ${pending.runId || '—'}）${rotationText}。`);
+            toast.success(`已从选股结果建立模拟账户：${label || '候选标的'}（运行 ${pending.runId || '—'}）${rotationText}。`);
           } catch {
             // 忽略损坏的 sessionStorage 数据
           }
@@ -359,7 +392,7 @@ export default function PaperPage() {
     try {
       const next = await api.liveTick(account.id, code);
       setAccount(next);
-      setSuccess('已按腾讯实时快照刷新本地撮合账户。');
+      toast.success('已按腾讯实时快照刷新本地撮合账户。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '腾讯实时行情刷新失败。');
     } finally {
@@ -404,7 +437,7 @@ export default function PaperPage() {
         const known = knownTradeCountRef.current;
         if (known !== null && tradeCount > known) {
           const latest = next.trades[tradeCount - 1];
-          setSuccess(`后端已自动成交：${sideLabel(latest.side)} ${integer(latest.quantity)} 股 @ ${money(latest.price)}（${dateTime(latest.timestamp)}），页面已同步。`);
+          toast.success(`后端已自动成交：${sideLabel(latest.side)} ${integer(latest.quantity)} 股 @ ${money(latest.price)}（${dateTime(latest.timestamp)}），页面已同步。`);
         }
         knownTradeCountRef.current = tradeCount;
         // 内容没变就不 setState，避免 15 秒一次的整页重渲染。
@@ -478,7 +511,7 @@ export default function PaperPage() {
       setAutoStrategy(Boolean(next.auto_strategy));
       const selected = datasets.find((item) => item.id === next.dataset_id);
       if (selected) setSymbol(cleanSymbolInput(selected.symbol));
-      setSuccess('虚拟账户已创建，可以开始逐根推送行情。');
+      toast.success('虚拟账户已创建，可以开始逐根推送行情。');
     } catch (cause) { setError(cause instanceof Error ? cause.message : '账户创建失败。'); }
     finally { setCreating(false); }
   };
@@ -490,7 +523,7 @@ export default function PaperPage() {
       const next = await api.setAutoStrategy(account.id, !account.auto_strategy);
       setAccount(next);
       setAutoStrategy(Boolean(next.auto_strategy));
-      setSuccess(next.auto_strategy ? '自动策略已开启：将复用回测策略状态机。' : '自动策略已关闭：仅保留手工委托撮合。');
+      toast.success(next.auto_strategy ? '自动策略已开启：将复用回测策略状态机。' : '自动策略已关闭：仅保留手工委托撮合。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '自动策略切换失败。');
     } finally {
@@ -534,7 +567,7 @@ export default function PaperPage() {
       const next = await api.updateAccountConfig(account.id, { t_target_net_spread: pct / 100 });
       setAccount(next);
       setTSpreadInput('');
-      setSuccess(`做T净利止盈已更新为 ${number(pct, 2)}%，下一根K线起生效。`);
+      toast.success(`做T净利止盈已更新为 ${number(pct, 2)}%，下一根K线起生效。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '做T净利止盈更新失败。');
     } finally {
@@ -554,7 +587,7 @@ export default function PaperPage() {
       const next = await api.updateAccountConfig(account.id, { t_exit_cutoff: normalized });
       setAccount(next);
       setTCutoffInput('');
-      setSuccess(`做T的T+1尾盘截止时间已更新为 ${normalized}，下一根K线起生效。`);
+      toast.success(`做T的T+1尾盘截止时间已更新为 ${normalized}，下一根K线起生效。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '做T截止时间更新失败。');
     } finally {
@@ -576,7 +609,7 @@ export default function PaperPage() {
       setAccount(next);
       setHoldingDaysInput('');
       setHoldingTpInput('');
-      setSuccess(`超期降阈已更新：持有 ≥${days} 个交易日后止盈降为 ${number(pct, 2)}%，下一根K线起生效。`);
+      toast.success(`超期降阈已更新：持有 ≥${days} 个交易日后止盈降为 ${number(pct, 2)}%，下一根K线起生效。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '超期降阈更新失败。');
     } finally {
@@ -590,7 +623,7 @@ export default function PaperPage() {
     try {
       const next = await api.updateAccountConfig(account.id, { etf_beta_enabled: enabled });
       setAccount(next);
-      setSuccess(enabled
+      toast.success(enabled
         ? `ETF beta 腿已开启（${etfSymbol}，${number(etfPct * 100, 0)}% 权益）；个股空仓且指数在 ${etfEntryMa} 日线上方时持有，选到个股后卖出换股。`
         : 'ETF beta 腿已关闭，已有 ETF 持仓不会被自动清仓。');
     } catch (cause) {
@@ -631,7 +664,7 @@ export default function PaperPage() {
       setAccount(next);
       setEtfSymbolInput(''); setEtfPctInput(''); setEtfEntryMaInput('');
       setEtfExitMaInput(''); setEtfStopInput('');
-      setSuccess('ETF beta 腿配置已更新，下一根 K 线起生效。');
+      toast.success('ETF beta 腿配置已更新，下一根 K 线起生效。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'ETF 配置更新失败。');
     } finally {
@@ -646,7 +679,7 @@ export default function PaperPage() {
     try {
       const next = await api.setRotation(account.id, { enabled: !account.rotation?.enabled });
       setAccount(next);
-      setSuccess(next.rotation?.enabled ? '池内轮动已开启：清仓后按 L4 顺序换票，L0 关门则空仓等待。' : '池内轮动已关闭。');
+      toast.success(next.rotation?.enabled ? '池内轮动已开启：清仓后按 L4 顺序换票，L0 关门则空仓等待。' : '池内轮动已关闭。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '轮动开关切换失败。');
     } finally {
@@ -660,7 +693,7 @@ export default function PaperPage() {
     if (code.length !== 6) { setError('请输入 6 位 A 股代码，例如 688200；沪深交易所由后端自动识别。'); return; }
     if (!Number.isInteger(quantity) || quantity <= 0) { setError('请填写正整数委托数量。'); return; }
     if (orderType === 'limit' && (!Number(limitPrice) || Number(limitPrice) <= 0)) { setError('限价委托需要填写大于 0 的委托价格。'); return; }
-    setSubmitting(true); setError(''); setSuccess('');
+    setSubmitting(true); setError('');
     try {
       const result = await api.placeOrder(account.id, {
         symbol: code, side, order_type: orderType, quantity,
@@ -668,7 +701,7 @@ export default function PaperPage() {
         purpose,
       });
       setAccount(result.account);
-      setSuccess(`${sideLabel(side)}委托已提交，状态：${statusLabel(result.order.status)}。`);
+      toast.success(`${sideLabel(side)}委托已提交，状态：${statusLabel(result.order.status)}。`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : '委托提交失败。'); }
     finally { setSubmitting(false); }
   };
@@ -676,16 +709,19 @@ export default function PaperPage() {
   const cancelOrder = async (id: string | number) => {
     if (!account) return;
     setCancelling(id); setError('');
-    try { setAccount(await api.cancelOrder(account.id, id)); setSuccess('委托已撤销，账户状态已同步。'); }
+    try { setAccount(await api.cancelOrder(account.id, id)); toast.success('委托已撤销，账户状态已同步。'); }
     catch (cause) { setError(cause instanceof Error ? cause.message : '撤单失败。'); }
     finally { setCancelling(null); }
   };
 
   const resetAccount = async () => {
-    if (!account || !window.confirm('确定重置此虚拟账户吗？\n\n当前持仓、订单和成交记录将被清除，此操作无法撤销。')) return;
-    setResetting(true); setError(''); setSuccess(''); setPlaying(false);
-    try { setAccount(await api.resetAccount(account.id)); setSuccess('虚拟账户已恢复至初始状态。'); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : '账户重置失败。'); }
+    if (!account) return;
+    setResetting(true); setError(''); setPlaying(false);
+    try {
+      setAccount(await api.resetAccount(account.id));
+      toast.success('虚拟账户已恢复至初始状态。');
+      setPendingReset(false);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : '账户重置失败。'); }
     finally { setResetting(false); }
   };
 
@@ -693,513 +729,272 @@ export default function PaperPage() {
   const canCancel = (status: string) => ['open', 'pending', 'partial', 'partially_filled', 'new'].includes(status.toLowerCase());
 
   return (
-    <div className="page paper-page">
+    <div className="animate-[page-in_.22s_ease-out]">
       <PageHeader
         eyebrow="EXECUTION / PAPER"
         title="模拟交易"
         description="接入腾讯 5 分钟实时快照，观察委托、T+1 可卖约束与双账本状态。"
-        actions={account ? <button className="button secondary" onClick={() => void refreshAccount(account.id)} disabled={loading}><RefreshCw size={15} className={loading ? 'spin' : ''} />刷新账户</button> : undefined}
+        actions={account ? <Button variant="outline" size="sm" onClick={() => void refreshAccount(account.id)} disabled={loading}><RefreshCw className={loading ? 'animate-spin' : ''} />刷新账户</Button> : undefined}
       />
       {error && <ErrorBanner message={error} onClose={() => setError('')} onRetry={() => void load()} />}
-      {success && <div className="inline-success"><ShieldCheck size={17} /><span>{success}</span><button className="text-button" onClick={() => setSuccess('')}>知道了</button></div>}
 
       {loading && !account ? <Panel><Loading label="正在读取模拟账户" /></Panel> : !account ? (
-        <Panel className="account-create-panel">
-          <div className="account-create-intro"><div className="create-icon"><Landmark size={25} /></div><div><h2>建立本地虚拟账户</h2><p>账户仅用于规则与撮合验证，不连接券商，不产生真实资金变动。</p></div></div>
-          <div className="form-grid create-account-form">
-            <Field label="账户名称"><input value={accountName} onChange={(event) => setAccountName(event.target.value)} /></Field>
-            <Field label="初始资金"><div className="input-with-unit"><input type="number" min="1" step="10000" value={initialCash} onChange={(event) => { const parsed = Number(event.target.value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} /><span>CNY</span></div></Field>
-            <Field label="行情数据集" hint="用于逐根推送"><select value={datasetId} onChange={(event) => { setDatasetId(event.target.value); const selected = datasets.find((item) => item.id === event.target.value); if (selected) setSymbol(cleanSymbolInput(selected.symbol)); }}><option value="">暂不绑定</option>{datasets.map((item) => <option key={item.id} value={item.id}>{item.name} · {displaySymbol(item.symbol)} · {item.timeframe}</option>)}</select></Field>
-            <label className="switch-row span-2 create-auto-switch"><span><strong>自动执行策略</strong><small>复用回测LayeredTStrategy状态机</small></span><input type="checkbox" checked={autoStrategy} onChange={(event) => setAutoStrategy(event.target.checked)} /><span className="switch" /></label>
-            <button className="button primary create-account-button" onClick={() => void createAccount()} disabled={creating}>{creating ? <span className="button-spinner" /> : <Plus size={16} />}{creating ? '正在创建' : '创建虚拟账户'}</button>
+        <Panel title="建立本地虚拟账户" description="账户仅用于规则与撮合验证，不连接券商，不产生真实资金变动。" action={<Landmark className="size-4" />}>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="账户名称"><Input value={accountName} onChange={(event) => setAccountName(event.target.value)} /></Field>
+            <Field label="初始资金"><UnitInput unit="CNY" min={1} step={10000} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} /></Field>
+            <Field label="行情数据集" hint="用于逐根推送">
+              <SelectField value={datasetId || '__none__'} onValueChange={(value) => { const nextValue = value === '__none__' ? '' : value; setDatasetId(nextValue); const selected = datasets.find((item) => item.id === nextValue); if (selected) setSymbol(cleanSymbolInput(selected.symbol)); }} options={[{ value: '__none__', label: '暂不绑定' }, ...datasets.map((item) => ({ value: item.id, label: `${item.name} · ${displaySymbol(item.symbol)} · ${item.timeframe}` }))]} ariaLabel="行情数据集" />
+            </Field>
+            <SwitchRow label="自动执行策略" description="复用回测 LayeredTStrategy 状态机" checked={autoStrategy} onCheckedChange={setAutoStrategy} className="self-end" />
           </div>
+          <Button className="mt-3 w-full sm:w-auto" onClick={() => void createAccount()} disabled={creating}>{creating ? <><Loader2 className="animate-spin" />正在创建</> : <><Plus />创建虚拟账户</>}</Button>
         </Panel>
-      ) : account && (
+      ) : (
         <>
-          <div className="account-context-bar">
-            <div><span className="account-avatar">{account.name.slice(0, 1).toUpperCase()}</span><div><strong>{account.name}</strong><span>ID {account.id.slice(0, 12)} · 游标 {integer(account.cursor)}</span></div></div>
-            <div className="account-context-right"><button className="button secondary" onClick={() => void toggleAutoStrategy()} disabled={togglingAuto}><RefreshCw size={14} className={togglingAuto ? 'spin' : ''} />{account.auto_strategy ? '自动策略开启' : '自动策略关闭'}</button>{currentDataset?.is_synthetic && <SyntheticNotice compact />}<Badge tone={lower(account.status) === 'active' ? 'green' : 'neutral'}>{statusLabel(account.status)}</Badge>{rotation?.enabled && <Badge tone="indigo">池内轮动</Badge>}<span>状态机 <b>{account.armed_state}</b></span><span>序列 <b>{account.sequence_index} / 16</b></span></div>
+          <div className="mb-3 flex flex-col gap-2 rounded-xl border bg-card px-3.5 py-3 shadow-xs lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-2.5">
+              <span className="grid size-9 place-items-center rounded-lg bg-accent font-mono text-sm font-medium text-accent-foreground">{account.name.slice(0, 1).toUpperCase()}</span>
+              <div><strong className="block text-[13px]">{account.name}</strong><span className="block font-mono text-[10px] text-muted-foreground">ID {account.id.slice(0, 12)} · 游标 {integer(account.cursor)}</span></div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => void toggleAutoStrategy()} disabled={togglingAuto}><RefreshCw className={togglingAuto ? 'animate-spin' : ''} />{account.auto_strategy ? '自动策略开启' : '自动策略关闭'}</Button>
+              {currentDataset?.is_synthetic && <SyntheticNotice compact />}
+              <Badge tone={lower(account.status) === 'active' ? 'green' : 'neutral'}>{statusLabel(account.status)}</Badge>
+              {rotation?.enabled && <Badge tone="indigo">池内轮动</Badge>}
+              <span className="text-[11px] text-muted-foreground">状态机 <b className="font-mono text-foreground">{account.armed_state}</b></span>
+              <span className="text-[11px] text-muted-foreground">序列 <b className="font-mono text-foreground">{account.sequence_index} / 16</b></span>
+            </div>
           </div>
-          <div className="metrics-grid four account-metrics">
-            <Metric label="账户权益" value={money(account.equity)} icon={<Wallet size={15} />} sub={`初始资金 ${money(account.initial_cash, 0)}`} />
+
+          <MetricGrid columns={4}>
+            <Metric label="账户权益" value={money(account.equity)} icon={<Wallet className="size-3.5" />} sub={`初始资金 ${money(account.initial_cash, 0)}`} />
             <Metric label="可用资金" value={money(account.available_cash)} sub={`账面现金 ${money(account.cash)}`} />
             <Metric label="持仓市值" value={money(account.market_value)} sub={`敞口 ${account.equity ? number(account.market_value / account.equity * 100, 1) : '0.0'}%`} />
             <Metric label="已实现盈亏" value={signedMoney(account.realized_pnl)} tone={account.realized_pnl >= 0 ? 'positive' : 'negative'} sub={`做 T 净贡献 ${signedMoney(account.t_net_profit)}`} />
-          </div>
+          </MetricGrid>
 
           {account.auto_strategy && (
-            <Panel
-              className="t-config-panel"
-              title="做 T 止盈与截止"
-              description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；若到 T+1 尾盘截止时间仍未止盈，则无条件强平，确保做 T 资金最迟 T+1 收盘前了结。做 T 金额跟随当前加仓档。改动保存后下一根 K 线起生效"
-              action={<Badge tone="indigo">即时生效</Badge>}
-            >
-              <div className="t-config-row">
-                <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="0" max="100" step="0.1"
-                      placeholder={number(tNetSpread * 100, 2)}
-                      value={tSpreadInput}
-                      onChange={(event) => setTSpreadInput(event.target.value)}
-                      disabled={savingTSpread}
-                    />
-                    <span>%</span>
-                  </div>
-                </Field>
-                <button
-                  className="button primary t-spread-save"
-                  onClick={() => void saveTNetSpread()}
-                  disabled={savingTSpread || tSpreadInput === ''}
-                >
-                  {savingTSpread ? <span className="button-spinner" /> : <Repeat2 size={15} />}
-                  {savingTSpread ? '正在保存' : '保存止盈'}
-                </button>
+            <Panel className="mb-3" title="做 T 止盈与截止" description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；到 T+1 尾盘截止时间仍未止盈则无条件强平。改动保存后下一根 K 线起生效。" action={<Badge tone="indigo">即时生效</Badge>}>
+              <div className="grid gap-2.5 lg:grid-cols-2">
+                <div className="flex items-end gap-2">
+                  <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="flex-1"><UnitInput unit="%" min={0} max={100} step={0.1} placeholder={number(tNetSpread * 100, 2)} value={tSpreadInput} onChange={setTSpreadInput} disabled={savingTSpread} /></Field>
+                  <Button size="sm" onClick={() => void saveTNetSpread()} disabled={savingTSpread || tSpreadInput === ''}>{savingTSpread ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTSpread ? '正在保存' : '保存止盈'}</Button>
+                </div>
+                <div className="flex items-end gap-2">
+                  <Field label="T+1 截止时间" hint={`当前 ${tCutoff}（HH:MM，尾盘强平）`} className="flex-1"><Input type="time" step={300} value={tCutoffInput} onChange={(event) => setTCutoffInput(event.target.value)} disabled={savingTCutoff} /></Field>
+                  <Button size="sm" onClick={() => void saveTCutoff()} disabled={savingTCutoff || tCutoffInput === ''}>{savingTCutoff ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTCutoff ? '正在保存' : '保存截止'}</Button>
+                </div>
               </div>
-              <div className="t-config-row">
-                <Field label="T+1 截止时间" hint={`当前 ${tCutoff}（HH:MM，尾盘强平）`} className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="time" step="300"
-                      placeholder={tCutoff}
-                      value={tCutoffInput}
-                      onChange={(event) => setTCutoffInput(event.target.value)}
-                      disabled={savingTCutoff}
-                    />
-                  </div>
-                </Field>
-                <button
-                  className="button primary t-spread-save"
-                  onClick={() => void saveTCutoff()}
-                  disabled={savingTCutoff || tCutoffInput === ''}
-                >
-                  {savingTCutoff ? <span className="button-spinner" /> : <Repeat2 size={15} />}
-                  {savingTCutoff ? '正在保存' : '保存截止'}
-                </button>
-              </div>
-              <p className="t-config-note">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
             </Panel>
           )}
 
           {account.auto_strategy && (
-            <Panel
-              className="t-config-panel"
-              title="超期降阈止盈"
-              description={`持有交易日数达到阈值后，价格轨/账户轨止盈阈值从 15% 降为设定值，让长期横盘/缓慢阴跌标的尽快让位下一轮。当前：${
-                holdingDays != null && holdingTp != null
-                  ? `持有 ≥${holdingDays} 日 → ${number(holdingTp * 100, 2)}%`
-                  : '关闭'
-              }。两项需同时填写，保存后下一根 K 线起生效`}
-              action={<Badge tone={holdingDays != null && holdingTp != null ? 'indigo' : 'neutral'}>
-                {holdingDays != null && holdingTp != null ? '已开启' : '关闭'}
-              </Badge>}
-            >
-              <div className="t-config-row">
-                <Field label="超期天数（交易日）" hint="持有 ≥N 个交易日后降阈" className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="1" max="250" step="1"
-                      placeholder={holdingDays != null ? String(holdingDays) : '22'}
-                      value={holdingDaysInput}
-                      onChange={(event) => setHoldingDaysInput(event.target.value)}
-                      disabled={savingHolding}
-                    />
-                    <span>日</span>
-                  </div>
-                </Field>
-                <Field label="降阈后止盈（%）" hint="价格轨/账户轨同时降为该值" className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="0" max="100" step="0.1"
-                      placeholder={holdingTp != null ? number(holdingTp * 100, 2) : '3'}
-                      value={holdingTpInput}
-                      onChange={(event) => setHoldingTpInput(event.target.value)}
-                      disabled={savingHolding}
-                    />
-                    <span>%</span>
-                  </div>
-                </Field>
-                <button
-                  className="button primary t-spread-save"
-                  onClick={() => void saveHoldingOverride()}
-                  disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}
-                >
-                  {savingHolding ? <span className="button-spinner" /> : <Repeat2 size={15} />}
-                  {savingHolding ? '正在保存' : '保存降阈'}
-                </button>
+            <Panel className="mb-3" title="超期降阈止盈" description={`持有交易日数达到阈值后，价格轨/账户轨止盈阈值从 15% 降为设定值。当前：${holdingDays != null && holdingTp != null ? `持有 ≥${holdingDays} 日 → ${number(holdingTp * 100, 2)}%` : '关闭'}。两项需同时填写，保存后下一根 K 线起生效。`} action={<Badge tone={holdingDays != null && holdingTp != null ? 'indigo' : 'neutral'}>{holdingDays != null && holdingTp != null ? '已开启' : '关闭'}</Badge>}>
+              <div className="grid items-end gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                <Field label="超期天数（交易日）" hint="持有 ≥N 个交易日后降阈"><UnitInput unit="日" min={1} max={250} step={1} placeholder={holdingDays != null ? String(holdingDays) : '22'} value={holdingDaysInput} onChange={setHoldingDaysInput} disabled={savingHolding} /></Field>
+                <Field label="降阈后止盈（%）" hint="价格轨/账户轨同时降为该值"><UnitInput unit="%" min={0} max={100} step={0.1} placeholder={holdingTp != null ? number(holdingTp * 100, 2) : '3'} value={holdingTpInput} onChange={setHoldingTpInput} disabled={savingHolding} /></Field>
+                <Button size="sm" onClick={() => void saveHoldingOverride()} disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}>{savingHolding ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingHolding ? '正在保存' : '保存降阈'}</Button>
               </div>
-              <p className="t-config-note">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
             </Panel>
           )}
 
           {account.auto_strategy && (
-            <Panel
-              className="t-config-panel"
-              title="指数 beta 腿（创业板 ETF）"
-              description={`个股空仓期间用 ${etfSymbol} 承接 beta：指数收盘站上 ${etfEntryMa} 日线买入，跌破 ${etfExitMa} 日线或 ETF 较成本回撤 ${number(etfStop * 100, 1)}% 卖出；一旦选出个股并建仓，ETF 卖出换股。`}
-              action={
-                <label className="switch-row rotation-switch">
-                  <span><strong>{etfEnabled ? '已开启' : '关闭'}</strong><small>{etfEnabled ? '空仓期持有 ETF' : '空仓期纯现金'}</small></span>
-                  <input
-                    type="checkbox"
-                    checked={etfEnabled}
-                    onChange={(event) => void toggleEtfBeta(event.target.checked)}
-                    disabled={savingEtf}
-                  />
-                  <span className="switch" />
-                </label>
-              }
-            >
-              <div className="t-config-row">
-                <Field label="ETF 代码" hint={`当前 ${etfSymbol}`} className="t-spread-field">
-                  <select
-                    value={etfSymbolInput || etfSymbol}
-                    onChange={(event) => setEtfSymbolInput(event.target.value)}
-                    disabled={savingEtf || !etfEnabled}
-                  >
-                    <option value="sz.159915">sz.159915 · 创业板ETF易方达</option>
-                    <option value="sz.159952">sz.159952 · 创业板ETF广发</option>
-                    <option value="sz.159964">sz.159964 · 创业板ETF平安</option>
-                  </select>
-                </Field>
-                <Field label="仓位（%权益）" hint={`当前 ${number(etfPct * 100, 0)}%`} className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="1" max="100" step="1"
-                      placeholder={number(etfPct * 100, 0)}
-                      value={etfPctInput}
-                      onChange={(event) => setEtfPctInput(event.target.value)}
-                      disabled={savingEtf || !etfEnabled}
-                    />
-                    <span>%</span>
-                  </div>
-                </Field>
+            <Panel className="mb-3" title="指数 beta 腿（创业板 ETF）" description={`个股空仓期间用 ${etfSymbol} 承接 beta：指数收盘站上 ${etfEntryMa} 日线买入，跌破 ${etfExitMa} 日线或 ETF 较成本回撤 ${number(etfStop * 100, 1)}% 卖出；一旦选出个股并建仓，ETF 卖出换股。`} action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{etfEnabled ? '空仓期持有 ETF' : '空仓期纯现金'}</span><Switch checked={etfEnabled} onCheckedChange={(checked) => void toggleEtfBeta(checked)} disabled={savingEtf} /></div>}>
+              <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                <Field label="ETF 代码" hint={`当前 ${etfSymbol}`}><SelectField value={etfSymbolInput || etfSymbol} onValueChange={setEtfSymbolInput} disabled={savingEtf || !etfEnabled} options={[{ value: 'sz.159915', label: 'sz.159915 · 创业板ETF易方达' }, { value: 'sz.159952', label: 'sz.159952 · 创业板ETF广发' }, { value: 'sz.159964', label: 'sz.159964 · 创业板ETF平安' }]} ariaLabel="ETF 代码" /></Field>
+                <Field label="仓位（%权益）" hint={`当前 ${number(etfPct * 100, 0)}%`}><UnitInput unit="%" min={1} max={100} step={1} placeholder={number(etfPct * 100, 0)} value={etfPctInput} onChange={setEtfPctInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfEntryMa)} value={etfEntryMaInput} onChange={setEtfEntryMaInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfExitMa)} value={etfExitMaInput} onChange={setEtfExitMaInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`}><UnitInput unit="%" min={0.1} max={99} step={0.1} placeholder={number(etfStop * 100, 1)} value={etfStopInput} onChange={setEtfStopInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Button size="sm" className="self-end" onClick={() => void saveEtfConfig()} disabled={savingEtf || !etfEnabled}>{savingEtf ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingEtf ? '正在保存' : '保存 ETF'}</Button>
               </div>
-              <div className="t-config-row">
-                <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`} className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="2" max="250" step="1"
-                      placeholder={String(etfEntryMa)}
-                      value={etfEntryMaInput}
-                      onChange={(event) => setEtfEntryMaInput(event.target.value)}
-                      disabled={savingEtf || !etfEnabled}
-                    />
-                    <span>日</span>
-                  </div>
-                </Field>
-                <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`} className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="2" max="250" step="1"
-                      placeholder={String(etfExitMa)}
-                      value={etfExitMaInput}
-                      onChange={(event) => setEtfExitMaInput(event.target.value)}
-                      disabled={savingEtf || !etfEnabled}
-                    />
-                    <span>日</span>
-                  </div>
-                </Field>
-                <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`} className="t-spread-field">
-                  <div className="input-with-unit">
-                    <input
-                      type="number" min="0.1" max="99" step="0.1"
-                      placeholder={number(etfStop * 100, 1)}
-                      value={etfStopInput}
-                      onChange={(event) => setEtfStopInput(event.target.value)}
-                      disabled={savingEtf || !etfEnabled}
-                    />
-                    <span>%</span>
-                  </div>
-                </Field>
-                <button
-                  className="button primary t-spread-save"
-                  onClick={() => void saveEtfConfig()}
-                  disabled={savingEtf || !etfEnabled}
-                >
-                  {savingEtf ? <span className="button-spinner" /> : <Repeat2 size={15} />}
-                  {savingEtf ? '正在保存' : '保存 ETF'}
-                </button>
-              </div>
-              <p className="t-config-note">留空表示沿用当前值；ETF 不占 16 笔加仓序列，与个股互斥：个股建仓后 ETF 自动卖出。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值；ETF 不占 16 笔加仓序列，与个股互斥：个股建仓后 ETF 自动卖出。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
             </Panel>
           )}
 
-          <Panel
-            className="rotation-panel"
-            title="池内轮动 · 每次清仓后重新选股"
-            description="清仓后自动重新运行五层选股；L0 大盘门关闭则空仓等待，不降格选票"
-            action={
-              <label className="switch-row rotation-switch">
-                <span><strong>{rotation?.enabled ? '轮动已开启' : '轮动已关闭'}</strong><small>{rotation?.enabled ? '清仓后重新选股' : '开启后按新语义轮动'}</small></span>
-                <input type="checkbox" checked={Boolean(rotation?.enabled)} onChange={() => void toggleRotation()} disabled={togglingRotation} />
-                <span className="switch" />
-              </label>
-            }
-          >
+          <Panel className="mb-3" title="池内轮动 · 每次清仓后重新选股" description="清仓后自动重新运行五层选股；L0 大盘门关闭则空仓等待，不降格选票" action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{rotation?.enabled ? '清仓后重新选股' : '开启后按新语义轮动'}</span><Switch checked={Boolean(rotation?.enabled)} onCheckedChange={() => void toggleRotation()} disabled={togglingRotation} /></div>}>
             {togglingRotation ? <Loading label="正在同步轮动状态" /> : !rotation || rotationCandidates.length === 0 ? (
-              <EmptyState
-                compact
-                icon={<Repeat2 size={22} />}
-                title="尚未开启轮动"
-                description="在选股页对第一名点「带入模拟盘（开启轮动：每次清仓后重新选股）」，账户会在每次清仓后重新筛选并取当时第一名；已有账户可在此开启或关闭轮动。"
-              />
+              <EmptyState compact icon={<Repeat2 className="size-6" />} title="尚未开启轮动" description="在选股页对第一名点「带入模拟盘（开启轮动：每次清仓后重新选股）」，账户会在每次清仓后重新筛选并取当时第一名；已有账户可在此开启或关闭轮动。" />
             ) : (
               <>
-                <div className="rotation-summary">
-                  <div className="rotation-current">
-                    <span>当前标的</span>
-                    <strong>{rotation.current_symbol ? displaySymbol(rotation.current_symbol) : '空仓'}</strong>
-                    <small>{rotation.current_symbol || '等待清仓后重新选股'}</small>
-                  </div>
-                  <div>
-                    <span>状态</span>
-                    <strong className={rotation.waiting ? 'negative' : ''}>{rotation.waiting ? '空仓等待' : '正常推进'}</strong>
-                  </div>
-                  <div>
-                    <span>最近重筛</span>
-                    <strong>{lastAttempt ? shortDate(lastAttempt) : '—'}</strong>
-                    <small>{lastScreen?.as_of ? `as_of ${shortDate(lastScreen.as_of)}` : '尚未触发过'}</small>
-                  </div>
-                  <div>
-                    <span>L0 大盘门</span>
-                    {lastScreen?.gate_open === undefined
-                      ? <strong>—</strong>
-                      : <Badge tone={lastScreen.gate_open ? 'green' : 'amber'}>{lastScreen.gate_open ? '开门' : '关门'}</Badge>}
-                  </div>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                  <div className="rounded-lg border bg-card px-3 py-2"><span className="block text-[10px] text-muted-foreground">当前标的</span><strong className="block font-mono text-[13px]">{rotation.current_symbol ? displaySymbol(rotation.current_symbol) : '空仓'}</strong><small className="block text-[10px] text-muted-foreground">{rotation.current_symbol || '等待清仓后重新选股'}</small></div>
+                  <div className="rounded-lg border bg-card px-3 py-2"><span className="block text-[10px] text-muted-foreground">状态</span><strong className={cn('block text-[13px]', rotation.waiting && 'text-success')}>{rotation.waiting ? '空仓等待' : '正常推进'}</strong></div>
+                  <div className="rounded-lg border bg-card px-3 py-2"><span className="block text-[10px] text-muted-foreground">最近重筛</span><strong className="block text-[13px]">{lastAttempt ? shortDate(lastAttempt) : '—'}</strong><small className="block text-[10px] text-muted-foreground">{lastScreen?.as_of ? `as_of ${shortDate(lastScreen.as_of)}` : '尚未触发过'}</small></div>
+                  <div className="rounded-lg border bg-card px-3 py-2"><span className="block text-[10px] text-muted-foreground">L0 大盘门</span>{lastScreen?.gate_open === undefined ? <strong className="block text-[13px]">—</strong> : <Badge tone={lastScreen.gate_open ? 'green' : 'amber'}>{lastScreen.gate_open ? '开门' : '关门'}</Badge>}</div>
                 </div>
-                {rotation.note && (
-                  <div className={`rotation-note ${rotation.waiting ? 'waiting' : ''}`}>
-                    <Repeat2 size={14} />
-                    <span>{rotation.note}{rotation.waiting ? ' · 次日会自动重试' : ''}</span>
-                  </div>
-                )}
-                <div className="rotation-section">
-                  <div className="rotation-section-head">
-                    <strong>最近一次选股结果</strong>
-                    <span className="rotation-section-run">
-                      {lastRunId ? `run ${lastRunId}` : '暂无运行'}
-                      {typeof lastScreen?.eligible_count === 'number' ? ` · 符合条件 ${integer(lastScreen.eligible_count)} 只` : ''}
-                    </span>
-                  </div>
-                  <ol className="rotation-pool-list">
+                {rotation.note && <div className={cn('mt-2 flex items-start gap-1.5 rounded-lg border px-2.5 py-2 text-[11px]', rotation.waiting ? 'border-warning/25 bg-warning/5 text-warning' : 'bg-muted/40 text-muted-foreground')}><Repeat2 className="mt-0.5 size-3.5 shrink-0" /><span>{rotation.note}{rotation.waiting ? ' · 次日会自动重试' : ''}</span></div>}
+                <div className="mt-3 rounded-lg border bg-muted/20 p-2.5">
+                  <div className="mb-2 flex items-center justify-between gap-2"><strong className="text-[12px]">最近一次选股结果</strong><span className="font-mono text-[10px] text-muted-foreground">{lastRunId ? `run ${lastRunId}` : '暂无运行'}{typeof lastScreen?.eligible_count === 'number' ? ` · 符合条件 ${integer(lastScreen.eligible_count)} 只` : ''}</span></div>
+                  <ol className="grid gap-1.5 md:grid-cols-2">
                     {(showAllPool ? rotationCandidates : rotationCandidates.slice(0, POOL_PREVIEW_LIMIT)).map((item, index) => {
                       const isFirst = index === 0 || item.symbol === lastScreenFirst?.code;
                       return (
-                        <li key={item.symbol} className={isFirst ? 'current' : ''}>
-                          <span className="rotation-pool-index">{String(index + 1).padStart(2, '0')}</span>
-                          <div>
-                            <strong>{displaySymbol(item.symbol)} <small>{item.name || item.symbol}</small></strong>
-                            <span>{item.board || '—'}{item.chg20d !== undefined && item.chg20d !== null ? ` · Chg20D ${signedPercent(item.chg20d)}` : ''}</span>
-                          </div>
+                        <li key={item.symbol} className={cn('flex items-center gap-2 rounded-md border bg-card px-2.5 py-1.5', isFirst && 'border-primary/30 bg-accent/40')}>
+                          <span className="font-mono text-[10px] text-muted-foreground">{String(index + 1).padStart(2, '0')}</span>
+                          <div className="min-w-0 flex-1"><strong className="block font-mono text-[12px]">{displaySymbol(item.symbol)} <small className="font-sans font-normal text-muted-foreground">{item.name || item.symbol}</small></strong><span className="block text-[10px] text-muted-foreground">{item.board || '—'}{item.chg20d !== undefined && item.chg20d !== null ? ` · Chg20D ${signedPercent(item.chg20d)}` : ''}</span></div>
                           {isFirst ? <Badge tone="indigo">第 1 名</Badge> : <Badge>候选</Badge>}
                         </li>
                       );
                     })}
                   </ol>
-                  {rotationCandidates.length > POOL_PREVIEW_LIMIT && (
-                    <div className="rotation-pool-more">
-                      <span>共 {integer(rotationCandidates.length)} 只候选，默认仅展示前 {POOL_PREVIEW_LIMIT} 只</span>
-                      <button className="text-button" onClick={() => setShowAllPool(!showAllPool)}>
-                        {showAllPool ? '收起列表' : `展开全部 ${integer(rotationCandidates.length)} 只`}
-                      </button>
-                    </div>
-                  )}
-                  {lastScreen?.warnings && lastScreen.warnings.length > 0 && (
-                    <div className="rotation-warnings">
-                      <AlertTriangle size={13} />
-                      <span>{lastScreen.warnings[0]}{lastScreen.warnings.length > 1 ? ` 等 ${lastScreen.warnings.length} 条警告` : ''}</span>
-                    </div>
-                  )}
+                  {rotationCandidates.length > POOL_PREVIEW_LIMIT && <div className="mt-2 flex items-center justify-between text-[10px] text-muted-foreground"><span>共 {integer(rotationCandidates.length)} 只候选，默认仅展示前 {POOL_PREVIEW_LIMIT} 只</span><button className="text-primary hover:underline" onClick={() => setShowAllPool(!showAllPool)}>{showAllPool ? '收起列表' : `展开全部 ${integer(rotationCandidates.length)} 只`}</button></div>}
+                  {lastScreen?.warnings && lastScreen.warnings.length > 0 && <div className="mt-2 flex items-start gap-1.5 rounded-md border border-warning/20 bg-warning/5 px-2 py-1 text-[10px] text-warning"><AlertTriangle className="mt-0.5 size-3 shrink-0" /><span>{lastScreen.warnings[0]}{lastScreen.warnings.length > 1 ? ` 等 ${lastScreen.warnings.length} 条警告` : ''}</span></div>}
                 </div>
               </>
             )}
           </Panel>
 
-          <div className="paper-top-grid">
-            <Panel className="quote-panel" title="腾讯实时行情" description={currentDataset ? `${currentDataset.name} · ${currentDataset.timeframe}` : '直接读取腾讯快照，无需绑定缓存数据集'} action={<Badge tone="indigo">5 MIN</Badge>}>
-              <div className="quote-list">
-                {quoteRows.length === 0 ? <EmptyState compact icon={<Activity size={22} />} title="等待实时快照" description="输入标的并拉取腾讯行情后，本地账户会显示最新价；不会用前端行情替代后端状态。" /> : quoteRows.map((quote) => {
+          <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(0,0.9fr)]">
+            <Panel title="腾讯实时行情" description={currentDataset ? `${currentDataset.name} · ${currentDataset.timeframe}` : '直接读取腾讯快照，无需绑定缓存数据集'} action={<Badge tone="indigo">5 MIN</Badge>}>
+              <div className="grid gap-1.5">
+                {quoteRows.length === 0 ? <EmptyState compact icon={<Activity className="size-6" />} title="等待实时快照" description="输入标的并拉取腾讯行情后，本地账户会显示最新价；不会用前端行情替代后端状态。" /> : quoteRows.map((quote) => {
                   const heldQty = heldQtyBySymbol.get(quote.symbol) ?? 0;
                   return (
-                    <div className="quote-row" key={quote.symbol}><div><strong title={quote.symbol}>{displaySymbol(quote.symbol)}</strong><span>{heldQty > 0 ? `持仓 ${integer(heldQty)}` : '最新行情'}</span></div><div><strong>{money(quote.last_price)}</strong><span>后端最新价</span></div></div>
+                    <div className="flex items-center justify-between gap-3 rounded-lg border bg-card px-3 py-2" key={quote.symbol}>
+                      <div><strong className="block font-mono text-[12px]" title={quote.symbol}>{displaySymbol(quote.symbol)}</strong><span className="block text-[10px] text-muted-foreground">{heldQty > 0 ? `持仓 ${integer(heldQty)}` : '最新行情'}</span></div>
+                      <div className="text-right"><strong className="block font-mono text-[13px]">{money(quote.last_price)}</strong><span className="block text-[10px] text-muted-foreground">后端最新价</span></div>
+                    </div>
                   );
                 })}
               </div>
-              <div className="quote-controls">
-                <div className="quote-control-group">
-                  <div className="quote-control-head"><strong><Radio size={15} />实时快照</strong><small>腾讯 · 5 分钟</small></div>
-                  <div className="live-controls">
-                    <button className="button secondary" disabled={liveLoading || liveCode.length !== 6} onClick={() => void liveTick()}>
-                      {liveLoading ? <span className="button-spinner" /> : <Radio size={16} />}拉取实时快照
-                    </button>
+              <div className="mt-2.5 grid gap-2.5">
+                <div className="rounded-lg border bg-muted/25 p-2.5">
+                  <div className="flex items-center justify-between gap-2"><strong className="inline-flex items-center gap-1 text-[12px]"><Radio className="size-3.5" />实时快照</strong><small className="text-[10px] text-muted-foreground">腾讯 · 5 分钟</small></div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <Button variant="outline" size="sm" disabled={liveLoading || liveCode.length !== 6} onClick={() => void liveTick()}>{liveLoading ? <Loader2 className="animate-spin" /> : <Radio />}拉取实时快照</Button>
                     <Badge tone={autoSyncPaused ? 'neutral' : scheduler?.running ? 'green' : 'neutral'} title={autoSyncPaused ? '后端自动同步已暂停' : scheduler?.running ? '后端自动同步运行中' : '后端自动同步'}>后端自动</Badge>
                   </div>
-                  <div className="quote-control-note">
-                    <Timer size={13} className="note-icon" />
-                    {scheduler && !scheduler.enabled
-                      ? '后端定时器未启用，需手动拉取快照'
-                      : autoSyncPaused
-                        ? `${tradingSession && !tradingSession.is_trading_day ? '今日休市' : '已收盘'}，自动同步已暂停${lastSync ? `（最后同步 ${lastSync}）` : ''}${tradingSession?.next_trading_day ? `，${tradingSession.next_trading_day} 09:25 恢复` : '，下一交易日 09:25 恢复'}`
-                        : `成交由后端定时器每 5 分钟推进${lastSync ? `（最近 ${lastSync}）` : ''}，页面每 15 秒自动同步`}
-                  </div>
+                  <div className="mt-1.5 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground"><Timer className="mt-0.5 size-3 shrink-0" /><span>{scheduler && !scheduler.enabled ? '后端定时器未启用，需手动拉取快照' : autoSyncPaused ? `${tradingSession && !tradingSession.is_trading_day ? '今日休市' : '已收盘'}，自动同步已暂停${lastSync ? `（最后同步 ${lastSync}）` : ''}${tradingSession?.next_trading_day ? `，${tradingSession.next_trading_day} 09:25 恢复` : '，下一交易日 09:25 恢复'}` : `成交由后端定时器每 5 分钟推进${lastSync ? `（最近 ${lastSync}）` : ''}，页面每 15 秒自动同步`}</span></div>
                 </div>
-                <div className="quote-control-group">
-                  <div className="quote-control-head"><strong><StepForward size={15} />缓存回放</strong><small>批量验证撮合与订单生命周期</small></div>
-                  <div className="playback-controls">
-                    <button className="button secondary" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(1)}><StepForward size={16} />推送 1 根</button>
-                    <button className="button secondary" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(10)}><FastForward size={16} />推送 10 根</button>
-                    <button className={`button ${playing ? 'danger-soft' : 'secondary'}`} disabled={!account.dataset_id} onClick={() => setPlaying(!playing)}>{playing ? <Pause size={15} /> : <Play size={15} fill="currentColor" />}{playing ? '暂停回放' : '加速回放'}</button>
+                <div className="rounded-lg border bg-muted/25 p-2.5">
+                  <div className="flex items-center justify-between gap-2"><strong className="inline-flex items-center gap-1 text-[12px]"><StepForward className="size-3.5" />缓存回放</strong><small className="text-[10px] text-muted-foreground">批量验证撮合与订单生命周期</small></div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    <Button variant="outline" size="sm" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(1)}><StepForward />推送 1 根</Button>
+                    <Button variant="outline" size="sm" disabled={advancing || playing || !account.dataset_id} onClick={() => void advance(10)}><FastForward />推送 10 根</Button>
+                    <Button variant={playing ? 'destructive' : 'outline'} size="sm" disabled={!account.dataset_id} onClick={() => setPlaying(!playing)}>{playing ? <Pause /> : <Play />}{playing ? '暂停回放' : '加速回放'}</Button>
                   </div>
-                  <div className="quote-control-note"><span className={playing ? 'live-dot playing' : 'live-dot'} />{playing ? '回放模式：每 1.4 秒推进 1 根缓存 5 分钟K线' : advancing ? '正在推送行情并同步账户' : '回放已暂停 · 行情由后端逐根推进'}</div>
+                  <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground"><span className={cn('size-1.5 rounded-full', playing ? 'animate-pulse bg-primary' : 'bg-muted-foreground/50')} />{playing ? '回放模式：每 1.4 秒推进 1 根缓存 5 分钟K线' : advancing ? '正在推送行情并同步账户' : '回放已暂停 · 行情由后端逐根推进'}</div>
                 </div>
               </div>
             </Panel>
 
-            <Panel className="order-ticket" title="委托下单" action={<span className="ticket-label">ORDER TICKET</span>}>
-              <div className="ticket-topline">
-                <p>订单将提交至本地仿真撮合引擎</p>
-                <div className="ticket-purpose">
-                  <span>仓位用途</span>
-                  <div className="segmented purpose-selector"><button className={purpose === 'PERMANENT' ? 'active' : ''} onClick={() => setPurpose('PERMANENT')}>永久仓</button><button className={purpose === 'T' ? 'active' : ''} onClick={() => setPurpose('T')}>做T仓</button></div>
+            <Panel title="委托下单" description="订单将提交至本地仿真撮合引擎" action={<span className="font-mono text-[9px] tracking-wider text-muted-foreground">ORDER TICKET</span>}>
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[11px] text-muted-foreground"><span>仓位用途</span><Segmented value={purpose} onChange={(value) => setPurpose(value as OrderPurpose)} options={[{ value: 'PERMANENT', label: '永久仓' }, { value: 'T', label: '做T仓' }]} /></div>
+                <div className="flex gap-1.5">
+                  <button type="button" className={cn('flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px]', side === 'buy' ? 'border-destructive/30 bg-destructive/10 text-destructive' : 'bg-card text-muted-foreground')} onClick={() => setSide('buy')}><ArrowDownLeft className="size-3.5" />买入</button>
+                  <button type="button" className={cn('flex items-center gap-1 rounded-md border px-2.5 py-1 text-[11px]', side === 'sell' ? 'border-success/30 bg-success/10 text-success' : 'bg-card text-muted-foreground')} onClick={() => setSide('sell')}><ArrowUpRight className="size-3.5" />卖出</button>
                 </div>
               </div>
-              <div className="side-hint-row">
-                <div className="side-selector"><button className={side === 'buy' ? 'buy active' : 'buy'} onClick={() => setSide('buy')}><ArrowDownLeft size={15} />买入</button><button className={side === 'sell' ? 'sell active' : 'sell'} onClick={() => setSide('sell')}><ArrowUpRight size={15} />卖出</button></div>
-                <p className="purpose-hint">{purpose === 'PERMANENT' ? '买入成交推进 16 笔序列；卖出为永久仓减仓。' : '不占 16 笔序列，次日可卖，盈亏单独统计。'}</p>
+              <p className="mb-2 text-[10px] text-muted-foreground">{purpose === 'PERMANENT' ? '买入成交推进 16 笔序列；卖出为永久仓减仓。' : '不占 16 笔序列，次日可卖，盈亏单独统计。'}</p>
+              <div className="mb-2 flex items-center gap-2 text-[11px]"><span className="text-muted-foreground">委托方式</span><Segmented value={orderType} onChange={(value) => { setOrderType(value as OrderType); resetTier(); }} options={[{ value: 'market', label: '市价' }, { value: 'limit', label: '限价' }]} /></div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Field label="标的代码" hint="6 位代码"><Input value={symbol} onChange={(event) => applySymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
+                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><UnitInput unit="股" min={1} step={tradingRules?.rules.step || 100} value={quantity} onChange={(value) => { setQuantity(Number(value)); resetTier(); }} /></Field>
+                {orderType === 'limit' && <Field label="委托价格" className="sm:col-span-2"><UnitInput unit="元" min={0.01} step={0.01} value={limitPrice} onChange={(value) => { setLimitPrice(value); resetTier(); }} placeholder="0.00" /></Field>}
               </div>
-              <div className="order-type-row"><span>委托方式</span><div className="segmented"><button className={orderType === 'market' ? 'active' : ''} onClick={() => { setOrderType('market'); resetTier(); }}>市价</button><button className={orderType === 'limit' ? 'active' : ''} onClick={() => { setOrderType('limit'); resetTier(); }}>限价</button></div></div>
-              <div className="ticket-main-grid">
-                <div className="ticket-fields">
-                <Field label="标的代码" hint="6 位代码"><input value={symbol} onChange={(event) => applySymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
-                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><div className="input-with-unit"><input type="number" min="1" step={tradingRules?.rules.step || 100} value={quantity} onChange={(event) => { setQuantity(Number(event.target.value)); resetTier(); }} /><span>股</span></div></Field>
-                {orderType === 'limit' && <Field label="委托价格"><div className="input-with-unit"><input type="number" min="0.01" step="0.01" value={limitPrice} onChange={(event) => { setLimitPrice(event.target.value); resetTier(); }} placeholder="0.00" /><span>元</span></div></Field>}
-                </div>
-                <div className="quick-tiers">
-                  {AMOUNT_TIERS.map((amount) => (
-                    <button
-                      key={amount}
-                      type="button"
-                      className={`quick-tier ${tierAmount === amount ? 'active' : ''}`}
-                      disabled={tierPicking !== null}
-                      title="按参考价与板块规则换算股数"
-                      onClick={() => void applyAmountTier(amount)}
-                    >
-                      {tierPicking === amount ? <span className="button-spinner" /> : `${amount / 10_000}万`}
-                    </button>
-                  ))}
-                </div>
+              <div className="mt-2 grid grid-cols-4 gap-1.5">
+                {AMOUNT_TIERS.map((amount) => (
+                  <Button key={amount} type="button" variant="outline" size="sm" className={cn('font-mono', tierAmount === amount && 'border-primary/40 bg-accent text-accent-foreground')} disabled={tierPicking !== null} title="按参考价与板块规则换算股数" onClick={() => void applyAmountTier(amount)}>
+                    {tierPicking === amount ? <Loader2 className="animate-spin" /> : `${amount / 10_000}万`}
+                  </Button>
+                ))}
               </div>
-              {tierNote && <div className={`tier-note ${tierError ? 'warn' : ''}`}>{tierNote}</div>}
-              {qtyError && <div className="qty-warning"><AlertTriangle size={13} /><span>{qtyError}</span></div>}
-              <div className="ticket-estimate"><span>可用资金 <b>{money(account.available_cash)}</b></span>{orderType === 'limit' && limitPrice && <span>委托金额约 <b>{money(Number(limitPrice) * quantity)}</b></span>}</div>
-              <button className={`button order-submit ${side}`} disabled={submitting || Boolean(qtyError)} onClick={() => void placeOrder()}>{submitting ? <span className="button-spinner" /> : <Send size={16} />}{submitting ? '正在提交委托' : `提交${sideLabel(side)}委托`}</button>
-              <p className="ticket-disclaimer">虚拟委托，不会发送至任何真实交易市场。</p>
+              {tierNote && <div className={cn('mt-1.5 rounded-md px-2 py-1 text-[10px]', tierError ? 'bg-destructive/5 text-destructive' : 'bg-muted/50 text-muted-foreground')}>{tierNote}</div>}
+              {qtyError && <div className="mt-1.5 flex items-start gap-1.5 rounded-md border border-warning/25 bg-warning/5 px-2 py-1 text-[10px] text-warning"><AlertTriangle className="mt-0.5 size-3 shrink-0" /><span>{qtyError}</span></div>}
+              <div className="mt-2 flex items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>可用资金 <b className="font-mono text-foreground">{money(account.available_cash)}</b></span>{orderType === 'limit' && limitPrice && <span>委托金额约 <b className="font-mono text-foreground">{money(Number(limitPrice) * quantity)}</b></span>}</div>
+              <Button className={cn('mt-2 w-full', side === 'buy' ? 'bg-destructive text-white hover:bg-destructive/90' : 'bg-success text-white hover:bg-success/90')} disabled={submitting || Boolean(qtyError)} onClick={() => void placeOrder()}>{submitting ? <Loader2 className="animate-spin" /> : <Send />}{submitting ? '正在提交委托' : `提交${sideLabel(side)}委托`}</Button>
+              <p className="mt-1.5 text-center text-[9px] text-muted-foreground">虚拟委托，不会发送至任何真实交易市场。</p>
             </Panel>
           </div>
 
-          <Panel className="positions-panel" title="持仓与双账本" description="永久仓和 T 仓分账记录，可卖数量遵循 T+1 约束；平均成本已含买入手续费" action={<span className="fee-note" title="佣金 + 印花税 + 经手费 + 证管费 + 过户费；滑点体现在成交价，不计入费用">累计费用 {money(account.total_fees)}（五项合计）</span>}>
-            <div className="table-scroll"><table><thead><tr><th>标的</th><th className="num">最新价</th><th className="num">总持仓</th><th className="num">可卖数量</th><th className="num">永久仓</th><th className="num">永久仓成本</th><th className="num" title="平均成本 = 总成本 / 总持仓，已包含买入手续费">平均成本（含费）</th><th className="num" title="当前持仓成本中仍包含的买入手续费；卖出费用计入已实现盈亏">买入费用</th><th className="num">T 仓在途</th><th className="num">持仓市值</th><th className="num">浮动盈亏</th></tr></thead><tbody>
-              {holdingPositions.length === 0 ? <TableEmpty colSpan={11} message="暂无持仓，提交买入委托并推送行情后查看" /> : holdingPositions.map((position) => {
-                const floatPnl = position.float_pnl;
-                return <tr key={position.symbol}><td><strong title={position.symbol}>{displaySymbol(position.symbol)}</strong></td><td className="num">{money(position.last_price)}</td><td className="num"><strong>{integer(position.total_qty)}</strong></td><td className="num">{integer(position.sellable_qty)}</td><td className="num">{integer(position.permanent_qty)}</td><td className="num">{money(position.permanent_cost)}</td><td className="num">{money(position.average_cost)}</td><td className="num" title="已包含在平均成本内">{money(position.buy_fee ?? 0)}</td><td className="num">{position.t_active_qty > 0 ? <Badge tone="indigo">{integer(position.t_active_qty)}</Badge> : '0'}</td><td className="num">{money(position.market_value)}</td><td className={`num ${floatPnl >= 0 ? 'positive' : 'negative'}`}>{signedMoney(floatPnl)}</td></tr>;
-              })}
-            </tbody></table></div>
+          <Panel className="mb-3" title="持仓与双账本" description="永久仓和 T 仓分账记录，可卖数量遵循 T+1 约束；平均成本已含买入手续费" action={<span className="text-[10px] text-muted-foreground" title="佣金 + 印花税 + 经手费 + 证管费 + 过户费；滑点体现在成交价，不计入费用">累计费用 <b className="font-mono text-foreground">{money(account.total_fees)}</b>（五项合计）</span>} flush>
+            <Table>
+              <TableHeader><TableRow><TableHead>标的</TableHead><TableHead className="text-right">最新价</TableHead><TableHead className="text-right">总持仓</TableHead><TableHead className="text-right">可卖数量</TableHead><TableHead className="text-right">永久仓</TableHead><TableHead className="text-right">永久仓成本</TableHead><TableHead className="text-right" title="平均成本 = 总成本 / 总持仓，已包含买入手续费">平均成本（含费）</TableHead><TableHead className="text-right" title="当前持仓成本中仍包含的买入手续费；卖出费用计入已实现盈亏">买入费用</TableHead><TableHead className="text-right">T 仓在途</TableHead><TableHead className="text-right">持仓市值</TableHead><TableHead className="text-right">浮动盈亏</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {holdingPositions.length === 0 ? <TableEmpty colSpan={11} message="暂无持仓，提交买入委托并推送行情后查看" /> : holdingPositions.map((position) => {
+                  const floatPnl = position.float_pnl;
+                  return <TableRow key={position.symbol}><TableCell><strong className="font-mono text-[12px]" title={position.symbol}>{displaySymbol(position.symbol)}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.last_price)}</TableCell><TableCell className="text-right font-mono text-[12px]"><strong>{integer(position.total_qty)}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{integer(position.sellable_qty)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(position.permanent_qty)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.permanent_cost)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.average_cost)}</TableCell><TableCell className="text-right font-mono text-[12px]" title="已包含在平均成本内">{money(position.buy_fee ?? 0)}</TableCell><TableCell className="text-right font-mono text-[12px]">{position.t_active_qty > 0 ? <Badge tone="indigo">{integer(position.t_active_qty)}</Badge> : '0'}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.market_value)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', floatPnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(floatPnl)}</TableCell></TableRow>;
+                })}
+              </TableBody>
+            </Table>
           </Panel>
 
-          <Panel className="records-panel">
-            <div className="records-header"><div className="tabs" role="tablist"><button className={recordTab === 'orders' ? 'active' : ''} onClick={() => setRecordTab('orders')}>订单<span>{account.orders.length}</span></button><button className={recordTab === 'trades' ? 'active' : ''} onClick={() => setRecordTab('trades')}>成交<span>{account.trades.length}</span></button></div><button className="button danger-text" onClick={() => void resetAccount()} disabled={resetting}><RotateCcw size={14} className={resetting ? 'spin' : ''} />{resetting ? '正在重置' : '重置虚拟账户'}</button></div>
-            <div className="table-scroll">
-              {recordTab === 'orders' ? <table><thead><tr><th>委托时间</th><th>标的</th><th>方向</th><th>类型</th><th className="num">限价</th><th className="num">委托数量</th><th className="num">已成交</th><th>状态</th><th className="action-col">操作</th></tr></thead><tbody>
-                {account.orders.length === 0 ? <TableEmpty colSpan={9} message="暂无订单记录" /> : account.orders.map((order) => <tr key={order.id}><td>{dateTime(order.created_at || order.timestamp)}</td><td><strong title={order.symbol}>{displaySymbol(order.symbol)}</strong></td><td><span className={`side-label ${lower(order.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(order.side)}</span></td><td>{orderTypeLabel(order.order_type || order.type)}</td><td className="num">{money(order.limit_price ?? order.price)}</td><td className="num">{integer(order.quantity)}</td><td className="num">{integer(order.filled_quantity ?? order.filled_qty)}</td><td><Badge tone={lower(order.status) === 'filled' ? 'green' : lower(order.status) === 'rejected' ? 'red' : 'neutral'}>{statusLabel(order.status)}</Badge></td><td className="action-col">{canCancel(order.status) ? <button className="table-action" disabled={cancelling === order.id} onClick={() => void cancelOrder(order.id)}>{cancelling === order.id ? <RefreshCw size={13} className="spin" /> : <XCircle size={13} />}撤单</button> : <span className="muted">—</span>}</td></tr>)}
-              </tbody></table> : <table><thead><tr><th>成交时间</th><th>标的</th><th>方向</th><th>用途</th><th className="num">价格</th><th className="num">数量</th><th className="num">成交额</th><th className="num">费用</th><th className="num">已实现盈亏</th></tr></thead><tbody>
-                {account.trades.length === 0 ? <TableEmpty colSpan={9} message="暂无成交记录" /> : account.trades.map((trade, index) => <tr key={String(trade.id ?? index)}><td>{dateTime(trade.timestamp)}</td><td><strong title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></td><td><span className={`side-label ${lower(trade.side) === 'buy' ? 'buy' : 'sell'}`}>{sideLabel(trade.side)}</span></td><td>{purposeLabel(trade.purpose)}</td><td className="num">{money(trade.price)}</td><td className="num">{integer(trade.quantity)}</td><td className="num">{money(trade.amount ?? trade.notional)}</td><td className="num" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</td><td className={`num ${(trade.realized_pnl || 0) >= 0 ? 'positive' : 'negative'}`}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</td></tr>)}
-              </tbody></table>}
+          <Panel className="mb-3" flush>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-2.5">
+              <Tabs value={recordTab} onValueChange={(value) => setRecordTab(value as 'orders' | 'trades')}>
+                <TabsList>
+                  <TabsTrigger value="orders">订单<span className="ml-1 font-mono text-[10px] text-muted-foreground">{account.orders.length}</span></TabsTrigger>
+                  <TabsTrigger value="trades">成交<span className="ml-1 font-mono text-[10px] text-muted-foreground">{account.trades.length}</span></TabsTrigger>
+                </TabsList>
+              </Tabs>
+              <Button variant="ghost" size="sm" className="text-destructive hover:bg-destructive/10" onClick={() => setPendingReset(true)} disabled={resetting}><RotateCcw className={resetting ? 'animate-spin' : ''} />{resetting ? '正在重置' : '重置虚拟账户'}</Button>
             </div>
+            {recordTab === 'orders' ? <Table><TableHeader><TableRow><TableHead>委托时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>类型</TableHead><TableHead className="text-right">限价</TableHead><TableHead className="text-right">委托数量</TableHead><TableHead className="text-right">已成交</TableHead><TableHead>状态</TableHead><TableHead>操作</TableHead></TableRow></TableHeader><TableBody>
+              {account.orders.length === 0 ? <TableEmpty colSpan={9} message="暂无订单记录" /> : account.orders.map((order) => <TableRow key={order.id}><TableCell>{dateTime(order.created_at || order.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={order.symbol}>{displaySymbol(order.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(order.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(order.side)}</span></TableCell><TableCell>{orderTypeLabel(order.order_type || order.type)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(order.limit_price ?? order.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.filled_quantity ?? order.filled_qty)}</TableCell><TableCell><Badge tone={lower(order.status) === 'filled' ? 'green' : lower(order.status) === 'rejected' ? 'red' : 'neutral'}>{statusLabel(order.status)}</Badge></TableCell><TableCell>{canCancel(order.status) ? <button className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10" disabled={cancelling === order.id} onClick={() => void cancelOrder(order.id)}>{cancelling === order.id ? <RefreshCw className="size-3 animate-spin" /> : <XCircle className="size-3" />}撤单</button> : <span className="text-muted-foreground">—</span>}</TableCell></TableRow>)}
+            </TableBody></Table> : <Table><TableHeader><TableRow><TableHead>成交时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>用途</TableHead><TableHead className="text-right">价格</TableHead><TableHead className="text-right">数量</TableHead><TableHead className="text-right">成交额</TableHead><TableHead className="text-right">费用</TableHead><TableHead className="text-right">已实现盈亏</TableHead></TableRow></TableHeader><TableBody>
+              {account.trades.length === 0 ? <TableEmpty colSpan={9} message="暂无成交记录" /> : account.trades.map((trade, index) => <TableRow key={String(trade.id ?? index)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
+            </TableBody></Table>}
           </Panel>
-          <div className="paper-disclosure"><CircleDollarSign size={15} /><span>账户权益与盈亏均由本地后端仿真状态计算。模拟结果不代表实盘表现，也不构成收益承诺。</span></div>
 
-          <Panel className={`rules-panel ${rulesOpen ? 'open' : ''}`} title={`交易规则 · ${rulesView === 'all' ? '全部板块对比' : (tradingRules?.board || '按标的加载')}`} description={rulesView === 'all' ? '六板块口径并列对比；下单校验仍以当前标的所属板块为准' : (tradingRules ? (tradingRules.is_modeled_board ? tradingRules.rules.rule_basis : '合成标的无板块，回退「100股整数手 + ±20%」旧口径') : '输入 6 位标的代码后加载其板块交易规则')} action={
-            <div className="rules-actions">
-              <div className="segmented rules-view-toggle">
-                <button className={rulesView === 'current' ? 'active' : ''} onClick={() => setRulesView('current')}>当前标的</button>
-                <button className={rulesView === 'all' ? 'active' : ''} onClick={() => setRulesView('all')}>全部板块</button>
-              </div>
-              <button className="button secondary rules-toggle" onClick={() => setRulesOpen(!rulesOpen)}>{rulesOpen ? '收起' : '展开'}</button>
-            </div>
-          }>
+          <div className="mb-3 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground"><CircleDollarSign className="mt-0.5 size-3.5 shrink-0" /><span>账户权益与盈亏均由本地后端仿真状态计算。模拟结果不代表实盘表现，也不构成收益承诺。</span></div>
+
+          <Panel className="mb-3" title={`交易规则 · ${rulesView === 'all' ? '全部板块对比' : (tradingRules?.board || '按标的加载')}`} description={rulesView === 'all' ? '六板块口径并列对比；下单校验仍以当前标的所属板块为准' : (tradingRules ? (tradingRules.is_modeled_board ? tradingRules.rules.rule_basis : '合成标的无板块，回退「100股整数手 + ±20%」旧口径') : '输入 6 位标的代码后加载其板块交易规则')} action={<div className="flex items-center gap-2"><Segmented value={rulesView} onChange={(value) => setRulesView(value as 'current' | 'all')} options={[{ value: 'current', label: '当前标的' }, { value: 'all', label: '全部板块' }]} /><Button variant="outline" size="sm" onClick={() => setRulesOpen(!rulesOpen)}>{rulesOpen ? '收起' : '展开'}</Button></div>}>
             {rulesView === 'all' ? (
-              allBoards.length === 0 ? (
-                <Loading label="正在加载六板块规则全表" />
-              ) : (
-                <div className="rules-body">
-                  <div className="table-scroll rules-all-table">
-                    <table>
-                      <thead><tr><th>板块</th><th className="num">最小申报</th><th className="num">递增</th><th className="num">限价上限</th><th className="num">市价上限</th><th className="num">零股卖出</th><th className="num">涨跌幅</th><th className="num">价格笼子</th></tr></thead>
-                      <tbody>
-                        {allBoards.map((board) => {
-                          const isCurrent = tradingRules?.board === board.board;
-                          return (
-                            <tr key={board.board} className={isCurrent ? 'current-board' : ''}>
-                              <td><strong>{board.board}</strong>{isCurrent && <Badge tone="indigo">当前</Badge>}</td>
-                              <td className="num">{integer(board.min_qty)} 股</td>
-                              <td className="num">{board.step === 1 ? '1 股' : `${integer(board.step)} 整数倍`}</td>
-                              <td className="num">{board.limit_order_cap > 0 ? `${integer(board.limit_order_cap)} 股` : '未建模'}</td>
-                              <td className="num">{board.market_order_cap > 0 ? `${integer(board.market_order_cap)} 股` : '未建模'}</td>
-                              <td className="num">{board.odd_lot_label}</td>
-                              <td className="num">{number(board.limit_pct * 100, 0)}%</td>
-                              <td className="num">{board.cage_label}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  {rulesOpen && (
-                    <div className="rules-not-modeled">
-                      <strong>未建模项（如实标注，不伪称覆盖）</strong>
-                      <ul>{(tradingRules?.not_modeled ?? []).map((item) => <li key={item}>{item}</li>)}</ul>
-                      <small>规则依据：沪深交易所《交易规则》（2026年修订，2026-07-06 施行）分板块口径</small>
-                    </div>
-                  )}
+              allBoards.length === 0 ? <Loading label="正在加载六板块规则全表" /> : (
+                <div className="grid gap-2">
+                  <Table>
+                    <TableHeader><TableRow><TableHead>板块</TableHead><TableHead className="text-right">最小申报</TableHead><TableHead className="text-right">递增</TableHead><TableHead className="text-right">限价上限</TableHead><TableHead className="text-right">市价上限</TableHead><TableHead className="text-right">零股卖出</TableHead><TableHead className="text-right">涨跌幅</TableHead><TableHead className="text-right">价格笼子</TableHead></TableRow></TableHeader>
+                    <TableBody>
+                      {allBoards.map((board) => {
+                        const isCurrent = tradingRules?.board === board.board;
+                        return <TableRow key={board.board} className={isCurrent ? 'bg-accent/40' : ''}><TableCell><strong className="inline-flex items-center gap-1.5">{board.board}{isCurrent && <Badge tone="indigo">当前</Badge>}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{integer(board.min_qty)} 股</TableCell><TableCell className="text-right font-mono text-[12px]">{board.step === 1 ? '1 股' : `${integer(board.step)} 整数倍`}</TableCell><TableCell className="text-right font-mono text-[12px]">{board.limit_order_cap > 0 ? `${integer(board.limit_order_cap)} 股` : '未建模'}</TableCell><TableCell className="text-right font-mono text-[12px]">{board.market_order_cap > 0 ? `${integer(board.market_order_cap)} 股` : '未建模'}</TableCell><TableCell className="text-right font-mono text-[12px]">{board.odd_lot_label}</TableCell><TableCell className="text-right font-mono text-[12px]">{number(board.limit_pct * 100, 0)}%</TableCell><TableCell className="text-right font-mono text-[12px]">{board.cage_label}</TableCell></TableRow>;
+                      })}
+                    </TableBody>
+                  </Table>
+                  {rulesOpen && <div className="rounded-lg border border-warning/20 bg-warning/5 p-2.5 text-[11px]"><strong className="block text-warning">未建模项（如实标注，不伪称覆盖）</strong><ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted-foreground">{(tradingRules?.not_modeled ?? []).map((item) => <li key={item}>{item}</li>)}</ul><small className="mt-1 block text-muted-foreground">规则依据：沪深交易所《交易规则》（2026年修订，2026-07-06 施行）分板块口径</small></div>}
                 </div>
               )
             ) : !tradingRules ? (
-              rulesLoading
-                ? <Loading label="正在加载交易规则" />
-                : <div className="rules-placeholder"><ShieldCheck size={16} /><span>输入 6 位标的代码，或在「委托下单 · 选股结果」中点击候选，即自动加载所属板块的交易规则。</span></div>
+              rulesLoading ? <Loading label="正在加载交易规则" /> : <div className="flex items-start gap-1.5 rounded-lg bg-muted/50 px-3 py-2 text-[11px] text-muted-foreground"><ShieldCheck className="mt-0.5 size-3.5 shrink-0" /><span>输入 6 位标的代码，或在「委托下单 · 选股结果」中点击候选，即自动加载所属板块的交易规则。</span></div>
             ) : (
-              <div className="rules-body">
-                <div className="rules-grid">
-                  <div><span>最小申报</span><strong>{integer(tradingRules.rules.min_qty)} 股</strong></div>
-                  <div><span>递增单位</span><strong>{tradingRules.rules.step === 1 ? '1 股' : `${integer(tradingRules.rules.step)} 整数倍`}</strong></div>
-                  <div><span>限价上限</span><strong>{tradingRules.rules.limit_order_cap > 0 ? `${integer(tradingRules.rules.limit_order_cap)} 股` : '未建模'}</strong></div>
-                  <div><span>市价上限</span><strong>{tradingRules.rules.market_order_cap > 0 ? `${integer(tradingRules.rules.market_order_cap)} 股` : '未建模'}</strong></div>
-                  <div><span>零股卖出</span><strong>{tradingRules.rules.odd_lot_label}</strong></div>
-                  <div><span>涨跌幅</span><strong>{number(tradingRules.rules.limit_pct * 100, 0)}%</strong></div>
-                  <div><span>价格笼子</span><strong>{tradingRules.rules.cage_label}</strong>{tradingRules.price_cage && <small>当前 {money(tradingRules.price_cage.lower)} ~ {money(tradingRules.price_cage.upper)} 元</small>}</div>
+              <div className="grid gap-2">
+                <div className="grid gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
+                  {[
+                    ['最小申报', `${integer(tradingRules.rules.min_qty)} 股`],
+                    ['递增单位', tradingRules.rules.step === 1 ? '1 股' : `${integer(tradingRules.rules.step)} 整数倍`],
+                    ['限价上限', tradingRules.rules.limit_order_cap > 0 ? `${integer(tradingRules.rules.limit_order_cap)} 股` : '未建模'],
+                    ['市价上限', tradingRules.rules.market_order_cap > 0 ? `${integer(tradingRules.rules.market_order_cap)} 股` : '未建模'],
+                    ['零股卖出', tradingRules.rules.odd_lot_label],
+                    ['涨跌幅', `${number(tradingRules.rules.limit_pct * 100, 0)}%`],
+                    ['价格笼子', tradingRules.rules.cage_label],
+                  ].map(([label, value]) => <div key={label} className="rounded-lg border bg-muted/30 px-2.5 py-2"><span className="block text-[10px] text-muted-foreground">{label}</span><strong className="block font-mono text-[12px]">{value}</strong>{label === '价格笼子' && tradingRules.price_cage && <small className="block text-[10px] text-muted-foreground">当前 {money(tradingRules.price_cage.lower)} ~ {money(tradingRules.price_cage.upper)} 元</small>}</div>)}
                 </div>
-                {rulesOpen && (
-                  <div className="rules-not-modeled">
-                    <strong>未建模项（如实标注，不伪称覆盖）</strong>
-                    <ul>{tradingRules.not_modeled.map((item) => <li key={item}>{item}</li>)}</ul>
-                    <small>规则依据：{tradingRules.rules.rule_basis}</small>
-                  </div>
-                )}
+                {rulesOpen && <div className="rounded-lg border border-warning/20 bg-warning/5 p-2.5 text-[11px]"><strong className="block text-warning">未建模项（如实标注，不伪称覆盖）</strong><ul className="mt-1 list-disc space-y-0.5 pl-4 text-muted-foreground">{tradingRules.not_modeled.map((item) => <li key={item}>{item}</li>)}</ul><small className="mt-1 block text-muted-foreground">规则依据：{tradingRules.rules.rule_basis}</small></div>}
               </div>
             )}
           </Panel>
-
         </>
       )}
-      <Panel className="fee-settings-panel" title="交易费用配置" description="按万分之自定义五项费率与最低佣金，可保存为全局默认或应用到当前模拟账户">
-        <FeeConfigPanel
-          value={fees}
-          onChange={setFees}
-          accountId={account?.id}
-          onAccountUpdated={(state) => { setAccount(state); setSuccess('当前账户的费用配置已更新。'); }}
-        />
+
+      <Panel title="交易费用配置" description="按万分之自定义五项费率与最低佣金，可保存为全局默认或应用到当前模拟账户">
+        <FeeConfigPanel value={fees} onChange={setFees} accountId={account?.id} onAccountUpdated={(state) => { setAccount(state); toast.success('当前账户的费用配置已更新。'); }} />
       </Panel>
+
+      <ConfirmDialog
+        open={pendingReset}
+        onOpenChange={setPendingReset}
+        title="重置虚拟账户"
+        description="当前持仓、订单和成交记录将被清除，此操作无法撤销。"
+        confirmLabel="重置"
+        destructive
+        busy={resetting}
+        onConfirm={resetAccount}
+      />
     </div>
   );
 }

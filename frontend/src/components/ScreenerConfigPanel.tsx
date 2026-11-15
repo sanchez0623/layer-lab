@@ -1,5 +1,9 @@
 import type { ReactNode } from 'react';
 import { Filter, SlidersHorizontal } from 'lucide-react';
+import { Badge } from './Ui';
+import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { cn } from '@/lib/utils';
 import type { ScreenerConfig } from '../types';
 
 const BOARD_OPTIONS = ['创业板', '科创板'] as const;
@@ -13,14 +17,22 @@ interface Props {
   fundamentalLockedOff?: boolean;
 }
 
-/** 阶段内单个参数：标签 / 控件 / 说明自上而下排布，避免长文案挤在标签行里。 */
 function Param({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
   return (
-    <label className="funnel-param">
-      <span className="funnel-param-label">{label}</span>
+    <label className="flex min-w-0 flex-col gap-1.5">
+      <span className="text-[12px] font-medium text-foreground/80">{label}</span>
       {children}
-      <small className="funnel-param-hint">{hint}</small>
+      <small className="text-[10px] leading-4 text-muted-foreground">{hint}</small>
     </label>
+  );
+}
+
+function UnitInput({ children, unit }: { children: ReactNode; unit: string }) {
+  return (
+    <div className="relative">
+      {children}
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
+    </div>
   );
 }
 
@@ -46,114 +58,104 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
     const boards = value.boards.includes(board)
       ? value.boards.filter((item) => item !== board)
       : [...value.boards, board];
-    if (boards.length === 0) return; // 至少保留一个板块，否则 L0 无指数可判
+    if (boards.length === 0) return;
     patch({ boards });
   };
 
+  const stages = [
+    {
+      tag: 'L1', title: '超跌初筛', note: '两条同时满足才进入下一层',
+      body: (
+        <>
+          <Param label="A1 20日跌幅阈值" hint="20 日涨跌幅低于阈值">
+            <UnitInput unit="%"><Input type="number" step="1" value={percentValue(value.chg20_max)} onChange={(event) => setRatio('chg20_max', event.target.value)} className="pr-7" /></UnitInput>
+          </Param>
+          <Param label="距52周高回撤" hint="收盘价低于 250 日高点回撤线">
+            <UnitInput unit="%"><Input type="number" min="0" step="1" value={percentValue(value.week52_drawdown)} onChange={(event) => setRatio('week52_drawdown', event.target.value)} className="pr-7" /></UnitInput>
+          </Param>
+        </>
+      ),
+    },
+    {
+      tag: 'L2', title: '风控否决', note: '任一条触发即否决',
+      body: (
+        <>
+          <Param label="当日涨幅上限" hint="当日涨幅超过即否决">
+            <UnitInput unit="%"><Input type="number" step="1" value={percentValue(value.day_change_max)} onChange={(event) => setRatio('day_change_max', event.target.value)} className="pr-7" /></UnitInput>
+          </Param>
+          <Param label="上市最少交易日" hint="上市不足则否决">
+            <UnitInput unit="日"><Input type="number" min="1" step="1" value={value.min_listing_sessions} onChange={(event) => patch({ min_listing_sessions: Math.max(1, Number(event.target.value) || 1) })} className="pr-7" /></UnitInput>
+          </Param>
+          <label className="flex items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2" title={fundamentalLockedOff ? '回测为避免未来数据与联网财务，固定关闭财务深筛' : undefined}>
+            <span><strong className="block text-[12px] font-medium">财务深筛</strong><small className="block text-[10px] text-muted-foreground">{fundamentalLockedOff ? '回测固定关闭（避免未来数据）' : '亏损且营收<1亿 / 净资产为负'}</small></span>
+            <Switch checked={fundamentalLockedOff ? false : value.enable_fundamental_veto} disabled={fundamentalLockedOff} onCheckedChange={(checked) => patch({ enable_fundamental_veto: checked })} />
+          </label>
+        </>
+      ),
+    },
+    {
+      tag: 'L3', title: '流动性门槛', note: '成交额不足即剔除',
+      body: (
+        <>
+          <Param label="当日成交额门槛" hint="当日成交额不低于门槛">
+            <UnitInput unit="亿"><Input type="number" min="0" step="0.5" value={Number((value.min_amount / 1e8).toFixed(2))} onChange={(event) => setYi('min_amount', event.target.value)} className="pr-7" /></UnitInput>
+          </Param>
+          <Param label="20日均额门槛" hint="20 日均成交额不低于门槛">
+            <UnitInput unit="亿"><Input type="number" min="0" step="0.5" value={Number((value.min_avg_amount_20d / 1e8).toFixed(2))} onChange={(event) => setYi('min_avg_amount_20d', event.target.value)} className="pr-7" /></UnitInput>
+          </Param>
+        </>
+      ),
+    },
+    {
+      tag: 'L4', title: '财务深筛', note: '控制基本面核验次数',
+      body: (
+        <Param label="深筛上限" hint="最多逐只做财务深筛的数量">
+          <UnitInput unit="只"><Input type="number" min="0" step="1" value={value.max_deep_checks} onChange={(event) => patch({ max_deep_checks: Math.max(0, Number(event.target.value) || 0) })} className="pr-7" /></UnitInput>
+        </Param>
+      ),
+    },
+  ];
+
   return (
-    <div className="funnel-screener-config">
-      <div className="funnel-config-head">
-        <div className="funnel-config-heading">
-          <span className="funnel-config-icon"><SlidersHorizontal size={14} /></span>
-          <div>
-            <strong>选股漏斗阈值</strong>
-            <small>清仓后按 L0→L4 重新筛选，取当时第一名换票</small>
-          </div>
+    <div className="rounded-xl border bg-muted/25 p-3">
+      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-2">
+          <span className="grid size-7 place-items-center rounded-md bg-accent text-accent-foreground"><SlidersHorizontal className="size-3.5" /></span>
+          <div><strong className="block text-[13px]">选股漏斗阈值</strong><small className="block text-[11px] text-muted-foreground">清仓后按 L0→L4 重新筛选，取当时第一名换票</small></div>
         </div>
-        <div className="funnel-board-row" title="板块决定每轮选股用哪个指数做 L0 大盘门，至少保留一个">
-          <span className="funnel-board-label">板块</span>
-          {BOARD_OPTIONS.map((board) => (
-            <button
-              key={board}
-              type="button"
-              className={`funnel-board-chip ${value.boards.includes(board) ? 'active' : ''}`}
-              onClick={() => toggleBoard(board)}
-              aria-pressed={value.boards.includes(board)}
-            >
-              {board}<small>{board === '创业板' ? 'sz.399006' : 'sh.000688'}</small>
-            </button>
-          ))}
+        <div className="flex items-center gap-1.5" title="板块决定每轮选股用哪个指数做 L0 大盘门，至少保留一个">
+          <span className="text-[11px] text-muted-foreground">板块</span>
+          {BOARD_OPTIONS.map((board) => {
+            const active = value.boards.includes(board);
+            return (
+              <button
+                key={board}
+                type="button"
+                className={cn('rounded-md border px-2 py-1 text-[11px] transition-colors', active ? 'border-primary/30 bg-accent text-accent-foreground' : 'bg-card text-muted-foreground hover:bg-muted')}
+                onClick={() => toggleBoard(board)}
+                aria-pressed={active}
+              >
+                {board}<small className="ml-1 font-mono text-[9px] opacity-70">{board === '创业板' ? 'sz.399006' : 'sh.000688'}</small>
+              </button>
+            );
+          })}
         </div>
       </div>
 
-      <div className="funnel-stage-grid">
-        <section className="funnel-stage" data-stage="L1">
-          <header className="funnel-stage-head">
-            <span className="funnel-stage-badge">L1</span>
-            <div><strong>超跌初筛</strong><small>先按跌幅与回撤锁定候选</small></div>
-          </header>
-          <div className="funnel-stage-body">
-            <Param label="A1 20日跌幅阈值" hint="20 日涨跌幅低于阈值">
-              <div className="input-with-unit"><input type="number" step="1" value={percentValue(value.chg20_max)} onChange={(event) => setRatio('chg20_max', event.target.value)} /><span>%</span></div>
-            </Param>
-            <Param label="距52周高回撤" hint="收盘价低于 250 日高点回撤线">
-              <div className="input-with-unit"><input type="number" min="0" step="1" value={percentValue(value.week52_drawdown)} onChange={(event) => setRatio('week52_drawdown', event.target.value)} /><span>%</span></div>
-            </Param>
-          </div>
-          <p className="funnel-stage-note">两条同时满足才进入下一层</p>
-        </section>
-
-        <section className="funnel-stage" data-stage="L2">
-          <header className="funnel-stage-head">
-            <span className="funnel-stage-badge">L2</span>
-            <div><strong>风控否决</strong><small>剔除过热、次新与财务瑕疵</small></div>
-          </header>
-          <div className="funnel-stage-body">
-            <Param label="当日涨幅上限" hint="当日涨幅超过即否决">
-              <div className="input-with-unit"><input type="number" step="1" value={percentValue(value.day_change_max)} onChange={(event) => setRatio('day_change_max', event.target.value)} /><span>%</span></div>
-            </Param>
-            <Param label="上市最少交易日" hint="上市不足则否决">
-              <div className="input-with-unit"><input type="number" min="1" step="1" value={value.min_listing_sessions} onChange={(event) => patch({ min_listing_sessions: Math.max(1, Number(event.target.value) || 1) })} /><span>日</span></div>
-            </Param>
-            <label
-              className="switch-row funnel-param-switch"
-              title={fundamentalLockedOff ? '回测为避免未来数据与联网财务，固定关闭财务深筛' : undefined}
-            >
-              <span><strong>财务深筛</strong><small>{fundamentalLockedOff ? '回测固定关闭（避免未来数据）' : '亏损且营收&lt;1亿 / 净资产为负'}</small></span>
-              <input
-                type="checkbox"
-                checked={fundamentalLockedOff ? false : value.enable_fundamental_veto}
-                disabled={fundamentalLockedOff}
-                onChange={(event) => patch({ enable_fundamental_veto: event.target.checked })}
-              />
-              <span className="switch" />
-            </label>
-          </div>
-          <p className="funnel-stage-note">任一条触发即否决</p>
-        </section>
-
-        <section className="funnel-stage" data-stage="L3">
-          <header className="funnel-stage-head">
-            <span className="funnel-stage-badge">L3</span>
-            <div><strong>流动性门槛</strong><small>保证换仓时有足够成交额</small></div>
-          </header>
-          <div className="funnel-stage-body">
-            <Param label="当日成交额门槛" hint="当日成交额不低于门槛">
-              <div className="input-with-unit"><input type="number" min="0" step="0.5" value={Number((value.min_amount / 1e8).toFixed(2))} onChange={(event) => setYi('min_amount', event.target.value)} /><span>亿</span></div>
-            </Param>
-            <Param label="20日均额门槛" hint="20 日均成交额不低于门槛">
-              <div className="input-with-unit"><input type="number" min="0" step="0.5" value={Number((value.min_avg_amount_20d / 1e8).toFixed(2))} onChange={(event) => setYi('min_avg_amount_20d', event.target.value)} /><span>亿</span></div>
-            </Param>
-          </div>
-          <p className="funnel-stage-note">成交额不足即剔除</p>
-        </section>
-
-        <section className="funnel-stage" data-stage="L4">
-          <header className="funnel-stage-head">
-            <span className="funnel-stage-badge">L4</span>
-            <div><strong>财务深筛</strong><small>逐只核验基本面</small></div>
-          </header>
-          <div className="funnel-stage-body">
-            <Param label="深筛上限" hint="最多逐只做财务深筛的数量">
-              <div className="input-with-unit"><input type="number" min="0" step="1" value={value.max_deep_checks} onChange={(event) => patch({ max_deep_checks: Math.max(0, Number(event.target.value) || 0) })} /><span>只</span></div>
-            </Param>
-          </div>
-          <p className="funnel-stage-note">控制基本面核验次数</p>
-        </section>
+      <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+        {stages.map((stage) => (
+          <section key={stage.tag} className="flex min-w-0 flex-col gap-2.5 rounded-lg border bg-card p-2.5 shadow-xs">
+            <header className="flex items-center gap-2">
+              <Badge tone="indigo">{stage.tag}</Badge>
+              <div><strong className="block text-[12px]">{stage.title}</strong><small className="block text-[10px] text-muted-foreground">{stage.note}</small></div>
+            </header>
+            <div className="grid gap-2">{stage.body}</div>
+          </section>
+        ))}
       </div>
 
-      <div className="funnel-screener-footnote">
-        <Filter size={13} />
+      <div className="mt-2.5 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground">
+        <Filter className="mt-0.5 size-3 shrink-0" />
         <span>每次清仓后按以上阈值重跑 L0→L4，取当时第一名换票；数据来自本地 universe.db 缓存，不联网。</span>
       </div>
     </div>

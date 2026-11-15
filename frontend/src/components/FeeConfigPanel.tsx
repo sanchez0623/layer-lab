@@ -1,7 +1,10 @@
 import { useState } from 'react';
-import { CheckCircle2, RotateCcw, Save, Settings2 } from 'lucide-react';
+import { Loader2, RotateCcw, Save, Settings2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { api } from '../lib/api';
 import { FEE_FIELDS } from '../lib/feeConfig';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import type { AccountState, FeeConfig } from '../types';
 
 type Busy = 'save' | 'reset' | 'apply' | null;
@@ -15,7 +18,6 @@ interface Props {
 
 export default function FeeConfigPanel({ value, onChange, accountId, onAccountUpdated }: Props) {
   const [busy, setBusy] = useState<Busy>(null);
-  const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
   const update = (key: keyof FeeConfig, raw: string) => {
@@ -26,21 +28,20 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
   const run = async (kind: Exclude<Busy, null>) => {
     setBusy(kind);
     setError('');
-    setMessage('');
     try {
       if (kind === 'save') {
         const result = await api.saveFees(value);
         onChange(result.fees);
-        setMessage('已保存为全局默认，之后新建的回测与模拟账户将使用这组费率。');
+        toast.success('已保存为全局默认，之后新建的回测与模拟账户将使用这组费率。');
       } else if (kind === 'reset') {
         const result = await api.resetFees();
         onChange(result.defaults);
-        setMessage('已恢复系统默认费率（佣金万0.5 / 印花税万5 / 经手费万0.341 / 证管费万0.2 / 过户费万0.1）。');
+        toast.success('已恢复系统默认费率（佣金万0.5 / 印花税万5 / 经手费万0.341 / 证管费万0.2 / 过户费万0.1）。');
       } else {
         if (!accountId) return;
         const state = await api.applyAccountFees(accountId, value);
         onAccountUpdated?.(state);
-        setMessage('已把当前费率应用到该模拟账户，仅对此后的成交生效。');
+        toast.success('已把当前费率应用到该模拟账户，仅对此后的成交生效。');
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '费用配置操作失败。');
@@ -53,14 +54,14 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
   const sellSide = buySide + value.stamp_tax_rate;
 
   return (
-    <div className="fee-config-card">
-      <div className="fee-config-layout">
-        <div className="fee-config-grid">
+    <div className="rounded-xl border bg-muted/25 p-3">
+      <div className="grid gap-3 lg:grid-cols-[1fr_220px]">
+        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
           {FEE_FIELDS.map((field) => (
-            <label className="fee-field" key={field.key}>
-              <span className="fee-field-label">{field.label}</span>
-              <div className="input-with-unit">
-                <input
+            <label className="flex min-w-0 flex-col gap-1" key={field.key}>
+              <span className="text-[12px] font-medium text-foreground/80">{field.label}</span>
+              <div className="relative">
+                <Input
                   type="number"
                   min="0"
                   max={field.max}
@@ -68,37 +69,37 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
                   value={value[field.key]}
                   onChange={(event) => update(field.key, event.target.value)}
                   aria-label={field.label}
+                  className="pr-9"
                 />
-                <span>{field.unit === '万分之' ? '‱' : field.unit}</span>
+                <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{field.unit === '万分之' ? '‱' : field.unit}</span>
               </div>
-              <small className="fee-field-note">{field.note}</small>
+              <small className="text-[10px] leading-4 text-muted-foreground">{field.note}</small>
             </label>
           ))}
         </div>
-        <aside className="fee-config-side">
-          <span className="fee-version"><Settings2 size={12} />费用配置 v1</span>
-          <div className="fee-total"><span>买入合计</span><b>{buySide.toFixed(3)} <small>‱</small></b></div>
-          <div className="fee-total"><span>卖出合计</span><b>{sellSide.toFixed(3)} <small>‱</small></b></div>
-          <div className="fee-total"><span>最低佣金</span><b>{value.min_commission} <small>元/笔</small></b></div>
-          <p className="fee-config-note">费率按万分之输入、分项相加；印花税仅卖出收取；滑点不计入费用，体现在成交价。</p>
+        <aside className="flex flex-col gap-2 rounded-lg border bg-card p-3">
+          <span className="inline-flex w-fit items-center gap-1 rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"><Settings2 className="size-3" />费用配置 v1</span>
+          <div className="flex items-center justify-between text-[12px]"><span className="text-muted-foreground">买入合计</span><b className="font-mono">{buySide.toFixed(3)} <small className="font-normal text-muted-foreground">‱</small></b></div>
+          <div className="flex items-center justify-between text-[12px]"><span className="text-muted-foreground">卖出合计</span><b className="font-mono">{sellSide.toFixed(3)} <small className="font-normal text-muted-foreground">‱</small></b></div>
+          <div className="flex items-center justify-between text-[12px]"><span className="text-muted-foreground">最低佣金</span><b className="font-mono">{value.min_commission} <small className="font-normal text-muted-foreground">元/笔</small></b></div>
+          <p className="mt-1 border-t pt-2 text-[10px] leading-4 text-muted-foreground">费率按万分之输入、分项相加；印花税仅卖出收取；滑点不计入费用，体现在成交价。</p>
         </aside>
       </div>
-      <div className="fee-config-actions">
-        <button type="button" className="button primary" onClick={() => void run('save')} disabled={busy !== null}>
-          {busy === 'save' ? <span className="button-spinner" /> : <Save size={14} />}保存为全局默认
-        </button>
-        <button type="button" className="button secondary" onClick={() => void run('reset')} disabled={busy !== null}>
-          <RotateCcw size={14} />恢复默认
-        </button>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button type="button" size="sm" onClick={() => void run('save')} disabled={busy !== null}>
+          {busy === 'save' ? <Loader2 className="animate-spin" /> : <Save />}保存为全局默认
+        </Button>
+        <Button type="button" variant="outline" size="sm" onClick={() => void run('reset')} disabled={busy !== null}>
+          <RotateCcw />恢复默认
+        </Button>
         {accountId && (
-          <button type="button" className="button secondary" onClick={() => void run('apply')} disabled={busy !== null}>
-            <Settings2 size={14} />应用到当前账户
-          </button>
+          <Button type="button" variant="outline" size="sm" onClick={() => void run('apply')} disabled={busy !== null}>
+            <Settings2 />应用到当前账户
+          </Button>
         )}
-        <span className="fee-config-hint">当前编辑值会直接用于本次回测 / 新建账户；已有账户需单独应用。</span>
+        <span className="text-[10px] text-muted-foreground">当前编辑值会直接用于本次回测 / 新建账户；已有账户需单独应用。</span>
       </div>
-      {message && <div className="fee-config-message ok"><CheckCircle2 size={14} />{message}</div>}
-      {error && <div className="fee-config-message err">{error}</div>}
+      {error && <div className="mt-2 rounded-md border border-destructive/20 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive">{error}</div>}
     </div>
   );
 }

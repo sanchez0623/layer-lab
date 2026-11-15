@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
 /**
  * 通用后台分页控件（与 backend/app/pagination.py 的 paginate() 信封配套）。
@@ -49,38 +52,26 @@ export function PaginationBar({
   const to = Math.min(page * pageSize, total);
 
   return (
-    <div className={`pagination-bar ${className}`} role="navigation" aria-label="分页">
-      <span className="pagination-summary">
-        第 <strong>{from}</strong>–<strong>{to}</strong> 条 / 共 <strong>{total}</strong> 条
+    <div className={`flex flex-col gap-3 border-t pt-3 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between ${className}`} role="navigation" aria-label="分页">
+      <span>
+        第 <strong className="font-mono font-medium text-foreground">{from}</strong>–<strong className="font-mono font-medium text-foreground">{to}</strong> 条 / 共 <strong className="font-mono font-medium text-foreground">{total}</strong> 条
       </span>
 
-      <div className="pagination-controls">
-        <button
-          type="button"
-          className="page-btn"
-          onClick={() => goto(page - 1)}
-          disabled={disabled || !hasPrev(page)}
-          aria-label="上一页"
-        >
-          <ChevronLeft size={15} />上一页
-        </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" size="sm" onClick={() => goto(page - 1)} disabled={disabled || page <= 1} aria-label="上一页">
+          <ChevronLeft />上一页
+        </Button>
 
-        <span className="page-indicator">
-          第 <strong>{page}</strong> / {Math.max(totalPages, 1)} 页
+        <span className="px-1">
+          第 <strong className="font-mono font-medium text-foreground">{page}</strong> / {Math.max(totalPages, 1)} 页
         </span>
 
-        <button
-          type="button"
-          className="page-btn"
-          onClick={() => goto(page + 1)}
-          disabled={disabled || !hasNext(page, totalPages)}
-          aria-label="下一页"
-        >
-          下一页<ChevronRight size={15} />
-        </button>
+        <Button type="button" variant="outline" size="sm" onClick={() => goto(page + 1)} disabled={disabled || page >= totalPages} aria-label="下一页">
+          下一页<ChevronRight />
+        </Button>
 
-        <span className="page-jump">
-          <input
+        <span className="flex items-center gap-1.5">
+          <Input
             type="number"
             min={1}
             max={Math.max(totalPages, 1)}
@@ -90,36 +81,27 @@ export function PaginationBar({
             onKeyDown={(event) => { if (event.key === 'Enter') submitJump(); }}
             onBlur={submitJump}
             aria-label="跳转到页"
+            className="h-7 w-16 px-2 font-mono text-xs"
           />
-          <button
-            type="button"
-            className="page-btn"
-            onClick={submitJump}
-            disabled={disabled || totalPages <= 1}
-          >
-            跳转
-          </button>
+          <Button type="button" variant="outline" size="sm" onClick={submitJump} disabled={disabled || totalPages <= 1}>跳转</Button>
         </span>
 
         {onPageSizeChange && (
-          <label className="page-size">
+          <label className="flex items-center gap-1.5">
             每页
-            <select
-              value={pageSize}
-              disabled={disabled}
-              onChange={(event) => onPageSizeChange(Number(event.target.value))}
-              aria-label="每页条数"
-            >
-              {pageSizeOptions.map((size) => <option key={size} value={size}>{size}</option>)}
-            </select>
+            <Select value={String(pageSize)} onValueChange={(value) => onPageSizeChange(Number(value))} disabled={disabled}>
+              <SelectTrigger size="sm" className="h-7 min-w-[64px]" aria-label="每页条数">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {pageSizeOptions.map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}
+              </SelectContent>
+            </Select>
           </label>
         )}
       </div>
     </div>
   );
 }
-
-function hasPrev(page: number): boolean { return page > 1; }
-function hasNext(page: number, totalPages: number): boolean { return page < totalPages; }
 
 export default PaginationBar;
