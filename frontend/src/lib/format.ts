@@ -68,6 +68,7 @@ export const statusLabel = (status?: string): string => {
   return ({
     pending: '待成交', open: '待成交', partial: '部分成交', partially_filled: '部分成交', filled: '已成交',
     cancelled: '已撤单', canceled: '已撤单', rejected: '已拒绝', completed: '已完成', running: '运行中', failed: '失败',
+    interrupted: '已中断', cancelling: '停止中',
     active: '运行中', closed: '已结束', idle: '空闲', armed: '已触发', exit: '退出中', off: '未触发',
   }[value] || status || '—');
 };

@@ -376,14 +376,18 @@ def test_cancel_via_manager_then_resume_completes(tmp_path):
 # --------------------------------------------------------------------------
 
 
-def _seed_orphan_running_job(storage: SQLiteStorage) -> str:
+def _seed_orphan_job(storage: SQLiteStorage, status: str = "RUNNING") -> str:
     now = datetime.now().isoformat(timespec="seconds")
     orphan = str(uuid.uuid4())
     storage.create_job({
-        "id": orphan, "name": "遗留任务", "status": "RUNNING", "progress": 40.0,
+        "id": orphan, "name": "遗留任务", "status": status, "progress": 40.0,
         "params": {}, "created_at": now, "updated_at": now,
     })
     return orphan
+
+
+def _seed_orphan_running_job(storage: SQLiteStorage) -> str:
+    return _seed_orphan_job(storage, "RUNNING")
 
 
 def test_recover_interrupted_flags_running_jobs_as_interrupted(tmp_path):
@@ -400,6 +404,38 @@ def test_recover_interrupted_flags_running_jobs_as_interrupted(tmp_path):
     job = storage.get_job(orphan)
     assert job["status"] == "INTERRUPTED"
     assert job["status"] in {"CANCELLED", "INTERRUPTED", "FAILED"}   # 属可续传集合
+
+
+def test_recover_converts_zombie_cancelling_to_resumable_cancelled(tmp_path):
+    """进程重启时正处 CANCELLING 的任务：取消事件随进程丢失、worker 已死，
+    必须转为 CANCELLED（可续传终态），否则永远卡在非终态、前端刷新后无法续跑。"""
+    storage = SQLiteStorage(tmp_path / "recover_cancelling.db")
+
+    def builder(params, hooks, resume_state, checkpoint):  # pragma: no cover - 不会被调用
+        raise AssertionError("本用例不应真正运行引擎")
+
+    manager = BacktestJobManager(storage, builder)
+    cancelling = _seed_orphan_job(storage, "CANCELLING")
+    running = _seed_orphan_job(storage, "RUNNING")
+
+    assert manager.recover_interrupted() == 2
+    job = storage.get_job(cancelling)
+    assert job["status"] == "CANCELLED"
+    assert "可续传" in (job["error"] or "")
+    assert storage.get_job(running)["status"] == "INTERRUPTED"
+
+    # CANCELLED 在可续传集合内：能直接续跑到完成
+    finished: list[dict] = []
+
+    def resume_builder(params, hooks, resume_state, checkpoint):
+        engine = _PacedEngine(total_days=2, pace=None)
+        engine.hooks = hooks
+        return Execution(engine, lambda report: finished.append(report))
+
+    manager._builder = resume_builder
+    manager.resume(cancelling)
+    assert wait_for_terminal(manager, storage, cancelling)["status"] == "COMPLETED"
+    assert len(finished) == 1
 
 
 def test_resume_after_recover_completes(tmp_path):

@@ -120,11 +120,19 @@ class BacktestJobManager:
             return {"job_id": job_id, "status": "CANCELLING", "cancelled": True}
 
     def recover_interrupted(self) -> int:
-        """进程启动时把遗留的 RUNNING 任务标记为 INTERRUPTED（容器重启=被打断），可续传。"""
+        """进程启动时清理遗留任务（worker 线程与取消事件都在内存里，重启后不会再跑）：
+        - RUNNING → INTERRUPTED：容器重启=被打断，可从检查点续传。
+        - CANCELLING → CANCELLED：重启时正在取消，取消请求已随进程丢失，转可续传终态。
+        两种都收敛到「可续传终态」，保证前端刷新后能重新挂上并提供续跑入口。
+        """
         count = 0
         for job in self._storage.list_jobs_by_status("RUNNING"):
             self._storage.update_job(job["id"], status="INTERRUPTED",
                                      error="进程重启导致回测中断，可从检查点续传。")
+            count += 1
+        for job in self._storage.list_jobs_by_status("CANCELLING"):
+            self._storage.update_job(job["id"], status="CANCELLED",
+                                     error="进程重启时任务正在取消，已转为可续传终态。")
             count += 1
         return count
 

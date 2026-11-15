@@ -59,6 +59,23 @@ type WorkspaceTab = 'run' | 'reports';
 /** 后台作业终态：轮询到这些状态即停止。CANCELLED / INTERRUPTED / FAILED 可续跑。 */
 const JOB_TERMINAL_STATUSES = ['COMPLETED', 'CANCELLED', 'FAILED', 'INTERRUPTED'];
 const JOB_RESUMABLE_STATUSES = ['CANCELLED', 'INTERRUPTED', 'FAILED'];
+/** 在途状态：服务端 worker 还挂着（或正在收尾取消），页面重挂后要继续轮询进度。 */
+const JOB_ACTIVE_STATUSES = ['RUNNING', 'CANCELLING'];
+/** 「放弃」过的作业 id 落 sessionStorage：刷新后不再重新弹面板（内存 ref 刷新即丢）。 */
+const DISMISSED_JOBS_KEY = 'layerlab.dismissedBacktestJobs';
+
+const readDismissedJobs = (): Set<string> => {
+  try {
+    const raw = sessionStorage.getItem(DISMISSED_JOBS_KEY);
+    return new Set(raw ? (JSON.parse(raw) as string[]) : []);
+  } catch { return new Set(); }
+};
+
+const rememberDismissedJob = (jobId: string) => {
+  const dismissed = readDismissedJobs();
+  dismissed.add(jobId);
+  try { sessionStorage.setItem(DISMISSED_JOBS_KEY, JSON.stringify([...dismissed])); } catch { /* 存储不可用时忽略 */ }
+};
 
 /** 漏斗轮动回测默认选股阈值；比率字段为小数，界面百分比换算在 ScreenerConfigPanel 内完成。 */
 const fallbackScreener: ScreenerConfig = {
@@ -166,13 +183,24 @@ export default function BacktestPage() {
       const [datasetResult, defaults] = await Promise.all([api.datasets(), api.strategyDefaults()]);
       setDatasets(datasetResult);
       // 重挂载时重新挂到仍在跑的后台作业（导航离开后服务端继续跑），避免丢失进度条。
+      // 除 RUNNING 外还要重挂「可续跑但没在跑」的作业（刷新前进程重启/取消/失败）：
+      // 这类作业不在轮询态，但必须把面板带回来，否则用户刷新后既看不到也续跑不了。
       try {
-        const { jobs } = await api.backtestJobList(10);
-        const active = jobs.find((job) => job.status === 'RUNNING' && !settledJobIdsRef.current.has(job.id));
+        const { jobs } = await api.backtestJobList(20);
+        const fresh = (jobId: string) => !settledJobIdsRef.current.has(jobId)
+          && !readDismissedJobs().has(jobId);
+        const active = jobs.find((job) => fresh(job.id) && JOB_ACTIVE_STATUSES.includes(job.status));
         if (active) {
           jobIdRef.current = active.id;
           setJobView(active);
           setRunning(true);
+        } else {
+          const resumable = jobs.find((job) => fresh(job.id) && JOB_RESUMABLE_STATUSES.includes(job.status));
+          if (resumable) {
+            jobIdRef.current = resumable.id;
+            setJobView(resumable);
+            setRunning(false);
+          }
         }
       } catch { /* 作业列表不可用时静默忽略，不影响页面初始化 */ }
       const defaultConfig = defaults.config || defaults;
@@ -258,8 +286,10 @@ export default function BacktestPage() {
   const selectedDataset = datasets.find((item) => item.id === datasetId);
   const intradayOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === '5m');
   const indexOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
-  // 在途作业：RUNNING 或可续跑（CANCELLED/INTERRUPTED/FAILED）时禁止再起新回测，避免与服务端单作业互斥冲突。
-  const jobActive = running || submitting || (!!jobView && (jobView.status === 'RUNNING' || JOB_RESUMABLE_STATUSES.includes(jobView.status)));
+  // 在途作业：RUNNING/CANCELLING 或可续跑（CANCELLED/INTERRUPTED/FAILED）时禁止再起新回测，
+  // 避免与服务端单作业互斥冲突；想另起必须先对旧作业做「继续」或「放弃」。
+  const jobActive = running || submitting
+    || (!!jobView && (JOB_ACTIVE_STATUSES.includes(jobView.status) || JOB_RESUMABLE_STATUSES.includes(jobView.status)));
 
   const stopPolling = () => {
     if (pollTimerRef.current !== null) {
@@ -385,11 +415,14 @@ export default function BacktestPage() {
     finally { setJobBusy(false); }
   };
 
-  /** 放弃在途作业：仅清空前端在途状态，服务端作业本身不受影响。 */
+  /** 放弃在途作业：仅清空前端在途状态并记入 sessionStorage（刷新后不再重新弹出），服务端作业本身不受影响。 */
   const dismissJob = () => {
     stopPolling();
     const id = jobIdRef.current || jobView?.id;
-    if (id) settledJobIdsRef.current.add(id);
+    if (id) {
+      settledJobIdsRef.current.add(id);
+      rememberDismissedJob(id);
+    }
     jobIdRef.current = null;
     setJobView(null);
     setRunning(false);
