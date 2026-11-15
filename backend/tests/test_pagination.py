@@ -230,10 +230,10 @@ def test_main_report_is_slimmed_no_full_records(api):
     assert paged["total"] == 45 and len(paged["items"]) == 45
 
 
-# ------------------------------------------------- 成交明细 symbol/purpose 过滤 --
+# --------------------------------------- 成交明细 symbol/purpose/side 过滤 --
 
 def _report_with_mixed_trades(report_id: str) -> dict:
-    """造一份多标的、多用途的回测报告，供搜索过滤测试。"""
+    """造一份多标的、多用途、多方向的回测报告，供搜索过滤测试。"""
     trades = [
         {"id": "t0", "symbol": "sh.688200", "side": "buy", "purpose": "PERMANENT",
          "timestamp": "2026-01-05T09:30:00", "price": 10.0, "quantity": 100, "amount": 1000.0},
@@ -244,12 +244,22 @@ def _report_with_mixed_trades(report_id: str) -> dict:
         {"id": "t3", "symbol": "sz.159915", "side": "buy", "purpose": "BETA",
          "timestamp": "2026-01-08T09:30:00", "price": 13.0, "quantity": 100, "amount": 1300.0},
     ]
+    orders = [
+        {"id": "o0", "symbol": "sh.688200", "side": "BUY", "purpose": "PERMANENT",
+         "created_at": "2026-01-05T09:30:00", "quantity": 100, "status": "filled"},
+        {"id": "o1", "symbol": "sz.000001", "side": "SELL", "purpose": "T",
+         "created_at": "2026-01-06T09:30:00", "quantity": 100, "status": "filled"},
+    ]
     return {
         "id": report_id, "name": "成交明细搜索测试", "status": "COMPLETED",
         "created_at": "2026-11-15T00:00:00", "config": {}, "metrics": {},
-        "equity_curve": [], "trades": trades, "orders": [], "rounds": [],
+        "equity_curve": [], "trades": trades, "orders": orders, "rounds": [],
         "events": [], "warnings": [], "data_info": {"mode": "single"},
     }
+
+
+def _ids(body: dict) -> list[str]:
+    return [item["id"] for item in body["items"]]
 
 
 def test_records_filter_by_symbol_substring(api):
@@ -258,52 +268,87 @@ def test_records_filter_by_symbol_substring(api):
     application.state.storage.save_backtest(_report_with_mixed_trades("bt_20"))
 
     body = client.get("/api/backtests/bt_20/records/trades?symbol=688200").json()
-    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t0"]
+    assert body["total"] == 1 and _ids(body) == ["t0"]
 
     body = client.get("/api/backtests/bt_20/records/trades?symbol=SH.600519").json()
-    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t2"]
+    assert body["total"] == 1 and _ids(body) == ["t2"]
 
     # 无命中
     body = client.get("/api/backtests/bt_20/records/trades?symbol=999999").json()
     assert body["total"] == 0 and body["items"] == []
 
 
-def test_records_filter_by_purpose_raw_and_label(api):
-    """用途过滤：原始枚举值（T / BETA）与中文标签（永久仓）都可命中。"""
+def test_records_filter_by_purpose_enum_and_label(api):
+    """用途过滤：枚举值与其中文标签等价（全等匹配，非子串）。"""
     application, client = api
     application.state.storage.save_backtest(_report_with_mixed_trades("bt_21"))
 
+    # 枚举值，大小写不敏感
     body = client.get("/api/backtests/bt_21/records/trades?purpose=T").json()
-    assert body["total"] == 2 and [t["id"] for t in body["items"]] == ["t1", "t2"]
+    assert body["total"] == 2 and _ids(body) == ["t1", "t2"]
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=permanent").json()
+    assert body["total"] == 1 and _ids(body) == ["t0"]
 
-    # 中文标签「永久仓」映射回 PERMANENT
-    body = client.get("/api/backtests/bt_21/records/trades?purpose=%E6%B0%B8%E4%B9%85%E4%BB%93").json()
-    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t0"]
-
-    # 中文标签「t仓」命中两个 T 仓
-    body = client.get("/api/backtests/bt_21/records/trades?purpose=t%E4%BB%93").json()
+    # 中文标签等价于枚举值
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=%E6%B0%B8%E4%B9%85%E4%BB%93").json()  # 永久仓
+    assert body["total"] == 1 and _ids(body) == ["t0"]
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=t%E4%BB%93").json()  # t仓
     assert body["total"] == 2
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=ETF%E5%AF%B9%E5%86%B2").json()  # ETF对冲
+    assert body["total"] == 1 and _ids(body) == ["t3"]
 
-    # BETA 无中文标签，按原始值命中
-    body = client.get("/api/backtests/bt_21/records/trades?purpose=beta").json()
-    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t3"]
+    # 子串不再生效：'t' 只匹配 T 仓，不会误命中 PERMANENT/BETA
+    body = client.get("/api/backtests/bt_21/records/trades?purpose=t").json()
+    assert body["total"] == 2 and _ids(body) == ["t1", "t2"]
+
+
+def test_records_filter_by_side(api):
+    """方向过滤：BUY / SELL 大小写不敏感。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_24"))
+
+    body = client.get("/api/backtests/bt_24/records/trades?side=BUY").json()
+    assert body["total"] == 3 and _ids(body) == ["t0", "t2", "t3"]
+
+    body = client.get("/api/backtests/bt_24/records/trades?side=sell").json()
+    assert body["total"] == 1 and _ids(body) == ["t1"]
 
 
 def test_records_filter_combined_and_total_reflects_filter(api):
-    """symbol + purpose 组合过滤；total / 分页口径基于过滤后条数。"""
+    """symbol + purpose + side 组合过滤；total / 分页口径基于过滤后条数。"""
     application, client = api
     application.state.storage.save_backtest(_report_with_mixed_trades("bt_22"))
 
-    body = client.get("/api/backtests/bt_22/records/trades?symbol=sz&purpose=T").json()
-    assert body["total"] == 1 and [t["id"] for t in body["items"]] == ["t1"]
+    body = client.get("/api/backtests/bt_22/records/trades?symbol=sz&purpose=T&side=SELL").json()
+    assert body["total"] == 1 and _ids(body) == ["t1"]
 
     # 组合无命中
     body = client.get("/api/backtests/bt_22/records/trades?symbol=688200&purpose=T").json()
     assert body["total"] == 0 and body["total_pages"] == 0
 
+    # 过滤后分页：total_pages 按过滤后条数计算
+    body = client.get("/api/backtests/bt_22/records/trades?side=BUY&page=1&page_size=2").json()
+    assert body["total"] == 3 and body["total_pages"] == 2 and len(body["items"]) == 2
+    body = client.get("/api/backtests/bt_22/records/trades?side=BUY&page=2&page_size=2").json()
+    assert _ids(body) == ["t3"]
+
     # 不带过滤参数时行为不变（回归）
     body = client.get("/api/backtests/bt_22/records/trades?page=1&page_size=2").json()
     assert body["total"] == 4 and len(body["items"]) == 2
+
+
+def test_records_filter_invalid_params_422(api):
+    """非法 purpose / side → 422（含合法值提示），而不是静默返回空。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_25"))
+
+    bad_purpose = client.get("/api/backtests/bt_25/records/trades?purpose=xx")
+    assert bad_purpose.status_code == 422
+    assert "purpose" in bad_purpose.json()["detail"]
+
+    bad_side = client.get("/api/backtests/bt_25/records/trades?side=foo")
+    assert bad_side.status_code == 422
+    assert "side" in bad_side.json()["detail"]
 
 
 def test_records_filter_blank_params_ignored(api):
@@ -311,5 +356,42 @@ def test_records_filter_blank_params_ignored(api):
     application, client = api
     application.state.storage.save_backtest(_report_with_mixed_trades("bt_23"))
 
-    body = client.get("/api/backtests/bt_23/records/trades?symbol=&purpose=%20%20").json()
+    body = client.get("/api/backtests/bt_23/records/trades?symbol=&purpose=%20%20&side=").json()
     assert body["total"] == 4
+
+
+def test_records_facets_exclude_own_condition(api):
+    """facets：各分面只剔除自身条件，其余条件生效（供下拉实时显示条数）。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_26"))
+
+    # 无过滤：全量分面计数
+    body = client.get("/api/backtests/bt_26/records/trades").json()
+    assert body["facets"]["purpose"] == {"PERMANENT": 1, "T": 2, "BETA": 1}
+    assert body["facets"]["side"] == {"BUY": 3, "SELL": 1}
+
+    # 方向=SELL：purpose facet 反映 SELL 下的用途分布（T 1），side facet 不受自身条件影响（仍 BUY 3/SELL 1）
+    body = client.get("/api/backtests/bt_26/records/trades?side=SELL").json()
+    assert body["facets"]["purpose"] == {"T": 1}
+    assert body["facets"]["side"] == {"BUY": 3, "SELL": 1}
+
+    # 标的=sz：两个 facet 都受 symbol 约束
+    body = client.get("/api/backtests/bt_26/records/trades?symbol=sz").json()
+    assert body["facets"]["purpose"] == {"T": 1, "BETA": 1}
+    assert body["facets"]["side"] == {"BUY": 1, "SELL": 1}
+
+    # 非 trades kind 不带 facets
+    body = client.get("/api/backtests/bt_26/records/orders").json()
+    assert "facets" not in body
+
+
+def test_records_filter_applies_to_orders_kind(api):
+    """过滤参数对任意 kind 通用（委托记录同样可按标的/方向过滤）。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_mixed_trades("bt_27"))
+
+    body = client.get("/api/backtests/bt_27/records/orders?symbol=688200&side=BUY").json()
+    assert body["total"] == 1 and _ids(body) == ["o0"]
+
+    body = client.get("/api/backtests/bt_27/records/orders?side=SELL").json()
+    assert body["total"] == 1 and _ids(body) == ["o1"]

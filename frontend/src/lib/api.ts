@@ -40,6 +40,7 @@ import type {
   TradingRulesAllResponse,
   TradingRulesResponse,
   TradingSession,
+  RecordsPage,
 } from '../types';
 
 // 部署可配置：
@@ -152,15 +153,17 @@ export const api = {
       `/backtests/${encodeURIComponent(id)}/rotation-trail${query({ page: String(page), page_size: String(pageSize) })}`,
     ),
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
-  // filters 可选（仅成交明细用）：symbol / purpose 后端子串过滤，total 为过滤后条数。
+  // filters 可选：symbol（子串）/ purpose（枚举或中文标签）/ side（BUY|SELL）组合过滤；
+  // 仅 trades 返回 facets（各枚举条数，供筛选下拉展示与禁用 0 条选项）。
   backtestRecords: <K extends 'trades' | 'orders' | 'rounds'>(
     id: string, kind: K, page = 1, pageSize = 20,
-    filters?: { symbol?: string; purpose?: string },
+    filters?: { symbol?: string; purpose?: string; side?: string },
   ) => {
     const params: Record<string, string> = { page: String(page), page_size: String(pageSize) };
     if (filters?.symbol) params.symbol = filters.symbol;
     if (filters?.purpose) params.purpose = filters.purpose;
-    return request<Paginated<{ trades: Trade; orders: Order; rounds: Round }[K]>>(
+    if (filters?.side) params.side = filters.side;
+    return request<RecordsPage<{ trades: Trade; orders: Order; rounds: Round }[K]>>(
       `/backtests/${encodeURIComponent(id)}/records/${kind}${query(params)}`,
     );
   },

@@ -168,6 +168,17 @@ export interface Paginated<T> {
   has_next: boolean;
 }
 
+/** 成交明细分面计数：键为原始枚举（大写），仅 trades 明细端点返回。 */
+export interface RecordFacets {
+  purpose?: Record<string, number>;
+  side?: Record<string, number>;
+}
+
+/** 明细分页响应：统一信封 + 可选 facets（筛选下拉展示条数用）。 */
+export interface RecordsPage<T> extends Paginated<T> {
+  facets?: RecordFacets;
+}
+
 export interface EquityPoint {
   date: string;
   equity: number;

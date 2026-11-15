@@ -76,7 +76,8 @@ export const statusLabel = (status?: string): string => {
 export const purposeLabel = (purpose?: string): string => {
   const value = lower(purpose);
   return ({
-    permanent: '永久仓', t: 'T仓', t_buy: 'T仓买入', t_sell: 'T仓卖出', open: '建仓', close: '清仓', take_profit: '止盈',
+    permanent: '永久仓', t: 'T仓', t_buy: 'T仓买入', t_sell: 'T仓卖出', beta: 'ETF对冲',
+    open: '建仓', close: '清仓', take_profit: '止盈',
   }[value] || purpose || '—');
 };
 

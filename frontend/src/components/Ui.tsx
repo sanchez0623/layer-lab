@@ -136,12 +136,13 @@ export function Badge({ children, tone = 'neutral', title, className }: { childr
   return <ShadcnBadge variant="outline" title={title} className={cn('h-5 rounded-md px-2 font-medium', badgeToneClass[tone], className)}>{children}</ShadcnBadge>;
 }
 
-export function TableEmpty({ colSpan, message = '暂无记录' }: { colSpan: number; message?: string }) {
+export function TableEmpty({ colSpan, message = '暂无记录', action }: { colSpan: number; message?: string; action?: ReactNode }) {
   return (
     <tr>
       <td colSpan={colSpan}>
-        <div className="flex h-24 items-center justify-center gap-2 text-sm text-muted-foreground">
-          <Inbox className="size-4" />{message}
+        <div className="flex h-24 flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+          <span className="flex items-center gap-2"><Inbox className="size-4" />{message}</span>
+          {action && <div className="flex items-center gap-2">{action}</div>}
         </div>
       </td>
     </tr>
@@ -180,7 +181,7 @@ export function SelectField({
 }: {
   value: string;
   onValueChange: (value: string) => void;
-  options: Array<{ value: string; label: string }>;
+  options: Array<{ value: string; label: string; disabled?: boolean }>;
   placeholder?: string;
   className?: string;
   ariaLabel?: string;
@@ -192,9 +193,36 @@ export function SelectField({
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent>
-        {options.map((option) => <SelectItem key={option.value} value={option.value}>{option.label}</SelectItem>)}
+        {options.map((option) => <SelectItem key={option.value} value={option.value} disabled={option.disabled}>{option.label}</SelectItem>)}
       </SelectContent>
     </Select>
+  );
+}
+
+/**
+ * 下拉筛选：首项固定「全部」，内部用 ``__all__`` 哨兵映射空串。
+ * Base UI Select 的 value 需要非空值，故空筛选态用哨兵表示（与全站 ``__none__`` 用法一致）。
+ */
+export function FilterSelect({
+  value, onValueChange, options, allLabel = '全部', ariaLabel, className = '', disabled = false,
+}: {
+  value: string;
+  onValueChange: (value: string) => void;
+  options: Array<{ value: string; label: string; disabled?: boolean }>;
+  allLabel?: string;
+  ariaLabel?: string;
+  className?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <SelectField
+      value={value || '__all__'}
+      onValueChange={(next) => onValueChange(next === '__all__' ? '' : next)}
+      options={[{ value: '__all__', label: allLabel }, ...options]}
+      ariaLabel={ariaLabel}
+      className={className}
+      disabled={disabled}
+    />
   );
 }
 

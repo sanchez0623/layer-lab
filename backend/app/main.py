@@ -329,11 +329,12 @@ def _slim_records(report: dict) -> dict:
     return report
 
 
-# 用途（purpose）的中文展示标签，与前端 lib/format.ts purposeLabel 口径一致，
-# 仅供成交明细搜索框把「永久仓 / T仓」这类中文关键词映射回原始枚举值做子串匹配。
+# 用途（purpose）的中文展示标签，与前端 lib/format.ts purposeLabel 口径一致；
+# 用途过滤既接受原始枚举值（PERMANENT/T/BETA，大小写不敏感），也接受这里的中文标签。
 _PURPOSE_LABELS: dict[str, str] = {
     "permanent": "永久仓",
     "t": "t仓",
+    "beta": "etf对冲",
     "t_buy": "t仓买入",
     "t_sell": "t仓卖出",
     "open": "建仓",
@@ -341,16 +342,74 @@ _PURPOSE_LABELS: dict[str, str] = {
     "take_profit": "止盈",
 }
 
+# 回测成交实际出现的用途枚举（小写）；purpose 过滤只认这三种，避免 't' 误命中 permanent/beta。
+_PURPOSE_ENUMS = {"permanent", "t", "beta"}
 
-def _purpose_matches(purpose: Any, query: str) -> bool:
-    """用途过滤：原始枚举值全等（大小写不敏感）或中文标签子串命中。
+# 标签 → 枚举（小写）反查表：把「永久仓 / T仓 / ETF对冲」规范化为枚举值。
+_PURPOSE_LABEL_TO_ENUM = {label: enum for enum, label in _PURPOSE_LABELS.items()}
 
-    不对原始值做子串匹配——'T' 是 'PERMANENT'/'BETA' 的子串，会误命中。
-    标签（永久仓 / T仓 / T仓买入…）允子串，方便只输「永久」「t仓」这类前缀。
+
+def _normalize_purpose(value: str) -> str | None:
+    """把用途参数规范化为小写枚举值：接受原始枚举或中文标签；无法识别返回 None。"""
+    query = (value or "").strip().lower()
+    if not query:
+        return None
+    if query in _PURPOSE_ENUMS:
+        return query
+    return _PURPOSE_LABEL_TO_ENUM.get(query)
+
+
+def _normalize_side(value: str) -> str | None:
+    """把方向参数规范化为大写 BUY/SELL；无法识别返回 None。"""
+    side = (value or "").strip().upper()
+    return side if side in {"BUY", "SELL"} else None
+
+
+def _record_matches(row: dict, *, symbol_q: str, purpose_q: str, side_q: str) -> bool:
+    """单行是否命中成交明细筛选：symbol 子串 + purpose/side 全等（AND）。
+
+    ``purpose_q`` / ``side_q`` 须已由 :func:`_normalize_purpose` /
+    :func:`_normalize_side` 规范化；空字符串表示该条件不生效。
+    前端旧报告本地回退路径 lib/recordFilters.ts 与此口径保持一致。
     """
-    raw = str(purpose or "").strip().lower()
-    label = _PURPOSE_LABELS.get(raw, "")
-    return bool(query) and (query == raw or (label != "" and query in label))
+    if symbol_q and symbol_q not in str(row.get("symbol") or "").lower():
+        return False
+    if purpose_q and str(row.get("purpose") or "").strip().lower() != purpose_q:
+        return False
+    if side_q and str(row.get("side") or "").strip().upper() != side_q:
+        return False
+    return True
+
+
+def _filter_records(
+    rows: list[dict], *, symbol_q: str = "", purpose_q: str = "", side_q: str = ""
+) -> list[dict]:
+    """按成交明细筛选条件过滤全量行（条件间为 AND，空条件不生效）。"""
+    return [
+        row for row in rows
+        if _record_matches(row, symbol_q=symbol_q, purpose_q=purpose_q, side_q=side_q)
+    ]
+
+
+def _facet_counts(
+    rows: list[dict], *, symbol_q: str, purpose_q: str, side_q: str
+) -> dict[str, dict[str, int]]:
+    """成交明细分面计数：purpose facet 剔除自身条件、其余条件生效（side facet 同理）。
+
+    供前端筛选下拉展示「永久仓 (101) / T仓 (48) / ETF对冲 (0)」并禁用 0 条选项。
+    复杂度 O(n)，n 为报告成交条数；仅在 trades 明细端点按请求计算，不做缓存。
+    """
+    purpose_counts: dict[str, int] = {}
+    for row in _filter_records(rows, symbol_q=symbol_q, purpose_q="", side_q=side_q):
+        key = str(row.get("purpose") or "").strip().upper()
+        if key:
+            purpose_counts[key] = purpose_counts.get(key, 0) + 1
+    side_counts: dict[str, int] = {}
+    for row in _filter_records(rows, symbol_q=symbol_q, purpose_q=purpose_q, side_q=""):
+        key = str(row.get("side") or "").strip().upper()
+        if key:
+            side_counts[key] = side_counts.get(key, 0) + 1
+    return {"purpose": purpose_counts, "side": side_counts}
 
 
 def create_app() -> FastAPI:
@@ -360,7 +419,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.1.0",
+        version="2.1.1",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1552,28 +1611,49 @@ def create_app() -> FastAPI:
         backtest_id: str,
         kind: Literal["trades", "orders", "rounds", "events"],
         params: tuple[int, int] = Depends(page_params),
-        symbol: str | None = Query(None, description="按标的过滤（子串匹配，如 688200 / sh.688200）"),
-        purpose: str | None = Query(None, description="按用途过滤：原始值（T/BETA/PERMANENT）全等，中文标签（永久仓/T仓）支持子串"),
+        symbol: str | None = Query(None, description="按标的过滤：子串匹配，如 688200 / sh.688200"),
+        purpose: str | None = Query(None, description="按用途过滤：枚举（PERMANENT/T/BETA）或中文标签（永久仓/T仓/ETF对冲），全等匹配"),
+        side: str | None = Query(None, description="按方向过滤：BUY / SELL（大小写不敏感）"),
     ):
         """成交明细 / 委托记录 / 已结束轮次 / 事件 分页：后台切片返回。
 
         主报告已瘦身不含全量明细（只留 ``*_total``），这里按页下发，
         避免长回测一次性传输 / 渲染成千上万行导致 REPORT 卡顿。
-        支持可选 ``symbol`` / ``purpose`` 子串过滤（成交明细页搜索框用），
-        过滤在切片前完成，total 反映过滤后条数，分页口径不变。
+
+        支持可选 ``symbol``（子串）/ ``purpose``（枚举或中文标签，全等）/
+        ``side``（BUY/SELL，全等）组合过滤（条件间 AND），过滤在切片前完成，
+        ``total`` 反映过滤后条数。``kind=trades`` 时额外返回 ``facets``
+        （各用途 / 方向条数，按「剔除自身条件、其余条件生效」口径计算），
+        供前端筛选下拉展示条数并禁用 0 条选项。
         """
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
         rows = report.get(kind) or []
         symbol_q = (symbol or "").strip().lower()
-        purpose_q = (purpose or "").strip().lower()
-        if symbol_q:
-            rows = [r for r in rows if symbol_q in str(r.get("symbol") or "").lower()]
-        if purpose_q:
-            rows = [r for r in rows if _purpose_matches(r.get("purpose"), purpose_q)]
+        purpose_q = ""
+        if (purpose or "").strip():
+            normalized_purpose = _normalize_purpose(purpose)
+            if normalized_purpose is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail="purpose 需为 PERMANENT/T/BETA 或中文标签（永久仓/T仓/ETF对冲）",
+                )
+            purpose_q = normalized_purpose
+        side_q = ""
+        if (side or "").strip():
+            normalized_side = _normalize_side(side)
+            if normalized_side is None:
+                raise HTTPException(status_code=422, detail="side 需为 BUY 或 SELL")
+            side_q = normalized_side
+        filtered = _filter_records(rows, symbol_q=symbol_q, purpose_q=purpose_q, side_q=side_q)
         page, page_size = params
-        return paginate(rows, page=page, page_size=page_size)
+        body = paginate(filtered, page=page, page_size=page_size)
+        if kind == "trades":
+            body["facets"] = _facet_counts(
+                rows, symbol_q=symbol_q, purpose_q=purpose_q, side_q=side_q,
+            )
+        return body
 
     @application.get("/api/backtests/{backtest_id}/export")
     def export_backtest(backtest_id: str, kind: Literal["trades", "orders"]):

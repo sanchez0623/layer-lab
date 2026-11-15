@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Loader2, Play, RefreshCw, RotateCcw, Search, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -16,7 +16,8 @@ import FeeConfigPanel from '../components/FeeConfigPanel';
 import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
 import PaginationBar from '../components/PaginationBar';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
+import { Badge, EmptyState, ErrorBanner, Field, FilterSelect, FormGrid, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
+import SearchInput from '../components/SearchInput';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,7 +27,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Order, Paginated, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
+import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
+import type { TradeFilters } from '../lib/recordFilters';
+import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Order, Paginated, RecordsPage, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -162,14 +165,15 @@ export default function BacktestPage() {
   const [trailPageSize, setTrailPageSize] = useState(20);
   const [trailLoading, setTrailLoading] = useState(false);
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
-  const [recordData, setRecordData] = useState<Paginated<Trade | Order | Round> | null>(null);
+  const [recordData, setRecordData] = useState<RecordsPage<Trade | Order | Round> | null>(null);
   const [recordPage, setRecordPage] = useState(1);
   const [recordPageSize, setRecordPageSize] = useState(20);
   const [recordLoading, setRecordLoading] = useState(false);
-  // 成交明细搜索（标的 / 用途）：草稿即时回显，防抖 300ms 后提交服务端过滤并回到第一页。
-  const [tradeFilterDraft, setTradeFilterDraft] = useState({ symbol: '', purpose: '' });
-  const [tradeFilter, setTradeFilter] = useState({ symbol: '', purpose: '' });
-  const tradeFilterActive = Boolean(tradeFilter.symbol.trim() || tradeFilter.purpose.trim());
+  // 成交明细筛选：symbolDraft 是输入框即时值（防抖后提交进 tradeFilter），
+  // purpose / side 由下拉直接提交；三者都是空串表示「全部」。
+  const [symbolDraft, setSymbolDraft] = useState('');
+  const [tradeFilter, setTradeFilter] = useState<TradeFilters>(EMPTY_TRADE_FILTERS);
+  const tradeFilterOn = tradeFilterActive(tradeFilter);
   // 工作台视图：运行回测 / 回测报告。报告列表走后台分页 + 服务端搜索，列表项只含轻量摘要。
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>('run');
   const [viewingReport, setViewingReport] = useState(false);
@@ -558,26 +562,66 @@ export default function BacktestPage() {
   // 成交 / 委托 / 轮次 明细分页：切 tab 或翻页时按需拉取当前 tab 的一页。
   useEffect(() => { setRecordPage(1); }, [report?.id, tableTab]);
 
-  // 成交明细搜索：切 tab / 换报告时清空；草稿防抖 300ms 后才提交服务端过滤。
-  useEffect(() => { setTradeFilterDraft({ symbol: '', purpose: '' }); setTradeFilter({ symbol: '', purpose: '' }); }, [report?.id, tableTab]);
+  // 成交明细筛选：切 tab / 换报告时清空（筛选栏只服务成交明细 tab）。
   useEffect(() => {
-    const timer = window.setTimeout(() => setTradeFilter(tradeFilterDraft), 300);
+    setSymbolDraft('');
+    setTradeFilter(EMPTY_TRADE_FILTERS);
+  }, [report?.id, tableTab]);
+
+  /** 提交标的筛选（防抖回调与 Enter 立即提交共用）；值未变化时返回 prev，避免多余请求。 */
+  const commitSymbol = (raw: string) => {
+    const symbol = raw.trim();
+    setTradeFilter((prev) => (prev.symbol === symbol ? prev : { ...prev, symbol }));
+    setRecordPage(1);
+  };
+
+  // 标的输入防抖 300ms 后提交。
+  useEffect(() => {
+    const timer = window.setTimeout(() => commitSymbol(symbolDraft), 300);
     return () => window.clearTimeout(timer);
-  }, [tradeFilterDraft]);
+    // commitSymbol 每次渲染重建但只读写稳定 setter，按输入值触发即可。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolDraft]);
+
+  /** 下拉筛选（用途 / 方向）立即提交并回到第一页。 */
+  const updateTradeFilter = (patch: Partial<TradeFilters>) => {
+    setTradeFilter((prev) => {
+      const next = { ...prev, ...patch };
+      const unchanged = next.symbol === prev.symbol && next.purpose === prev.purpose && next.side === prev.side;
+      return unchanged ? prev : next;
+    });
+    setRecordPage(1);
+  };
+
+  /** 清空全部筛选（输入框草稿 + 已提交条件）。 */
+  const clearTradeFilters = () => {
+    setSymbolDraft('');
+    setTradeFilter(EMPTY_TRADE_FILTERS);
+    setRecordPage(1);
+  };
 
   useEffect(() => {
     if (!report) { setRecordData(null); return; }
     let cancelled = false;
     setRecordLoading(true);
-    const filters = tableTab === 'trades' && tradeFilterActive
-      ? { symbol: tradeFilter.symbol.trim(), purpose: tradeFilter.purpose.trim() }
+    const filters = tableTab === 'trades' && tradeFilterOn
+      ? { symbol: tradeFilter.symbol, purpose: tradeFilter.purpose, side: tradeFilter.side }
       : undefined;
     api.backtestRecords(report.id, tableTab, recordPage, recordPageSize, filters)
-      .then((paged) => { if (!cancelled) setRecordData(paged); })
-      .catch(() => { if (!cancelled) setRecordData(null); })
+      .then((paged) => {
+        if (cancelled) return;
+        setRecordData(paged);
+        // 过滤后总页数可能变小：服务端收敛页码后同步回写，避免停在空页。
+        if (paged.page !== recordPage) setRecordPage(paged.page);
+      })
+      .catch((cause) => {
+        if (cancelled) return;
+        setRecordData(null);
+        setError(cause instanceof Error ? cause.message : '成交明细读取失败。');
+      })
       .finally(() => { if (!cancelled) setRecordLoading(false); });
     return () => { cancelled = true; };
-  }, [report, tableTab, recordPage, recordPageSize, tradeFilter, tradeFilterActive]);
+  }, [report, tableTab, recordPage, recordPageSize, tradeFilter, tradeFilterOn]);
 
   // 报告搜索防抖：输入 300ms 后才提交服务端查询，并回到第一页。
   useEffect(() => {
@@ -607,29 +651,42 @@ export default function BacktestPage() {
     return () => { cancelled = true; };
   }, [workspaceTab, viewingReport, reportQuery, reportPage, reportPageSize, reportListVersion]);
 
-  // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片；成交明细搜索在本地同样过滤）。
-  const { recordItems, filteredTotal } = useMemo(() => {
-    if (recordData) return { recordItems: recordData.items, filteredTotal: recordData.total };
+  // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片；成交明细筛选在本地同样生效）。
+  const { recordItems, filteredTotal, recordFacets } = useMemo(() => {
+    if (recordData) return { recordItems: recordData.items, filteredTotal: recordData.total, recordFacets: recordData.facets };
     const local = tableTab === 'rounds' ? report?.rounds : tableTab === 'trades' ? report?.trades : report?.orders;
     let list: any[] = local ?? [];
-    if (tableTab === 'trades' && tradeFilterActive) {
-      const sym = tradeFilter.symbol.trim().toLowerCase();
-      const pur = tradeFilter.purpose.trim().toLowerCase();
-      list = list.filter((item: any) => {
-        if (sym && !String(item.symbol ?? '').toLowerCase().includes(sym)) return false;
-        if (pur) {
-          // 与后端口径一致：原始枚举值全等，或中文标签（永久仓/T仓…）子串命中；
-          // 不对原始值做子串匹配——'t' 会误命中 permanent / beta。
-          const raw = String(item.purpose ?? '').trim().toLowerCase();
-          const label = purposeLabel(item.purpose).toLowerCase();
-          if (pur !== raw && (label === '—' || !label.includes(pur))) return false;
-        }
-        return true;
-      });
-    }
+    if (tableTab === 'trades' && tradeFilterOn) list = list.filter((item: Trade) => matchesTradeFilters(item, tradeFilter));
     const start = (recordPage - 1) * recordPageSize;
-    return { recordItems: list.slice(start, start + recordPageSize), filteredTotal: list.length };
-  }, [recordData, tableTab, report, recordPage, recordPageSize, tradeFilter, tradeFilterActive]);
+    return { recordItems: list.slice(start, start + recordPageSize), filteredTotal: list.length, recordFacets: undefined };
+  }, [recordData, tableTab, report, recordPage, recordPageSize, tradeFilter, tradeFilterOn]);
+
+  // 用途 / 方向下拉选项：带分面条数（facets 缺失时降级为纯标签）；0 条选项禁用，
+  // 但当前已选中的选项保持可选，避免过滤后自身值被禁用。
+  // facets 存在时，缺省的分面键视为 0 条（该组合下没有数据），展示为「(0)」并禁用。
+  const purposeCounts = recordFacets?.purpose;
+  const sideCounts = recordFacets?.side;
+  const purposeFilterOptions = useMemo(() => PURPOSE_FILTER_OPTIONS.map((value) => {
+    const count = purposeCounts?.[value] ?? 0;
+    return {
+      value,
+      label: purposeCounts ? `${purposeLabel(value)} (${count})` : purposeLabel(value),
+      disabled: Boolean(purposeCounts) && count === 0 && tradeFilter.purpose !== value,
+    };
+  }), [purposeCounts, tradeFilter.purpose]);
+  const sideFilterOptions = useMemo(() => SIDE_FILTER_OPTIONS.map((value) => {
+    const count = sideCounts?.[value] ?? 0;
+    return {
+      value,
+      label: sideCounts ? `${sideLabel(value)} (${count})` : sideLabel(value),
+      disabled: Boolean(sideCounts) && count === 0 && tradeFilter.side !== value,
+    };
+  }), [sideCounts, tradeFilter.side]);
+
+  // 明细分页总数：筛选时跟随过滤后条数，否则用报告自带 *_total。
+  const recordsTotal = tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal;
+  const paginationTotal = tableTab === 'trades' && tradeFilterOn ? filteredTotal : recordsTotal;
+  const paginationTotalPages = recordData?.total_pages ?? Math.max(1, Math.ceil(paginationTotal / recordPageSize));
 
   return (
     <div className="animate-[page-in_.22s_ease-out]">
@@ -957,14 +1014,21 @@ export default function BacktestPage() {
                       </TabsList>
                     </Tabs>
                     <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"><Clock3 className="size-3" />按时间顺序记录</span>
-                    {tableTab === 'trades' && (
-                      <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-                        <div className="relative w-36"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={tradeFilterDraft.symbol} onChange={(event) => setTradeFilterDraft((current) => ({ ...current, symbol: event.target.value }))} placeholder="标的代码" aria-label="按标的搜索成交明细" className="pl-8 text-[12px]" /></div>
-                        <Input value={tradeFilterDraft.purpose} onChange={(event) => setTradeFilterDraft((current) => ({ ...current, purpose: event.target.value }))} placeholder="用途（如 永久仓 / T仓）" aria-label="按用途搜索成交明细" className="w-44 text-[12px]" />
-                        {tradeFilterActive && <button className="text-[11px] text-primary hover:underline" type="button" onClick={() => setTradeFilterDraft({ symbol: '', purpose: '' })}>清空搜索</button>}
-                      </div>
-                    )}
                   </div>
+                  {tableTab === 'trades' && tradesTotal > 0 && (
+                    <div className="flex flex-col gap-2 border-b bg-muted/20 px-4 py-2.5 lg:flex-row lg:items-center lg:justify-between">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <SearchInput value={symbolDraft} onChange={setSymbolDraft} onEnter={() => commitSymbol(symbolDraft)} placeholder="标的代码（如 688200）" ariaLabel="按标的筛选成交明细" className="w-48" />
+                        <FilterSelect value={tradeFilter.purpose} onValueChange={(value) => updateTradeFilter({ purpose: value })} options={purposeFilterOptions} allLabel="全部用途" ariaLabel="按用途筛选成交明细" className="w-40" />
+                        <FilterSelect value={tradeFilter.side} onValueChange={(value) => updateTradeFilter({ side: value })} options={sideFilterOptions} allLabel="全部方向" ariaLabel="按方向筛选成交明细" className="w-36" />
+                        {tradeFilterOn && <Button variant="ghost" size="sm" type="button" onClick={clearTradeFilters}>清空筛选</Button>}
+                      </div>
+                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground" aria-live="polite">
+                        {recordLoading && <Loader2 className="size-3.5 animate-spin" />}
+                        <span>{tradeFilterOn ? `筛选出 ${filteredTotal} / ${tradesTotal} 条` : `共 ${tradesTotal} 条`}{recordLoading ? ' · 筛选中' : ''}</span>
+                      </div>
+                    </div>
+                  )}
                   {tableTab === 'rounds' && <Table><TableHeader><TableRow><TableHead>轮次</TableHead><TableHead>开始时间</TableHead><TableHead>结束时间</TableHead><TableHead className="text-right">最大投入</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead className="text-right">收益率</TableHead><TableHead className="text-right">成交数</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
                     {roundsTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : recordItems.map((round, index) => {
                       const pnl = roundNumber(round, ['net_profit', 'pnl', 'realized_pnl']);
@@ -974,13 +1038,13 @@ export default function BacktestPage() {
                     })}
                   </TableBody></Table>}
                   {tableTab === 'trades' && <Table><TableHeader><TableRow><TableHead>成交时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>用途</TableHead><TableHead className="text-right">价格</TableHead><TableHead className="text-right">数量</TableHead><TableHead className="text-right">成交额</TableHead><TableHead className="text-right">费用</TableHead><TableHead className="text-right">已实现盈亏</TableHead></TableRow></TableHeader><TableBody>
-                    {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : tradeFilterActive && recordItems.length === 0 ? <TableEmpty colSpan={9} message="没有符合条件的成交记录" /> : recordItems.map((trade, index) => <TableRow key={String(trade.id ?? `${trade.timestamp}-${index}`)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
+                    {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : tradeFilterOn && recordItems.length === 0 && !recordLoading ? <TableEmpty colSpan={9} message="没有符合条件的成交记录" action={<Button variant="outline" size="sm" type="button" onClick={clearTradeFilters}>清空筛选</Button>} /> : recordItems.map((trade, index) => <TableRow key={String(trade.id ?? `${trade.timestamp}-${index}`)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
                   </TableBody></Table>}
                   {tableTab === 'orders' && <Table><TableHeader><TableRow><TableHead>委托时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>类型</TableHead><TableHead className="text-right">限价</TableHead><TableHead className="text-right">委托数量</TableHead><TableHead className="text-right">已成交</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
                     {ordersTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : recordItems.map((order) => <TableRow key={order.id}><TableCell>{dateTime(order.created_at || order.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={order.symbol}>{displaySymbol(order.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(order.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(order.side)}</span></TableCell><TableCell>{orderTypeLabel(order.order_type || order.type)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(order.limit_price ?? order.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.filled_quantity ?? order.filled_qty)}</TableCell><TableCell><Badge>{statusLabel(order.status)}</Badge></TableCell></TableRow>)}
                   </TableBody></Table>}
                   <div className="px-4 pb-4">
-                    <PaginationBar page={recordData?.page ?? recordPage} pageSize={recordData?.page_size ?? recordPageSize} total={tableTab === 'trades' && tradeFilterActive ? filteredTotal : (tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal)} totalPages={recordData?.total_pages ?? Math.max(1, Math.ceil((tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal) / recordPageSize))} onPageChange={setRecordPage} onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }} disabled={recordLoading} />
+                    <PaginationBar page={recordData?.page ?? recordPage} pageSize={recordData?.page_size ?? recordPageSize} total={paginationTotal} totalPages={paginationTotalPages} onPageChange={setRecordPage} onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }} disabled={recordLoading} />
                   </div>
                 </Panel>
               </div>
@@ -992,8 +1056,7 @@ export default function BacktestPage() {
           ) : (
             <Panel title="回测报告" description={reportQuery ? `搜索「${reportQuery}」 · 共 ${reportList?.total ?? 0} 份` : `共 ${reportList?.total ?? 0} 份报告 · 可按 Report ID 或名称搜索`} action={<Button variant="outline" size="sm" type="button" onClick={() => setReportListVersion((current) => current + 1)} disabled={reportListLoading}><RefreshCw className={reportListLoading ? 'animate-spin' : ''} />刷新</Button>} flush>
               <div className="flex flex-wrap items-center gap-2 px-4 pb-2 pt-1">
-                <div className="relative w-full max-w-sm"><Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input value={reportSearch} onChange={(event) => setReportSearch(event.target.value)} placeholder="搜索 Report ID 或名称" aria-label="搜索回测报告" className="pl-8" /></div>
-                {reportQuery && <button className="text-[11px] text-primary hover:underline" type="button" onClick={() => setReportSearch('')}>清空搜索</button>}
+                <SearchInput value={reportSearch} onChange={setReportSearch} onEnter={() => setReportQuery(reportSearch.trim())} placeholder="搜索 Report ID 或名称" ariaLabel="搜索回测报告" className="w-full max-w-sm" />
               </div>
               {reportListLoading && !reportList ? <div className="px-4 pb-4"><Loading label="正在载入回测报告" /></div> : (
                 <Table>
