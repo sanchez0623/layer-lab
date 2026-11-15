@@ -12,6 +12,20 @@ OrderType = Literal["MARKET", "LIMIT"]
 Purpose = Literal["PERMANENT", "T", "BETA"]
 
 
+def daily_close_timestamp(value: str | datetime) -> datetime:
+    """日线 bar 的统一时间戳口径：交易日收盘 15:00:00。
+
+    所有日线数据源（quan parquet / baostock / CSV 上传）都必须走这里，
+    保证成交/委托时间不是 0 点，也与 ETF 日线数据源（etf_data 15:00）一致。
+    日期部分不变，只把时刻定格到 15:00；date 属性与排序不受影响。
+    """
+    if isinstance(value, datetime):
+        return value.replace(hour=15, minute=0, second=0, microsecond=0)
+    return datetime.strptime(str(value)[:10], "%Y-%m-%d").replace(
+        hour=15, minute=0, second=0, microsecond=0
+    )
+
+
 def money(value: float) -> float:
     return round(float(value) + 1e-10, 2)
 

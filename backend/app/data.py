@@ -8,7 +8,7 @@ from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from .domain import Bar, Dataset, money, price, utc_now
+from .domain import Bar, Dataset, daily_close_timestamp, money, price, utc_now
 
 
 TIMEFRAMES = {"daily", "1m", "5m", "tick"}
@@ -56,7 +56,8 @@ def parse_timestamp(value: str, timeframe: str) -> datetime:
         parsed = datetime.strptime(text, "%Y%m%d")
     if parsed.tzinfo is not None:
         parsed = parsed.replace(tzinfo=None)
-    return datetime.combine(parsed.date(), time()) if timeframe == "daily" else parsed
+    # 日线统一口径：交易日收盘 15:00:00（domain.daily_close_timestamp）。
+    return daily_close_timestamp(parsed) if timeframe == "daily" else parsed
 
 
 def _number(row: dict[str, str], fields: dict[str, str], name: str, default: float | None = None) -> float | None:

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Sequence
 import requests
 
 from .data import dataset_from_bars, write_bars_csv
-from .domain import Bar, Dataset, money, price
+from .domain import Bar, Dataset, daily_close_timestamp, money, price
 
 if TYPE_CHECKING:  # 避免与 quan_data -> universe -> market 的导入环
     from .quan_data import QuanStore
@@ -351,7 +351,7 @@ class MarketDataService:
         for row in rows:
             if len(row) < 9 or not row[0] or not row[5]:
                 continue
-            timestamp = datetime.strptime(row[0], "%Y-%m-%d")
+            timestamp = daily_close_timestamp(row[0])
             open_ = _float(row[2])
             high = _float(row[3])
             low = _float(row[4])
@@ -407,7 +407,7 @@ class MarketDataService:
         for row in rows:
             if not row[0] or not row[5]:
                 continue
-            timestamp = datetime.strptime(row[0], "%Y-%m-%d")
+            timestamp = daily_close_timestamp(row[0])
             open_ = _float(row[2])
             high = _float(row[3])
             low = _float(row[4])
@@ -468,7 +468,7 @@ class MarketDataService:
         for row in rows:
             if not row[0] or not row[5]:
                 continue
-            timestamp = datetime.strptime(row[0], "%Y-%m-%d")
+            timestamp = daily_close_timestamp(row[0])
             open_ = _float(row[2])
             high = _float(row[3])
             low = _float(row[4])
@@ -506,7 +506,7 @@ class MarketDataService:
         previous_close: float | None = None
         for row in rows:
             try:
-                timestamp = datetime.strptime(str(row[0]), "%Y-%m-%d")
+                timestamp = daily_close_timestamp(str(row[0]))
             except ValueError:
                 continue
             if not (start <= timestamp.date() <= end):

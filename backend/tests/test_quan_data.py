@@ -270,6 +270,23 @@ def test_load_history_and_latest_trade_date(quan_dir):
     assert store.last_date("sz.300001") == "2026-11-11"
 
 
+def test_daily_bars_stamped_at_close_1500(quan_dir):
+    """日线 bar 统一口径：时间戳必须定格到收盘 15:00:00，不能是 0 点。
+
+    旧实现日线 bar 时间戳是 00:00:00，回测成交/委托的「交易时间」全是 0 点。
+    统一为收盘口径后，与 ETF 日线（etf_data 15:00）一致；日期部分不变。
+    """
+    store = QuanStore(quan_dir)
+    history = store.load_history(["sz.300001"], max_rows=30)
+    bars = history["sz.300001"]
+    assert bars, "应有日线数据"
+    for bar in bars:
+        assert bar.timestamp.time() == datetime(2026, 1, 1, 15, 0, 0).time(), (
+            f"日线 bar 应为 15:00:00，实际 {bar.timestamp.isoformat()}"
+        )
+    assert bars[-1].timestamp.date().isoformat() == "2026-11-11"
+
+
 def test_load_history_with_end_returns_window_before_end(quan_dir):
     """end 用于历史时点回看：取「截至 end 的最近 N 根」，而非最新交易日往前 N 根。"""
     store = QuanStore(quan_dir)

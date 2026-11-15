@@ -218,6 +218,22 @@ def test_funnel_daily_fills_have_open_timestamp_not_midnight(tmp_path):
         )
 
 
+def test_funnel_orders_stamped_at_close_1500(tmp_path):
+    """日线口径的委托/信号时间必须定格在收盘 15:00，不能是 0 点。
+
+    日线 bar 统一为收盘 15:00:00 口径（domain.daily_close_timestamp）后，
+    on_daily 信号提交与订单 created_at 继承 15:00；成交仍是次开 09:30（见
+    test_funnel_daily_fills_have_open_timestamp_not_midnight）。
+    """
+    store = _build_store(tmp_path / "u.db")
+    report = _run(store)
+
+    orders = report["orders"]
+    assert orders, "应有委托记录"
+    midnight = [o for o in orders if str(o.get("created_at", ""))[11:16] == "00:00"]
+    assert midnight == [], f"仍有 0 点委托：{[o.get('created_at') for o in midnight[:5]]}"
+
+
 def test_funnel_switches_symbol_after_take_profit(tmp_path):
     store = _build_store(tmp_path / "u.db")
     report = _run(store)

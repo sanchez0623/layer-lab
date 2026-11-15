@@ -38,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .domain import Bar, money, price, utc_now
+from .domain import Bar, daily_close_timestamp, money, price, utc_now
 from .universe import (
     SUPPORTED_BOARDS,
     UniverseRow,
@@ -492,7 +492,9 @@ class QuanStore:
         close = float(row.get("close") or 0)
         prev = previous_close if previous_close not in (None, 0) else close
         if timeframe == "daily":
-            timestamp = datetime.strptime(str(row["date"])[:10], "%Y-%m-%d")
+            # 日线统一口径：交易日收盘 15:00:00（见 domain.daily_close_timestamp），
+            # 不再是 0 点——否则回测成交/委托的「交易时间」全是 00:00:00。
+            timestamp = daily_close_timestamp(str(row["date"]))
         else:
             text = str(row["date"])
             timestamp = datetime.strptime(text, "%Y-%m-%d %H:%M") if len(text) > 10 else (

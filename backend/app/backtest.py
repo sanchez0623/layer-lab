@@ -24,18 +24,19 @@ class BacktestCancelled(Exception):
     """回测在交易日边界被主动取消。引擎捕获后返回部分报告（status=CANCELLED）。"""
 
 
-def _normalize_fill_timestamp(fill: Fill) -> None:
-    """把「日线口径成交」的 0 点时间戳改写为开盘时刻 09:30:00。
+def _normalize_fill_timestamp(fill: Fill, bar: Bar) -> None:
+    """把「日线口径成交」的时间戳改写为开盘时刻 09:30:00。
 
-    日线 bar 的时间戳只解析到日期（``datetime.strptime(date, "%Y-%m-%d")`` → 00:00:00），
-    走日线口径的建仓/加仓/清仓成交（NEXT_OPEN 开盘撮合）会继承这个 0 点，界面上显示成
-    「0 点成交」。这里把它改写为同日 09:30:00，与「次日开盘成交」的真实语义一致。
+    日线 bar 的统一时间戳是收盘 15:00:00（``domain.daily_close_timestamp``），
+    走日线口径的建仓/加仓/清仓成交（NEXT_OPEN 开盘撮合）继承的是 bar 时间戳，
+    界面上会显示成「15:00 成交」；这里按 bar 粒度改写为同日 09:30:00，与
+    「次日开盘成交」的真实语义一致（按 timeframe 判定，不再按 0 点字符串匹配，
+    避免误伤真实的 15:00 五分钟收盘 bar）。
 
-    5 分钟成交不受影响：真实 5 分钟 bar 的时间戳是 09:35/10:15 等盘中时刻，永不为 0 点。
+    5 分钟成交不受影响：真实 5 分钟 bar 的时间戳是 09:35/15:00 等盘中时刻，保留原值。
     """
-    ts = fill.timestamp
-    if len(ts) >= 10 and ts[10:].strip() in ("", "T00:00:00", " 00:00:00"):
-        fill.timestamp = ts[:10] + "T09:30:00"
+    if bar.timeframe == "daily":
+        fill.timestamp = f"{bar.date}T09:30:00"
 
 # 回测指数加载：start 前推的日历天缓冲，保证回测首日往前 ≥21 根（L0 ret20 + 策略大盘门）。
 _INDEX_LOOKBACK_BUFFER_DAYS = 45
@@ -248,7 +249,7 @@ class BacktestEngine:
 
     def _handle_fills(self, fills: list[Fill], session_index: int, bar: Bar) -> None:
         for fill in fills:
-            _normalize_fill_timestamp(fill)
+            _normalize_fill_timestamp(fill, bar)
             if fill.side == "BUY" and fill.purpose == "PERMANENT" and self.current_round is None:
                 self._new_round(fill, session_index)
             self.strategy.on_fill(fill, session_index)
@@ -639,11 +640,14 @@ class FunnelRotationBacktest:
                 if message not in self.warnings:
                     self.warnings.append(message)
 
-    def _handle_beta_fills(self, fills: list[Fill]) -> None:
+    def _handle_beta_fills(self, fills: list[Fill], bar: Bar | None = None) -> None:
         sold = False
         for fill in fills:
             if fill.purpose != "BETA":
                 continue
+            # ETF 日线成交与个股日线成交同口径：日线粒度成交 = 次开 09:30:00
+            if bar is not None:
+                _normalize_fill_timestamp(fill, bar)
             self._beta_fills.append({
                 "date": fill.timestamp[:10], "side": fill.side,
                 "quantity": fill.quantity, "price": fill.price,
@@ -866,7 +870,7 @@ class FunnelRotationBacktest:
 
     def _handle_fills(self, fills: list[Fill], session_index: int, bar: Bar) -> None:
         for fill in fills:
-            _normalize_fill_timestamp(fill)
+            _normalize_fill_timestamp(fill, bar)
             if fill.side == "BUY" and fill.purpose == "PERMANENT" and self.current_round is None:
                 self._new_round(fill, session_index)
             self.strategy.on_fill(fill, session_index)
@@ -984,7 +988,7 @@ class FunnelRotationBacktest:
                 etf_bar = self._etf_bar_for(date_str)
                 if etf_bar is not None:
                     beta_fills = self.account.process_bar(etf_bar, modes={"NEXT_OPEN"})
-                    self._handle_beta_fills(beta_fills)
+                    self._handle_beta_fills(beta_fills, etf_bar)
                     self.account.mark(self.etf_symbol, etf_bar.close)
             self._current_symbol = current_symbol
             submitted_signal = False

@@ -25,7 +25,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence
 
-from .domain import Bar, money, price, utc_now
+from .domain import Bar, daily_close_timestamp, money, price, utc_now
 from .market import MarketDataService, normalize_symbol
 
 BOARD_GEM = "创业板"
@@ -120,7 +120,8 @@ def default_universe_db() -> Path:
 
 
 def _to_date(value: str) -> datetime:
-    return datetime.strptime(value, "%Y-%m-%d")
+    # 与全部日线数据源统一口径：交易日收盘 15:00:00（domain.daily_close_timestamp）。
+    return daily_close_timestamp(value)
 
 
 def _bars_from_baostock_rows(rows: Sequence[Sequence[str]], symbol: str) -> list[Bar]:
