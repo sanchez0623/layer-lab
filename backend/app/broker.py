@@ -61,6 +61,22 @@ def _sellable_for(position: Position, purpose: str) -> int:
     return position.beta_sellable_qty
 
 
+def _next_day_sellable_for(position: Position, purpose: str) -> int:
+    """隔夜单（NEXT_OPEN）次开执行前的可卖口径：不含「今日买入」锁定。
+
+    NEXT_OPEN 委托在下一交易日开盘撮合，撮合前 ``new_day`` 必然清零
+    ``today_*_buy_qty``，所以「今日买入的份额」明日即可卖——真实券商对
+    收盘后委托的次开卖单也按次日持仓放行。若提交时仍按当日口径校验，
+    「今买→明开卖」的合法隔夜卖单会被误拒（清仓被迫延迟一天）。
+    注意：不改变持仓总量校验——卖超过实际持仓仍会被拒。
+    """
+    if purpose == "PERMANENT":
+        return max(0, position.permanent_qty)
+    if purpose == "T":
+        return max(0, min(position.t_qty, position.permanent_qty))
+    return max(0, position.beta_qty)
+
+
 class BrokerAccount:
     """本地确定性撮合账户，不包含任何行情或券商网络连接。"""
 
@@ -258,6 +274,10 @@ class BrokerAccount:
             return order
         if side == "SELL":
             sellable = _sellable_for(position, purpose)
+            if order.execution_mode == "NEXT_OPEN":
+                # 隔夜单次开才成交，提交时按次日口径校验（见 _next_day_sellable_for）；
+                # 当日口径（NEXT_BAR/即时撮合）仍用含 T+1 锁定的 sellable。
+                sellable = max(sellable, _next_day_sellable_for(position, purpose))
             if quantity > sellable:
                 order.status = "REJECTED"
                 order.message = f"T+1可卖数量不足: 请求{quantity}, 可卖{sellable}"
