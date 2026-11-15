@@ -356,6 +356,36 @@ def test_funnel_etf_partial_coverage_warns(tmp_path, monkeypatch):
     ), report["warnings"]
 
 
+def test_funnel_etf_cache_symbol_is_normalized(tmp_path, monkeypatch):
+    """缓存里 symbol 是腾讯风格（sz159915）时，撮合仍按标准代码 sz.159915 匹配持仓。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    tencent_style = []
+    for index in range(N_BARS):
+        close = 3.0 + index * 0.01
+        tencent_style.append(Bar(
+            timestamp=START + timedelta(days=index), symbol="sz159915",
+            open=close, high=close, low=close, close=close,
+            volume=1e7, amount=3e7, timeframe="daily",
+        ))
+    save_etf_bars(cache_path(tmp_path / "data", "sz.159915"), tencent_style)
+
+    report = _run(
+        store,
+        config=StrategyConfig(
+            etf_beta_enabled=True, etf_position_pct=0.20,
+            etf_entry_ma_days=5, etf_exit_ma_days=5,
+        ),
+        initial_cash=1_000_000.0,
+    )
+
+    beta = report["data_info"]["beta"]
+    assert beta["trade_count"] >= 1, "symbol 未归一化时 beta 永远不成交"
+    assert any(event["type"] == "ETF_FILL" for event in report["events"])
+    fills = [event for event in report["events"] if event["type"] == "ETF_FILL"]
+    assert fills and all(event.get("symbol") in (None, "sz.159915") for event in fills)
+
+
 def test_funnel_etf_beta_disabled_by_default(tmp_path, monkeypatch):
     monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
     store = _build_store(tmp_path / "u.db", gate_up=True)

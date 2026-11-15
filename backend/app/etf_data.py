@@ -28,7 +28,13 @@ def cache_path(data_dir: str | Path, symbol: str) -> Path:
 
 
 def load_etf_bars(path: str | Path, symbol: str) -> list[Bar]:
-    """读取缓存并链上前收盘；文件不存在/为空返回空列表。"""
+    """读取缓存并链上前收盘；文件不存在/为空返回空列表。
+
+    ``symbol`` 以调用方为准（标准代码如 ``sz.159915``），不用 CSV 里的 symbol 列：
+    缓存可能由不同来源写入（腾讯接口返回 ``sz159915``、回测补采写入标准代码），
+    若直接采用文件里的值，撮合时会用 ``sz159915`` 去匹配 ``sz.159915`` 的持仓/委托，
+    导致 beta 腿永远不成交。symbol 列仍保留写出（便于人工查看）。
+    """
     file = Path(path)
     if not file.exists():
         return []
@@ -47,7 +53,7 @@ def load_etf_bars(path: str | Path, symbol: str) -> list[Bar]:
             continue
         bar = Bar(
             timestamp=datetime.fromisoformat(f"{row['date'][:10]}T15:00:00"),
-            symbol=str(row.get("symbol") or symbol),
+            symbol=str(symbol),
             open=price(float(row.get("open") or close)),
             high=price(float(row.get("high") or close)),
             low=price(float(row.get("low") or close)),

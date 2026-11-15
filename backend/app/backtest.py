@@ -593,6 +593,10 @@ class FunnelRotationBacktest:
         self.etf_bars, self._beta_source = ensure_etf_bars(
             path, self.etf_symbol, start, end, fetcher=fetcher,
         )
+        # 统一标的代码：缓存/补采可能带腾讯风格（sz159915），撮合按标准代码匹配持仓，
+        # 不归一化会出现「有行情但永远不成交」的静默 bug。
+        for etf_bar in self.etf_bars:
+            etf_bar.symbol = self.etf_symbol
         if not self.etf_bars:
             self.etf_enabled = False
             self.warnings.append(
