@@ -12,6 +12,10 @@ services:
     image: layer-lab:latest
     container_name: layer-lab
     restart: unless-stopped
+    # OOM 豁免：宿主机仅 1.8G RAM，夜间 quan 数据更新器的全表 flush 会顶高内存。
+    # 调低 oom_score_adj 让内核 OOM 时优先杀可断点续跑的更新器，而不是本容器后端。
+    # （更新器脚本同时把自己 oom_score_adj 设为 1000，双保险。）
+    oom_score_adj: -800
     ports:
       - "${HOST_PORT:-3011}:3000"
     environment:
