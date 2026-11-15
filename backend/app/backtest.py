@@ -548,10 +548,22 @@ class FunnelRotationBacktest:
             )
             return
         self.etf_bars_by_date = {bar.date: bar for bar in self.etf_bars}
+        # 部分覆盖：ETF 日线首根晚于回测起点时，早于该日的时段没有 ETF 行情、
+        # beta 腿不会建仓（静默空窗）。必须显式提示，避免误以为 beta 逻辑失效。
+        self._beta_coverage_start = self.etf_bars[0].date
+        self._beta_coverage_end = self.etf_bars[-1].date
+        self._beta_partial_coverage = bool(
+            self.timeline and self._beta_coverage_start > self.timeline[0]
+        )
+        if self._beta_partial_coverage:
+            self.warnings.append(
+                f"ETF beta 腿数据部分覆盖：{self.etf_symbol} 日线仅从 {self._beta_coverage_start} 起"
+                f"（回测起点 {self.timeline[0]}），早于该日期的时段不会建仓 ETF"
+            )
         if self._beta_source != "cache":
             self.warnings.append(
-                f"ETF beta 腿：{self.etf_symbol} 日线本地缓存缺失，已联网补采并写入 "
-                f"{path.name}（之后回测只读本地缓存）"
+                f"ETF beta 腿：{self.etf_symbol} 日线本地缓存未覆盖回测区间，已联网补采并写入 "
+                f"{path.name}（之后回测优先读本地缓存）"
             )
         guards: list[str] = []
         if self.config.etf_entry_max_deviation > 0:
@@ -734,6 +746,10 @@ class FunnelRotationBacktest:
             "exit_reason": self._beta_last_exit_reason,
             "pnl": pnl,
             "position_qty": self._beta_qty(),
+            # 数据覆盖：ETF 日线首根晚于回测起点时，早期时段不会建仓（见 _prepare_etf）。
+            "coverage_start": getattr(self, "_beta_coverage_start", None),
+            "coverage_end": getattr(self, "_beta_coverage_end", None),
+            "partial_coverage": bool(getattr(self, "_beta_partial_coverage", False)),
         }
 
     # -- 数据准备 ---------------------------------------------------------

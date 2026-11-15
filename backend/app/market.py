@@ -32,7 +32,12 @@ TENCENT_QUOTE_URL = "https://qt.gtimg.cn/q={symbol}"
 # 盘中检测口径：5 分钟 K 线（腾讯 mkline 周期 m5），不再使用 1 分钟。
 TENCENT_INTRADAY_URL = "https://ifzq.gtimg.cn/appstock/app/kline/mkline?param={symbol},{period},,{count}"
 TENCENT_INTRADAY_PERIOD = "m5"
-TENCENT_DAILY_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,,,{count},qfq"
+TENCENT_DAILY_URL = "https://ifzq.gtimg.cn/appstock/app/fqkline/get?param={symbol},day,{start},{end},{count},qfq"
+# 腾讯日线接口实测单次最多返回 640 根（请求 2000 也只回 640），且返回的是区间内**最新**
+# 的 640 根；要补更早历史必须把起止日期拼进 param 并向前分页。
+TENCENT_DAILY_MAX_BARS = 640
+# 分页上限：4.8 年 ≈ 1170 根 ≈ 2 页；留 8 页余量防止异常源导致死循环。
+TENCENT_DAILY_MAX_PAGES = 8
 INTRADAY_TIMEFRAME = "5m"
 INTRADAY_BAR_MINUTES = 5
 REALTIME_INTERVAL_SECONDS = 300
@@ -491,39 +496,82 @@ class MarketDataService:
             raise ValueError(f"baostock 没有返回指数 {symbol.index_baostock} 的日线")
         return bars, "baostock_index"
 
-    def fetch_tencent_daily(self, tencent_symbol: str, start_date: str, end_date: str) -> list[Bar]:
-        start = datetime.strptime(start_date, "%Y-%m-%d").date()
-        end = datetime.strptime(end_date, "%Y-%m-%d").date()
-        approximate_days = max(320, int((end - start).days * 1.6) + 40)
-        url = TENCENT_DAILY_URL.format(symbol=tencent_symbol, count=min(approximate_days, 2000))
+    def _fetch_tencent_daily_rows(
+        self, tencent_symbol: str, start: str, end: str,
+    ) -> list[list[Any]]:
+        """取一页日线原始行（最多 640 根，区间内最新一页）。
+
+        腾讯 ``fqkline`` 必须把起止日期拼进 ``param`` 才能拿到较早历史；只给 count
+        时只返回最近 640 根（ETF 约 2.5 年），长区间回测会误判为"缓存缺失"。
+        """
+        url = TENCENT_DAILY_URL.format(
+            symbol=tencent_symbol, start=start, end=end,
+            count=TENCENT_DAILY_MAX_BARS,
+        )
         payload = _get_json(url)
         if payload.get("code") != 0:
             raise ValueError(f"腾讯指数日线返回错误: {payload.get('msg')}")
         node = payload.get("data", {}).get(tencent_symbol, {})
         # ETF/基金返回 qfqday（前复权），指数返回 day；两者字段顺序一致。
-        rows = node.get("qfqday") or node.get("day") or []
+        return list(node.get("qfqday") or node.get("day") or [])
+
+    def fetch_tencent_daily(self, tencent_symbol: str, start_date: str, end_date: str) -> list[Bar]:
+        """腾讯日线（前复权）：按 640 根一页向前分页，直到覆盖请求起点。
+
+        背景（2026-11-15 实测）：该接口单次最多 640 根，且返回区间内**最新**的 640 根。
+        旧实现 URL 里起止日期为空、只传 count，任何早于"最近 640 根"的请求都会拿到
+        不完整数据（ETF 159915 因此只能从 2024-03 起），并被 ``ensure_etf_bars``
+        判定为缓存缺失、每次回测重复联网补采。现改为带日期区间 + 向前翻页。
+        """
+        start = datetime.strptime(start_date, "%Y-%m-%d").date()
+        end = datetime.strptime(end_date, "%Y-%m-%d").date()
+        rows_by_date: dict[str, list[Any]] = {}
+        page_end = end
+        for _ in range(TENCENT_DAILY_MAX_PAGES):
+            rows = self._fetch_tencent_daily_rows(
+                tencent_symbol, start.isoformat(), page_end.isoformat(),
+            )
+            if not rows:
+                break
+            for row in rows:
+                date_text = str(row[0])[:10]
+                if date_text:
+                    rows_by_date[date_text] = row
+            dates = sorted(rows_by_date)
+            first = datetime.strptime(dates[0], "%Y-%m-%d").date()
+            if first <= start:
+                break
+            # 本页最早一根仍晚于请求起点 → 以它前一日为上界继续向前补。
+            next_end = first - timedelta(days=1)
+            if next_end >= page_end:
+                break
+            page_end = next_end
+
         bars: list[Bar] = []
         previous_close: float | None = None
-        for row in rows:
-            try:
-                timestamp = daily_close_timestamp(str(row[0]))
-            except ValueError:
-                continue
-            if not (start <= timestamp.date() <= end):
-                previous_close = _float(row[2]) if len(row) > 2 else None
-                continue
-            open_ = _float(row[1])
-            close = _float(row[2])
-            high = _float(row[3])
-            low = _float(row[4])
+        for date_text in sorted(rows_by_date):
+            row = rows_by_date[date_text]
+            close = _float(row[2]) if len(row) > 2 else 0.0
+            open_ = _float(row[1]) if len(row) > 1 else close
+            high = _float(row[3]) if len(row) > 3 else close
+            low = _float(row[4]) if len(row) > 4 else close
             volume = _float(row[5]) if len(row) > 5 else 0.0
             amount = _float(row[6]) if len(row) > 6 else 0.0
             if min(open_, high, low, close) <= 0:
+                previous_close = close
                 continue
             if amount <= 0 and volume > 0:
                 amount = close * volume
+            try:
+                timestamp = daily_close_timestamp(date_text)
+            except ValueError:
+                previous_close = close
+                continue
+            if not (start <= timestamp.date() <= end):
+                previous_close = close
+                continue
             if previous_close is None:
-                previous_close = _float(row[2], close)
+                previous_close = close
             bars.append(Bar(
                 timestamp=timestamp, symbol=tencent_symbol, open=price(open_),
                 high=price(high), low=price(low), close=price(close), volume=volume,

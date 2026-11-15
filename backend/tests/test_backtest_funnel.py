@@ -310,6 +310,47 @@ def test_funnel_etf_beta_sleeve_holds_when_stock_gate_closed(tmp_path, monkeypat
     assert beta["position_qty"] > 0                        # 趋势未破，继续持有
     assert report["metrics"]["final_equity"] > 1_000_000   # ETF 上涨计入净值
     assert any(event["type"] == "ETF_FILL" for event in report["events"])
+    # ETF 日线从回测起点之前就有 → 不算部分覆盖，也不该有覆盖告警
+    assert beta["partial_coverage"] is False
+    assert not any("部分覆盖" in warning for warning in report["warnings"])
+
+
+def test_funnel_etf_partial_coverage_warns(tmp_path, monkeypatch):
+    """ETF 日线首根晚于回测起点时：报告必须提示“部分覆盖”，且 data_info.beta 标注区间。
+
+    背景：腾讯日线接口历史上只能取最近 640 根，导致 2022 年起的回测里 beta 腿在
+    2024-03 之前静默不建仓；现在补采分页后可能仍受数据源限制，必须显式提示。
+    """
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    # 只造 2025-08-25 起的 ETF 日线（回测时间线起点是 2025-08-20）
+    late_start = datetime(2025, 8, 25)
+    etf_bars = [
+        Bar(
+            timestamp=late_start + timedelta(days=index), symbol="sz.159915",
+            open=3.0 + index * 0.01, high=3.0 + index * 0.01, low=3.0 + index * 0.01,
+            close=3.0 + index * 0.01, volume=1e7, amount=3e7, timeframe="daily",
+        )
+        for index in range(30)
+    ]
+    save_etf_bars(cache_path(tmp_path / "data", "sz.159915"), etf_bars)
+
+    report = _run(
+        store,
+        config=StrategyConfig(
+            etf_beta_enabled=True, etf_position_pct=0.20,
+            etf_entry_ma_days=5, etf_exit_ma_days=5,
+        ),
+        initial_cash=1_000_000.0,
+    )
+
+    beta = report["data_info"]["beta"]
+    assert beta["partial_coverage"] is True
+    assert beta["coverage_start"] == "2025-08-25"
+    assert any(
+        "ETF beta 腿数据部分覆盖" in warning and "2025-08-25" in warning
+        for warning in report["warnings"]
+    ), report["warnings"]
 
 
 def test_funnel_etf_beta_disabled_by_default(tmp_path, monkeypatch):
