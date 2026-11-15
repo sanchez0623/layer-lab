@@ -23,6 +23,20 @@ from .universe import BOARD_INDEX, UniverseStore
 class BacktestCancelled(Exception):
     """回测在交易日边界被主动取消。引擎捕获后返回部分报告（status=CANCELLED）。"""
 
+
+def _normalize_fill_timestamp(fill: Fill) -> None:
+    """把「日线口径成交」的 0 点时间戳改写为开盘时刻 09:30:00。
+
+    日线 bar 的时间戳只解析到日期（``datetime.strptime(date, "%Y-%m-%d")`` → 00:00:00），
+    走日线口径的建仓/加仓/清仓成交（NEXT_OPEN 开盘撮合）会继承这个 0 点，界面上显示成
+    「0 点成交」。这里把它改写为同日 09:30:00，与「次日开盘成交」的真实语义一致。
+
+    5 分钟成交不受影响：真实 5 分钟 bar 的时间戳是 09:35/10:15 等盘中时刻，永不为 0 点。
+    """
+    ts = fill.timestamp
+    if len(ts) >= 10 and ts[10:].strip() in ("", "T00:00:00", " 00:00:00"):
+        fill.timestamp = ts[:10] + "T09:30:00"
+
 # 回测指数加载：start 前推的日历天缓冲，保证回测首日往前 ≥21 根（L0 ret20 + 策略大盘门）。
 _INDEX_LOOKBACK_BUFFER_DAYS = 45
 # 持仓标的日线加载：start 前推的日历天缓冲，保证回测首日往前 ≥250 根（52周高/ATR）。
@@ -234,6 +248,7 @@ class BacktestEngine:
 
     def _handle_fills(self, fills: list[Fill], session_index: int, bar: Bar) -> None:
         for fill in fills:
+            _normalize_fill_timestamp(fill)
             if fill.side == "BUY" and fill.purpose == "PERMANENT" and self.current_round is None:
                 self._new_round(fill, session_index)
             self.strategy.on_fill(fill, session_index)
@@ -851,6 +866,7 @@ class FunnelRotationBacktest:
 
     def _handle_fills(self, fills: list[Fill], session_index: int, bar: Bar) -> None:
         for fill in fills:
+            _normalize_fill_timestamp(fill)
             if fill.side == "BUY" and fill.purpose == "PERMANENT" and self.current_round is None:
                 self._new_round(fill, session_index)
             self.strategy.on_fill(fill, session_index)

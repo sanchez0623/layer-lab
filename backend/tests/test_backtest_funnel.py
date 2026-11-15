@@ -199,6 +199,25 @@ def test_funnel_backtest_completes_with_round_and_screen(tmp_path):
     assert any("日线口径" in item for item in report["warnings"])
 
 
+def test_funnel_daily_fills_have_open_timestamp_not_midnight(tmp_path):
+    """日线口径成交的时间戳必须是开盘时刻 09:30，不能是 0 点（界面显示 bug 回归）。
+
+    日线 bar 的时间戳只解析到日期（00:00:00），走日线口径的建仓/加仓/清仓成交会继承
+    这个 0 点，界面上显示成「0 点成交」。归一化后应为同日 09:30:00（次日开盘撮合语义）。
+    """
+    store = _build_store(tmp_path / "u.db")
+    report = _run(store)
+
+    trades = report["trades"]
+    assert trades, "应有成交记录"
+    midnight = [t for t in trades if t["timestamp"][11:] == "00:00:00"]
+    assert midnight == [], f"仍有 0 点成交：{[t['timestamp'] for t in midnight[:5]]}"
+    for t in trades:
+        assert t["timestamp"][11:] == "09:30:00", (
+            f"日线成交时间戳应为 09:30:00，实际 {t['timestamp']}"
+        )
+
+
 def test_funnel_switches_symbol_after_take_profit(tmp_path):
     store = _build_store(tmp_path / "u.db")
     report = _run(store)
