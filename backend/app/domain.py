@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -7,7 +8,8 @@ from typing import Any, Literal
 
 Side = Literal["BUY", "SELL"]
 OrderType = Literal["MARKET", "LIMIT"]
-Purpose = Literal["PERMANENT", "T"]
+# PERMANENT=永久仓（轮动个股），T=做T仓，BETA=指数 beta 腿（ETF，独立于个股轮动）
+Purpose = Literal["PERMANENT", "T", "BETA"]
 
 
 def money(value: float) -> float:
@@ -145,6 +147,19 @@ class StrategyConfig:
     # 目的：避免资金被长期套牢在「既不到 15% 止盈、也不触发 Armed 背离」的缓慢阴跌标的里。
     max_holding_days: int | None = None
     holding_tp_override: float | None = None
+    # ---- 指数 beta 腿（ETF）------------------------------------------------
+    # 个股轮动空仓期间，用创业板 ETF 承接 beta，避免「大门关闭 → 整段上涨 0 收益」。
+    # 与个股互斥：选到股票时先卖 ETF 再建个股仓；ETF 期间不占用轮动序列。
+    etf_beta_enabled: bool = False
+    etf_symbol: str = "sz.159915"           # 创业板 ETF（易方达）
+    # 仓位占「当前账户权益」的比例（0~1）。0.2 = 20%。
+    etf_position_pct: float = 0.20
+    # 入场趋势过滤：指数收盘 > N 日均线才买 ETF。
+    etf_entry_ma_days: int = 60
+    # 出场：指数收盘 < N 日均线清仓。
+    etf_exit_ma_days: int = 20
+    # 硬止损：ETF 收盘较建仓成本回撤达到该比例即清仓（0~1）。
+    etf_hard_stop_pct: float = 0.06
 
     def __post_init__(self) -> None:
         if len(self.installment_amounts) != 16:
@@ -167,6 +182,20 @@ class StrategyConfig:
         except (TypeError, ValueError):
             raise ValueError("t_exit_cutoff 必须是合法的 HH:MM 时间（做T的T+1日尾盘强平截止点）")
         self.installment_amounts = [float(x) for x in self.installment_amounts]
+        # ---- ETF beta 腿校验 -------------------------------------------------
+        symbol = str(self.etf_symbol or "").strip().lower()
+        if not re.fullmatch(r"(sh|sz)\.\d{6}", symbol):
+            raise ValueError("etf_symbol 必须是 sh/sz 前缀的 6 位代码（如 sz.159915）")
+        self.etf_symbol = symbol
+        if not 0 < float(self.etf_position_pct) <= 1:
+            raise ValueError("etf_position_pct 必须在 (0,1] 内（占账户权益比例）")
+        if not 0 < float(self.etf_hard_stop_pct) < 1:
+            raise ValueError("etf_hard_stop_pct 必须在 (0,1) 内")
+        for name in ("etf_entry_ma_days", "etf_exit_ma_days"):
+            value = int(getattr(self, name))
+            if not 2 <= value <= 250:
+                raise ValueError(f"{name} 必须在 2~250 个交易日之间")
+            setattr(self, name, value)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "StrategyConfig":
@@ -290,14 +319,24 @@ class Position:
     # 新增字段放末尾并带默认值，兼容旧账户的 _positions_internal 反序列化。
     permanent_fee: float = 0.0
     t_fee: float = 0.0
+    # 指数 beta 腿（ETF）独立账本：与永久仓/做T仓互不影响，卖出时按 beta 成本结算。
+    beta_qty: int = 0
+    beta_cost: float = 0.0
+    beta_fee: float = 0.0
+    today_beta_buy_qty: int = 0
 
     @property
     def total_qty(self) -> int:
+        return self.permanent_qty + self.t_qty + self.beta_qty
+
+    @property
+    def stock_qty(self) -> int:
+        """个股持仓（永久仓 + 做T仓），不含 ETF beta 腿。轮动/策略只看这一项。"""
         return self.permanent_qty + self.t_qty
 
     @property
     def today_buy_qty(self) -> int:
-        return self.today_permanent_buy_qty + self.today_t_buy_qty
+        return self.today_permanent_buy_qty + self.today_t_buy_qty + self.today_beta_buy_qty
 
     @property
     def sellable_qty(self) -> int:
@@ -308,20 +347,24 @@ class Position:
         return max(0, self.permanent_qty - self.today_permanent_buy_qty)
 
     @property
+    def beta_sellable_qty(self) -> int:
+        return max(0, self.beta_qty - self.today_beta_buy_qty)
+
+    @property
     def average_cost(self) -> float:
         if not self.total_qty:
             return 0.0
-        return money((self.permanent_cost + self.t_cost) / self.total_qty)
+        return money((self.permanent_cost + self.t_cost + self.beta_cost) / self.total_qty)
 
     @property
     def buy_fee_in_cost(self) -> float:
         """当前持仓成本中包含的买入手续费（卖出费用不在此列）。"""
-        return money(self.permanent_fee + self.t_fee)
+        return money(self.permanent_fee + self.t_fee + self.beta_fee)
 
     def public_dict(self) -> dict[str, Any]:
         # 平均成本已按「分」四舍五入，用它反算市值/浮盈会产生系统性误差
         # （如 400 股 × 0.0036 元 = 1.44 元），因此单独给出未除股数的精确成本。
-        total_cost = money(self.permanent_cost + self.t_cost)
+        total_cost = money(self.permanent_cost + self.t_cost + self.beta_cost)
         market_value = money(self.last_price * self.total_qty)
         return {
             "symbol": self.symbol,
@@ -329,6 +372,8 @@ class Position:
             "sellable_qty": self.sellable_qty,
             "permanent_qty": self.permanent_qty,
             "permanent_cost": money(self.permanent_cost),
+            "beta_qty": self.beta_qty,
+            "beta_cost": money(self.beta_cost),
             "total_cost": total_cost,
             "average_cost": self.average_cost,
             "buy_fee": self.buy_fee_in_cost,

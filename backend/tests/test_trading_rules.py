@@ -237,12 +237,35 @@ def test_odd_lot_sell_can_fill_full_position():
 
 def test_all_board_rules_cover_six_boards():
     boards = {item.board for item in all_board_rules()}
-    assert boards == {"科创板", "创业板", "沪市主板", "深市主板", "沪市B股", "深市B股"}
+    assert boards == {
+        "科创板", "创业板", "沪市主板", "深市主板", "沪市B股", "深市B股", "ETF",
+    }
     star = rules_for("sh.688200")
     assert star.min_qty == 200 and star.step == 1
     assert star.cage_label == "纯 2%"
     assert rules_for("sz.300001").cage_label == "2% 与 0.1 元孰高"
     assert "集合竞价" in NOT_MODELED[0]
+
+
+def test_etf_board_rules_and_detection():
+    assert board_of("sz.159915") == "ETF"
+    assert board_of("sh.510300") == "ETF"
+    assert board_of("sh.588000") == "ETF"
+    etf = rules_for("sz.159915")
+    assert etf.min_qty == 100 and etf.step == 100
+    assert etf.limit_pct == 0.20          # 创业板 ETF 涨跌幅 ±20%
+    assert etf.cage_label == "2% 与 0.1 元孰高"
+    # 普通个股不会被误判成 ETF
+    assert board_of("sz.300001") == "创业板"
+    assert board_of("sh.600519") == "沪市主板"
+
+
+def test_etf_order_quantity_and_amount_caps():
+    assert validate_quantity("sz.159915", 100, "BUY") == ""
+    assert "整数倍" in validate_quantity("sz.159915", 150, "BUY")
+    assert "最小申报" in validate_quantity("sz.159915", 50, "BUY")
+    assert validate_order_amount("sz.159915", 50_000, "MARKET") == ""
+    assert "上限" in validate_order_amount("sz.159915", 60_000, "MARKET")
 
 
 def test_trading_rules_api_for_star_symbol(tmp_path, monkeypatch):

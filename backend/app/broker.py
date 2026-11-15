@@ -18,12 +18,15 @@ def _replay_buy_fees(fills: Iterable[Fill]) -> tuple[float, float]:
 
     仅用于兼容新增 buy_fee 字段之前的旧账户（其 _positions_internal 里没有
     permanent_fee/t_fee）；新成交会直接累加/分摊，不依赖此函数。
+    ETF beta 腿（BETA）不计入本函数——旧账户不会有 BETA 成交。
     """
     permanent_qty = 0
     t_qty = 0
     permanent_fee = 0.0
     t_fee = 0.0
     for fill in fills:
+        if fill.purpose == "BETA":
+            continue
         if fill.side == "BUY":
             if fill.purpose == "PERMANENT":
                 permanent_qty += fill.quantity
@@ -47,6 +50,15 @@ def _replay_buy_fees(fills: Iterable[Fill]) -> tuple[float, float]:
             t_qty -= sold
             t_fee = max(0.0, t_fee - allocated)
     return money(permanent_fee), money(t_fee)
+
+
+def _sellable_for(position: Position, purpose: str) -> int:
+    """按账本口径返回 T+1 可卖数量（PERMANENT=永久仓、T=做T仓、BETA=ETF 腿）。"""
+    if purpose == "PERMANENT":
+        return position.permanent_sellable_qty
+    if purpose == "T":
+        return min(position.t_qty, position.permanent_sellable_qty)
+    return position.beta_sellable_qty
 
 
 class BrokerAccount:
@@ -166,6 +178,19 @@ class BrokerAccount:
         return money(sum(position.permanent_cost for position in self.positions.values()))
 
     @property
+    def has_stock_position(self) -> bool:
+        """是否持有轮动个股（永久仓或做T仓）；ETF beta 腿不算。"""
+        return any(position.stock_qty > 0 for position in self.positions.values())
+
+    @property
+    def beta_cost(self) -> float:
+        return money(sum(position.beta_cost for position in self.positions.values()))
+
+    @property
+    def beta_market_value(self) -> float:
+        return money(sum(position.beta_qty * position.last_price for position in self.positions.values()))
+
+    @property
     def permanent_market_value(self) -> float:
         return money(sum(position.permanent_qty * position.last_price for position in self.positions.values()))
 
@@ -186,6 +211,7 @@ class BrokerAccount:
             for position in self.positions.values():
                 position.today_permanent_buy_qty = 0
                 position.today_t_buy_qty = 0
+                position.today_beta_buy_qty = 0
 
     def board_rules(self, symbol: str) -> BoardRules:
         """标的对应板块的交易规则；合成标的回退旧口径。"""
@@ -197,8 +223,8 @@ class BrokerAccount:
         purpose = request.purpose.upper()
         if side not in {"BUY", "SELL"} or order_type not in {"MARKET", "LIMIT"}:
             raise ValueError("side/order_type 不合法")
-        if purpose not in {"PERMANENT", "T"}:
-            raise ValueError("purpose 必须为 PERMANENT 或 T")
+        if purpose not in {"PERMANENT", "T", "BETA"}:
+            raise ValueError("purpose 必须为 PERMANENT、T 或 BETA")
         if isinstance(request.quantity, bool) or int(request.quantity) != request.quantity or request.quantity <= 0:
             raise ValueError("quantity 必须为正整数")
         if order_type == "LIMIT" and (request.limit_price is None or request.limit_price <= 0):
@@ -231,9 +257,7 @@ class BrokerAccount:
             self.orders.append(order)
             return order
         if side == "SELL":
-            sellable = position.permanent_sellable_qty if purpose == "PERMANENT" else min(
-                position.t_qty, position.permanent_sellable_qty
-            )
+            sellable = _sellable_for(position, purpose)
             if quantity > sellable:
                 order.status = "REJECTED"
                 order.message = f"T+1可卖数量不足: 请求{quantity}, 可卖{sellable}"
@@ -364,10 +388,7 @@ class BrokerAccount:
             quantity = min(order.remaining, capacity)
             position = self.position(order.symbol)
             if order.side == "SELL":
-                sellable = position.permanent_sellable_qty if order.purpose == "PERMANENT" else min(
-                    position.t_qty, position.permanent_sellable_qty
-                )
-                quantity = min(quantity, sellable)
+                quantity = min(quantity, _sellable_for(position, order.purpose))
             if quantity < step:
                 order.message = "可成交数量不足一个申报单位"
                 continue
@@ -431,6 +452,12 @@ class BrokerAccount:
         position.last_price = execution
         if order.side == "BUY":
             self.cash = money(self.cash - amount - total_fee)
+            if order.purpose == "BETA":
+                position.beta_qty += quantity
+                position.beta_cost = money(position.beta_cost + amount + total_fee)
+                position.beta_fee = money(position.beta_fee + total_fee)
+                position.today_beta_buy_qty += quantity
+                return 0.0
             if order.purpose == "PERMANENT":
                 position.permanent_qty += quantity
                 position.permanent_cost = money(position.permanent_cost + amount + total_fee)
@@ -445,7 +472,16 @@ class BrokerAccount:
 
         self.cash = money(self.cash + amount - total_fee)
         net_proceeds = money(amount - total_fee)
-        if order.purpose == "PERMANENT":
+        if order.purpose == "BETA":
+            if position.beta_qty < quantity:
+                raise RuntimeError("ETF beta 账本可卖数量校验失败")
+            cost_allocated = money(position.beta_cost * quantity / position.beta_qty)
+            fee_allocated = money(position.beta_fee * quantity / position.beta_qty)
+            position.beta_qty -= quantity
+            position.beta_cost = money(max(0.0, position.beta_cost - cost_allocated))
+            position.beta_fee = money(max(0.0, position.beta_fee - fee_allocated))
+            realized = money(net_proceeds - cost_allocated)
+        elif order.purpose == "PERMANENT":
             if position.permanent_qty < quantity:
                 raise RuntimeError("永久仓账本可卖数量校验失败")
             cost_allocated = money(position.permanent_cost * quantity / position.permanent_qty)
@@ -475,6 +511,8 @@ class BrokerAccount:
             position.t_cost = 0.0
             position.permanent_fee = 0.0
             position.t_fee = 0.0
+            position.beta_cost = 0.0
+            position.beta_fee = 0.0
         return realized
 
     def mark(self, symbol: str, last_price: float) -> None:

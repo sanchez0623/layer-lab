@@ -121,7 +121,8 @@ def _current_symbol(account: "BrokerAccount") -> str | None:
 
 
 def _is_flat(account: "BrokerAccount") -> bool:
-    return not any(position.total_qty > 0 for position in account.positions.values())
+    """个股是否空仓（ETF beta 腿不算个股持仓，不算「非空仓」）。"""
+    return not any(position.stock_qty > 0 for position in account.positions.values())
 
 
 def should_rescreen(
@@ -246,7 +247,7 @@ def set_pool(
     account.rotation_waiting = False
     account.rotation_pending_advance = False
     account.rotation_note = NOTE_EMPTY_POOL if not items else ""
-    held = {symbol for symbol, position in account.positions.items() if position.total_qty > 0}
+    held = {symbol for symbol, position in account.positions.items() if position.stock_qty > 0}
     if held:
         for position, item in enumerate(items):
             if item["symbol"] in held:

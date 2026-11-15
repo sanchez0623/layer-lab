@@ -12,6 +12,7 @@ import pytest
 
 from app.backtest import FunnelRotationBacktest
 from app.domain import Bar, StrategyConfig
+from app.etf_data import cache_path, save_etf_bars
 from app.screener import ScreenerConfig
 from app.strategy import LayeredTStrategy
 from app.universe import BOARD_GEM, BOARD_INDEX, BOARD_STAR, UniverseRow, UniverseStore
@@ -249,6 +250,101 @@ def test_funnel_gate_closed_waits_flat(tmp_path):
         for item in trail
     )
     assert not any("L0" in w or "空仓等待" in w for w in report["warnings"])
+
+
+def test_funnel_etf_beta_sleeve_holds_when_stock_gate_closed(tmp_path, monkeypatch):
+    """L0 全程关门时，ETF beta 腿承接 beta；个股空仓但账户不再 0 收益。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    etf_bars = _bars("sz.159915", [3.0 + index * 0.01 for index in range(N_BARS)])
+    save_etf_bars(cache_path(tmp_path / "data", "sz.159915"), etf_bars)
+
+    report = _run(
+        store,
+        config=StrategyConfig(
+            etf_beta_enabled=True, etf_position_pct=0.20,
+            etf_entry_ma_days=5, etf_exit_ma_days=5,
+        ),
+        initial_cash=1_000_000.0,
+    )
+
+    assert report["metrics"]["total_rounds"] == 0          # 个股一轮都没开
+    beta = report["data_info"]["beta"]
+    assert beta["enabled"] and beta["symbol"] == "sz.159915"
+    assert beta["trade_count"] >= 1
+    assert beta["position_qty"] > 0                        # 趋势未破，继续持有
+    assert report["metrics"]["final_equity"] > 1_000_000   # ETF 上涨计入净值
+    assert any(event["type"] == "ETF_FILL" for event in report["events"])
+
+
+def test_funnel_etf_beta_disabled_by_default(tmp_path, monkeypatch):
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    report = _run(store)
+    beta = report["data_info"]["beta"]
+    assert beta["enabled"] is False
+    assert beta["trade_count"] == 0
+
+
+def test_funnel_etf_sells_once_stock_selected(tmp_path, monkeypatch):
+    """互斥规则：一旦选出个股，ETF 即使指数趋势未破也要清仓。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    engine = FunnelRotationBacktest(
+        store=store, market=_DummyMarket(),
+        screener_config=ScreenerConfig(boards=[BOARD_GEM], enable_fundamental_veto=False),
+        initial_cash=1_000_000.0,
+        config=StrategyConfig(etf_beta_enabled=False),
+        start_date="2025-08-20", end_date="2025-08-25", name="etf互斥测试",
+    )
+    # 手工开启 beta 腿并造一笔 ETF 持仓（等价于前一日已买入）。
+    engine.etf_enabled = True
+    engine.etf_symbol = "sz.159915"
+    engine.etf_bars_by_date = {
+        "2025-08-22": Bar(
+            timestamp=datetime(2025, 8, 22, 15), symbol="sz.159915",
+            open=3.0, high=3.0, low=3.0, close=3.0, volume=1e7, amount=3e7,
+            timeframe="daily",
+        )
+    }
+    position = engine.account.position("sz.159915")
+    position.beta_qty = 10_000
+    position.beta_cost = 30_000.0
+    engine.account.mark("sz.159915", 3.0)
+
+    engine._current_symbol = "sz.300101"          # 当日选出了个股
+    engine._manage_beta("2025-08-22")
+
+    sells = [
+        order for order in engine.account.orders
+        if order.purpose == "BETA" and order.side == "SELL"
+    ]
+    assert sells, "选出个股后必须提交 ETF 清仓委托"
+    assert sells[0].quantity == 10_000
+
+
+def test_funnel_etf_does_not_enter_when_stock_target_exists(tmp_path, monkeypatch):
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    engine = FunnelRotationBacktest(
+        store=store, market=_DummyMarket(),
+        screener_config=ScreenerConfig(boards=[BOARD_GEM], enable_fundamental_veto=False),
+        initial_cash=1_000_000.0,
+        config=StrategyConfig(etf_beta_enabled=False),
+        start_date="2025-08-20", end_date="2025-08-25", name="etf互斥测试2",
+    )
+    engine.etf_enabled = True
+    engine.etf_symbol = "sz.159915"
+    engine.etf_bars_by_date = {
+        "2025-08-22": Bar(
+            timestamp=datetime(2025, 8, 22, 15), symbol="sz.159915",
+            open=3.0, high=3.0, low=3.0, close=3.0, volume=1e7, amount=3e7,
+            timeframe="daily",
+        )
+    }
+    engine._current_symbol = "sz.300101"
+    engine._manage_beta("2025-08-22")
+    assert not [o for o in engine.account.orders if o.purpose == "BETA"]
 
 
 def test_funnel_round_warnings_carry_select_date(tmp_path):

@@ -500,7 +500,8 @@ class MarketDataService:
         if payload.get("code") != 0:
             raise ValueError(f"腾讯指数日线返回错误: {payload.get('msg')}")
         node = payload.get("data", {}).get(tencent_symbol, {})
-        rows = node.get("day", [])
+        # ETF/基金返回 qfqday（前复权），指数返回 day；两者字段顺序一致。
+        rows = node.get("qfqday") or node.get("day") or []
         bars: list[Bar] = []
         previous_close: float | None = None
         for row in rows:

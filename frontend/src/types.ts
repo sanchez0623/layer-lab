@@ -59,6 +59,17 @@ export interface StrategyConfig {
   max_holding_days?: number | null;
   /** 超期降阈后的止盈阈值（小数，0.03 = 3%）；与 max_holding_days 必须同时配置 */
   holding_tp_override?: number | null;
+  /** 指数 beta 腿：空仓期间持有创业板 ETF，选到个股后卖出换股 */
+  etf_beta_enabled?: boolean;
+  etf_symbol?: string;
+  /** ETF 仓位占账户权益比例（小数，0.2 = 20%） */
+  etf_position_pct?: number;
+  /** 入场趋势过滤：指数收盘站上 N 日均线才买 */
+  etf_entry_ma_days?: number;
+  /** 出场：指数收盘跌破 N 日均线清仓 */
+  etf_exit_ma_days?: number;
+  /** ETF 硬止损：较建仓成本回撤达到该比例清仓（小数，0.06 = 6%） */
+  etf_hard_stop_pct?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {

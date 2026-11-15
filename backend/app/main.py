@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .backtest import BacktestEngine, FunnelRotationBacktest, run_backtest, run_funnel_backtest
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
+from .beta_sleeve import entry_allowed, exit_reason, target_quantity
 from .broker import BrokerAccount
 from .calendar_api import FuyaoCalendar
 from .data import dataset_from_bars, read_csv_bars, save_demo_datasets
@@ -192,6 +193,13 @@ class AccountConfigRequest(BaseModel):
     # （strategy._effective_take_profit 任一为 None 即维持原止盈）。
     max_holding_days: int | None = Field(default=None, ge=1, le=250)
     holding_tp_override: float | None = Field(default=None, ge=0, le=1)
+    # 指数 beta 腿（ETF）：空仓期间用创业板 ETF 承接 beta，选到个股后卖出换股。
+    etf_beta_enabled: bool | None = None
+    etf_symbol: str | None = Field(default=None, pattern=r"^(sh|sz)\.\d{6}$")
+    etf_position_pct: float | None = Field(default=None, gt=0, le=1)
+    etf_entry_ma_days: int | None = Field(default=None, ge=2, le=250)
+    etf_exit_ma_days: int | None = Field(default=None, ge=2, le=250)
+    etf_hard_stop_pct: float | None = Field(default=None, gt=0, lt=1)
 
 
 class ApplyConfigRequest(BaseModel):
@@ -325,7 +333,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="1.7.0",
+        version="1.8.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -772,19 +780,106 @@ def create_app() -> FastAPI:
         day_probe_cache[today_text] = opened
         return opened
 
+    def _rotation_target(account: BrokerAccount) -> str | None:
+        """轮动当前目标标的（已选出、可能尚未建仓）；无目标返回 None。"""
+        if not account.rotation_enabled:
+            return None
+        index = int(account.rotation_index)
+        if 0 <= index < len(account.rotation_pool):
+            return str(account.rotation_pool[index].get("symbol") or "") or None
+        return None
+
+    def apply_beta_bar(
+        account: BrokerAccount, bar: Bar, index_history: list[Bar] | None = None,
+    ) -> None:
+        """ETF beta 腿的模拟盘 tick：撮合 → 标记 → 出场/换股 → 空仓入场。
+
+        与回测共用 beta_sleeve 的判定（架构原则 1）；差别只在行情来源：
+        回测读本地 ETF 日线，模拟盘用腾讯快照，指数趋势用本地指数日线。
+        """
+        account.new_day(bar.date)
+        account.process_bar(bar, modes={"NEXT_BAR", "NEXT_OPEN"})
+        account.mark(bar.symbol, bar.close)
+        if not account.config.etf_beta_enabled:
+            return
+        config = account.config
+        position = account.position(bar.symbol)
+        series = list(index_history or [])
+        target = _rotation_target(account)
+        if position.beta_qty > 0:
+            entry_cost = position.beta_cost / position.beta_qty
+            reason = exit_reason(
+                series, entry_cost, bar.close,
+                exit_ma_days=config.etf_exit_ma_days,
+                hard_stop_pct=config.etf_hard_stop_pct,
+            )
+            if reason is None and (account.has_stock_position or target):
+                # 个股与 ETF 不允许同时持有：一旦选出个股，ETF 先清仓。
+                reason = "选到个股换仓"
+            pending = any(
+                order.symbol == bar.symbol and order.purpose == "BETA" and order.side == "SELL"
+                and order.status in {"PENDING", "PARTIALLY_FILLED"}
+                for order in account.orders
+            )
+            if reason and not pending:
+                account.submit_split(OrderRequest(
+                    symbol=bar.symbol, side="SELL", quantity=position.beta_qty,
+                    execution_mode="NEXT_BAR", purpose="BETA", reason=reason,
+                ), bar.timestamp)
+            return
+        if account.has_stock_position or target:
+            return
+        pending_buy = any(
+            order.symbol == bar.symbol and order.purpose == "BETA" and order.side == "BUY"
+            and order.status in {"PENDING", "PARTIALLY_FILLED"}
+            for order in account.orders
+        )
+        if pending_buy or not entry_allowed(
+            series, config.etf_entry_ma_days, config.etf_exit_ma_days,
+        ):
+            return
+        rules = rules_for(bar.symbol)
+        quantity = target_quantity(
+            account.equity, config.etf_position_pct, bar.close,
+            min_qty=rules.min_qty, step=rules.step,
+        )
+        if quantity <= 0:
+            return
+        account.submit_split(OrderRequest(
+            symbol=bar.symbol, side="BUY", quantity=quantity,
+            execution_mode="NEXT_BAR", purpose="BETA",
+            reason="指数趋势向上，空仓建 beta 腿",
+        ), bar.timestamp)
+
     def scheduled_symbol(account: BrokerAccount) -> str | None:
-        """定时器选标的：轮动当前标的优先，其次账户绑定的日线数据集。"""
+        """定时器选标的：轮动当前标的优先，其次 beta 腿 ETF，最后账户绑定的日线数据集。"""
         if account.rotation_enabled:
             index = int(account.rotation_index)
             if 0 <= index < len(account.rotation_pool):
                 symbol = str(account.rotation_pool[index].get("symbol") or "")
                 if symbol:
                     return symbol
+        if account.config.etf_beta_enabled:
+            return account.config.etf_symbol
         if account.dataset_id:
             dataset = storage.get_dataset(account.dataset_id)
             if dataset is not None and dataset.symbol:
                 return dataset.symbol
         return None
+
+    def _beta_qty(account: BrokerAccount) -> int:
+        position = account.positions.get(account.config.etf_symbol)
+        return position.beta_qty if position else 0
+
+    def _beta_index_history() -> list[Bar]:
+        """ETF beta 腿的趋势序列：创业板指日线（本地 quan 缓存，收盘后含当日）。"""
+        quan = application.state.quan_store
+        if quan is None:
+            return []
+        try:
+            return quan.load_index("sz.399006", max_rows=320)
+        except Exception:  # noqa: BLE001 - 数据缺失时按「不建仓」降级，不影响个股 tick
+            return []
 
     def perform_live_tick(
         account: BrokerAccount, raw_symbol: str, *, require_today: bool = False,
@@ -794,9 +889,21 @@ def create_app() -> FastAPI:
         ``require_today=True`` 时若快照不属于当天（休市/节假日）直接返回 None，不做任何推进。
         """
         symbol_info = normalize_symbol(raw_symbol)
-        _, bar = application.state.market_service.fetch_quote(symbol_info.code)
+        # 用标准代码（sz.159915）取行情：ETF 纯 6 位代码以 1 开头，无法自动判交易所。
+        _, bar = application.state.market_service.fetch_quote(symbol_info.standard)
         if require_today and bar.date != date.today().isoformat():
             # 休市/节假日腾讯返回的是上一交易日快照，定时器不能把它当新交易日推进。
+            return None
+        # ETF beta 腿：独立 tick，不参与个股策略/轮动状态机。
+        if (
+            account.config.etf_beta_enabled
+            and symbol_info.standard == account.config.etf_symbol
+        ):
+            apply_beta_bar(account, bar, index_history=_beta_index_history())
+            save_paper(account)
+            return account
+        # 个股与 ETF 互斥：ETF 没清完之前不推进个股，避免同一账户同时持有两者。
+        if account.config.etf_beta_enabled and _beta_qty(account) > 0:
             return None
 
         daily_history: list[Bar] = []
@@ -885,8 +992,17 @@ def create_app() -> FastAPI:
                     continue
                 try:
                     symbol = scheduled_symbol(account)
+                    etf_symbol = account.config.etf_symbol
+                    # beta 腿先 tick：先把 ETF 出场/换股单挂出去，再推进个股；
+                    # 个股路径在 ETF 未清完时会直接跳过（互斥）。
+                    if account.config.etf_beta_enabled:
+                        etf_ticked = perform_live_tick(account, etf_symbol, require_today=True)
+                        if etf_ticked is not None:
+                            result["ticked"].append(f"{account.id}:{etf_symbol}")
                     if not symbol:
                         result["skipped"].append(f"{account.id}:no-symbol")
+                        continue
+                    if symbol == etf_symbol:
                         continue
                     ticked = perform_live_tick(account, symbol, require_today=True)
                     if ticked is None:
@@ -1525,7 +1641,7 @@ def create_app() -> FastAPI:
             # 若账户已持有某标的（尚未清仓），当前轮动标的必须指向它，
             # 否则该持仓清仓后的 tick 标的不等于 current_symbol，永远不会触发重筛。
             held_symbol = next(
-                (symbol for symbol, position in account.positions.items() if position.total_qty > 0),
+                (symbol for symbol, position in account.positions.items() if position.stock_qty > 0),
                 None,
             )
             set_rotation_from_run(

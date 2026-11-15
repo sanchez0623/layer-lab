@@ -511,6 +511,19 @@ export default function PaperPage() {
   const [savingHolding, setSavingHolding] = useState(false);
   const holdingDays = account?.config?.max_holding_days ?? null;
   const holdingTp = account?.config?.holding_tp_override ?? null;
+  // 指数 beta 腿（ETF）：个股空仓时用创业板 ETF 承接 beta，选到个股后卖出换股。
+  const [etfSymbolInput, setEtfSymbolInput] = useState('');
+  const [etfPctInput, setEtfPctInput] = useState('');
+  const [etfEntryMaInput, setEtfEntryMaInput] = useState('');
+  const [etfExitMaInput, setEtfExitMaInput] = useState('');
+  const [etfStopInput, setEtfStopInput] = useState('');
+  const [savingEtf, setSavingEtf] = useState(false);
+  const etfEnabled = Boolean(account?.config?.etf_beta_enabled);
+  const etfSymbol = account?.config?.etf_symbol ?? 'sz.159915';
+  const etfPct = account?.config?.etf_position_pct ?? 0.2;
+  const etfEntryMa = account?.config?.etf_entry_ma_days ?? 60;
+  const etfExitMa = account?.config?.etf_exit_ma_days ?? 20;
+  const etfStop = account?.config?.etf_hard_stop_pct ?? 0.06;
 
   const saveTNetSpread = async () => {
     if (!account) return;
@@ -568,6 +581,61 @@ export default function PaperPage() {
       setError(cause instanceof Error ? cause.message : '超期降阈更新失败。');
     } finally {
       setSavingHolding(false);
+    }
+  };
+
+  const toggleEtfBeta = async (enabled: boolean) => {
+    if (!account) return;
+    setSavingEtf(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { etf_beta_enabled: enabled });
+      setAccount(next);
+      setSuccess(enabled
+        ? `ETF beta 腿已开启（${etfSymbol}，${number(etfPct * 100, 0)}% 权益）；个股空仓且指数在 ${etfEntryMa} 日线上方时持有，选到个股后卖出换股。`
+        : 'ETF beta 腿已关闭，已有 ETF 持仓不会被自动清仓。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'ETF beta 腿切换失败。');
+    } finally {
+      setSavingEtf(false);
+    }
+  };
+
+  const saveEtfConfig = async () => {
+    if (!account) return;
+    const patch: Record<string, unknown> = {};
+    if (etfSymbolInput) patch.etf_symbol = etfSymbolInput;
+    if (etfPctInput !== '') {
+      const pct = Number(etfPctInput);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) { setError('ETF 仓位需为 0–100 之间的百分数。'); return; }
+      patch.etf_position_pct = pct / 100;
+    }
+    if (etfEntryMaInput !== '') {
+      const value = Number(etfEntryMaInput);
+      if (!Number.isInteger(value) || value < 2 || value > 250) { setError('入场均线需为 2–250 的整数交易日。'); return; }
+      patch.etf_entry_ma_days = value;
+    }
+    if (etfExitMaInput !== '') {
+      const value = Number(etfExitMaInput);
+      if (!Number.isInteger(value) || value < 2 || value > 250) { setError('出场均线需为 2–250 的整数交易日。'); return; }
+      patch.etf_exit_ma_days = value;
+    }
+    if (etfStopInput !== '') {
+      const value = Number(etfStopInput);
+      if (!Number.isFinite(value) || value <= 0 || value >= 100) { setError('ETF 硬止损需为 0–100 之间的百分数。'); return; }
+      patch.etf_hard_stop_pct = value / 100;
+    }
+    if (!Object.keys(patch).length) { setError('没有要更新的 ETF 配置字段。'); return; }
+    setSavingEtf(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, patch);
+      setAccount(next);
+      setEtfSymbolInput(''); setEtfPctInput(''); setEtfEntryMaInput('');
+      setEtfExitMaInput(''); setEtfStopInput('');
+      setSuccess('ETF beta 腿配置已更新，下一根 K 线起生效。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'ETF 配置更新失败。');
+    } finally {
+      setSavingEtf(false);
     }
   };
 
@@ -761,6 +829,99 @@ export default function PaperPage() {
                 </button>
               </div>
               <p className="t-config-note">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
+            </Panel>
+          )}
+
+          {account.auto_strategy && (
+            <Panel
+              className="t-config-panel"
+              title="指数 beta 腿（创业板 ETF）"
+              description={`个股空仓期间用 ${etfSymbol} 承接 beta：指数收盘站上 ${etfEntryMa} 日线买入，跌破 ${etfExitMa} 日线或 ETF 较成本回撤 ${number(etfStop * 100, 1)}% 卖出；一旦选出个股并建仓，ETF 卖出换股。`}
+              action={
+                <label className="switch-row rotation-switch">
+                  <span><strong>{etfEnabled ? '已开启' : '关闭'}</strong><small>{etfEnabled ? '空仓期持有 ETF' : '空仓期纯现金'}</small></span>
+                  <input
+                    type="checkbox"
+                    checked={etfEnabled}
+                    onChange={(event) => void toggleEtfBeta(event.target.checked)}
+                    disabled={savingEtf}
+                  />
+                  <span className="switch" />
+                </label>
+              }
+            >
+              <div className="t-config-row">
+                <Field label="ETF 代码" hint={`当前 ${etfSymbol}`} className="t-spread-field">
+                  <select
+                    value={etfSymbolInput || etfSymbol}
+                    onChange={(event) => setEtfSymbolInput(event.target.value)}
+                    disabled={savingEtf || !etfEnabled}
+                  >
+                    <option value="sz.159915">sz.159915 · 创业板ETF易方达</option>
+                    <option value="sz.159952">sz.159952 · 创业板ETF广发</option>
+                    <option value="sz.159964">sz.159964 · 创业板ETF平安</option>
+                  </select>
+                </Field>
+                <Field label="仓位（%权益）" hint={`当前 ${number(etfPct * 100, 0)}%`} className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="1" max="100" step="1"
+                      placeholder={number(etfPct * 100, 0)}
+                      value={etfPctInput}
+                      onChange={(event) => setEtfPctInput(event.target.value)}
+                      disabled={savingEtf || !etfEnabled}
+                    />
+                    <span>%</span>
+                  </div>
+                </Field>
+              </div>
+              <div className="t-config-row">
+                <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`} className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="2" max="250" step="1"
+                      placeholder={String(etfEntryMa)}
+                      value={etfEntryMaInput}
+                      onChange={(event) => setEtfEntryMaInput(event.target.value)}
+                      disabled={savingEtf || !etfEnabled}
+                    />
+                    <span>日</span>
+                  </div>
+                </Field>
+                <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`} className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="2" max="250" step="1"
+                      placeholder={String(etfExitMa)}
+                      value={etfExitMaInput}
+                      onChange={(event) => setEtfExitMaInput(event.target.value)}
+                      disabled={savingEtf || !etfEnabled}
+                    />
+                    <span>日</span>
+                  </div>
+                </Field>
+                <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`} className="t-spread-field">
+                  <div className="input-with-unit">
+                    <input
+                      type="number" min="0.1" max="99" step="0.1"
+                      placeholder={number(etfStop * 100, 1)}
+                      value={etfStopInput}
+                      onChange={(event) => setEtfStopInput(event.target.value)}
+                      disabled={savingEtf || !etfEnabled}
+                    />
+                    <span>%</span>
+                  </div>
+                </Field>
+                <button
+                  className="button primary t-spread-save"
+                  onClick={() => void saveEtfConfig()}
+                  disabled={savingEtf || !etfEnabled}
+                >
+                  {savingEtf ? <span className="button-spinner" /> : <Repeat2 size={15} />}
+                  {savingEtf ? '正在保存' : '保存 ETF'}
+                </button>
+              </div>
+              <p className="t-config-note">留空表示沿用当前值；ETF 不占 16 笔加仓序列，与个股互斥：个股建仓后 ETF 自动卖出。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
             </Panel>
           )}
 

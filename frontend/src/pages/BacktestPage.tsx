@@ -32,6 +32,12 @@ const fallbackConfig: StrategyConfig = {
   t_exit_cutoff: '14:50',
   max_holding_days: 22,
   holding_tp_override: 0.03,
+  etf_beta_enabled: false,
+  etf_symbol: 'sz.159915',
+  etf_position_pct: 0.2,
+  etf_entry_ma_days: 60,
+  etf_exit_ma_days: 20,
+  etf_hard_stop_pct: 0.06,
 };
 
 /** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
@@ -430,6 +436,11 @@ export default function BacktestPage() {
 
   const updateConfig = <K extends keyof StrategyConfig>(key: K, value: StrategyConfig[K]) => setConfig((current) => ({ ...current, [key]: value }));
   const metrics = report?.metrics;
+  // ETF beta 腿摘要（新报告才有；旧报告 undefined）。
+  const betaInfo = (report?.data_info?.beta as {
+    enabled?: boolean; symbol?: string; trade_count?: number; pnl?: number;
+    entry_date?: string | null; last_exit_date?: string | null; exit_reason?: string | null;
+  } | undefined) ?? null;
   // 明细条数：主报告只带 *_total；旧缓存报告回退到本地数组长度。
   const roundsTotal = report?.rounds_total ?? report?.rounds?.length ?? 0;
   const tradesTotal = report?.trades_total ?? report?.trades?.length ?? 0;
@@ -620,6 +631,53 @@ export default function BacktestPage() {
             </Field>
           </div>
           {mode === 'funnel' && (
+            <div className="etf-beta-panel">
+              <label className="switch-row">
+                <span>
+                  <strong>指数 beta 腿（创业板 ETF）</strong>
+                  <small>个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列</small>
+                </span>
+                <input type="checkbox" checked={Boolean(config.etf_beta_enabled)} onChange={(event) => updateConfig('etf_beta_enabled', event.target.checked)} />
+                <span className="switch" />
+              </label>
+              {config.etf_beta_enabled && (
+                <div className="form-grid t-params-grid">
+                  <Field label="ETF 代码" hint="默认创业板 ETF 159915" className="span-3">
+                    <select value={config.etf_symbol ?? 'sz.159915'} onChange={(event) => updateConfig('etf_symbol', event.target.value)}>
+                      <option value="sz.159915">sz.159915 · 创业板ETF易方达</option>
+                      <option value="sz.159952">sz.159952 · 创业板ETF广发</option>
+                      <option value="sz.159964">sz.159964 · 创业板ETF平安</option>
+                    </select>
+                  </Field>
+                  <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例" className="span-3">
+                    <div className="input-with-unit">
+                      <input type="number" min="1" max="100" step="1" value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(event) => updateConfig('etf_position_pct', Number(event.target.value) / 100)} />
+                      <span>%</span>
+                    </div>
+                  </Field>
+                  <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF" className="span-3">
+                    <div className="input-with-unit">
+                      <input type="number" min="2" max="250" step="1" value={config.etf_entry_ma_days ?? 60} onChange={(event) => updateConfig('etf_entry_ma_days', Number(event.target.value))} />
+                      <span>日</span>
+                    </div>
+                  </Field>
+                  <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF" className="span-3">
+                    <div className="input-with-unit">
+                      <input type="number" min="2" max="250" step="1" value={config.etf_exit_ma_days ?? 20} onChange={(event) => updateConfig('etf_exit_ma_days', Number(event.target.value))} />
+                      <span>日</span>
+                    </div>
+                  </Field>
+                  <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓" className="span-3">
+                    <div className="input-with-unit">
+                      <input type="number" min="0.1" max="99" step="0.1" value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(event) => updateConfig('etf_hard_stop_pct', Number(event.target.value) / 100)} />
+                      <span>%</span>
+                    </div>
+                  </Field>
+                </div>
+              )}
+            </div>
+          )}
+          {mode === 'funnel' && (
             <div className="funnel-mode-note">
               <Layers3 size={15} />
               <span>
@@ -778,6 +836,16 @@ export default function BacktestPage() {
                 <div><span className="risk-icon"><WalletCards size={17} /></span><div><small>最大资金投入</small><strong>{money(metrics.max_invested)}</strong></div><span className="risk-note">峰值占用</span></div>
                 <div><span className="risk-icon"><TrendingDown size={17} /></span><div><small>最大浮亏</small><strong className="negative">{money(metrics.max_float_loss)}</strong></div><span className="risk-note">未实现口径</span></div>
                 <div><span className="risk-icon"><RotateCcw size={17} /></span><div><small>做 T 净贡献</small><strong className={metrics.t_net_profit >= 0 ? 'positive' : 'negative'}>{signedMoney(metrics.t_net_profit)}</strong></div><span className="risk-note">{integer(metrics.t_trade_count)} 笔</span></div>
+                {betaInfo?.enabled && (
+                  <div>
+                    <span className="risk-icon"><Layers3 size={17} /></span>
+                    <div>
+                      <small>ETF beta 净贡献</small>
+                      <strong className={Number(betaInfo.pnl ?? 0) >= 0 ? 'positive' : 'negative'}>{signedMoney(Number(betaInfo.pnl ?? 0))}</strong>
+                    </div>
+                    <span className="risk-note">{integer(Number(betaInfo.trade_count ?? 0))} 笔 · {betaInfo.exit_reason || '持仓中'}</span>
+                  </div>
+                )}
                 <div><span className="risk-icon"><CircleDollarSign size={17} /></span><div><small>累计交易费用</small><strong>{money(metrics.total_fees)}</strong></div><span className="risk-note">五项分项相加，滑点另计</span></div>
                 <div><span className="risk-icon"><Activity size={17} /></span><div><small>平均资金敞口</small><strong>{percent(metrics.exposure)}</strong></div><span className="risk-note">权益占比</span></div>
               </div>

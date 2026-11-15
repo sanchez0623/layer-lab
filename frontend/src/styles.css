@@ -83,3 +83,10 @@
   .report-list-panel .pagination-bar { margin: 12px 12px 0; }
 }
 
+
+/* ETF beta 腿配置面板 */
+.etf-beta-panel { margin: 0 0 18px; padding: 14px 16px; background: #fafaf8; border: 1px solid #ecece9; border-radius: 10px; }
+.etf-beta-panel .switch-row { margin-bottom: 10px; }
+.etf-beta-panel .form-grid { margin-top: 4px; }
+.etf-beta-panel select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid #e2e2df; border-radius: 6px; background: #fff; font-size: 13px; }
+

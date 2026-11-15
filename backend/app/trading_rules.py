@@ -125,6 +125,16 @@ def _all_rules() -> dict[str, BoardRules]:
             odd_lot_threshold=100, limit_pct=0.10,
             cage_pct=0.02, cage_abs_floor=0.10, rule_basis=_RULE_BASIS,
         ),
+        # 交易所交易基金（ETF）：深市 159xxx / 沪市 51x/56x/58x。
+        # 股票型 ETF 为 T+1、100 份整数手；创业板 ETF 跟踪创业板，涨跌幅 ±20%
+        # （2020 年创业板注册制改革后同步放宽），其余 ETF ±10% 不在本期建模范围。
+        "ETF": BoardRules(
+            board="ETF", min_qty=100, step=100,
+            limit_order_cap=100_000.0, market_order_cap=50_000.0,
+            odd_lot_threshold=100, limit_pct=0.20,
+            cage_pct=0.02, cage_abs_floor=0.10,
+            rule_basis=f"依据{_HU_SHEN_ZHU_BAN}基金交易口径（T+1、100份整数手、创业板ETF ±20%）",
+        ),
     }
 
 
@@ -138,11 +148,26 @@ SYNTHETIC_FALLBACK = BoardRules(
 )
 
 
+ETF_CODE_PREFIXES = (
+    "159",                                    # 深市 ETF
+    "510", "511", "512", "513", "515", "516", "517", "518",  # 沪市 ETF
+    "560", "561", "562", "563", "588", "589",
+)
+
+
+def is_etf_code(symbol: str) -> bool:
+    """是否为场内 ETF（按 6 位代码段判定）。"""
+    text = str(symbol or "").strip().lower()
+    code = text.split(".")[-1]
+    return len(code) == 6 and code.isdigit() and code.startswith(ETF_CODE_PREFIXES)
+
+
 def board_of(symbol: str) -> str:
     """从标准代码（如 sh.688200 / sz.300001 / TEST）判定板块名；无板块返回空串。
 
     判定口径与 market.SymbolInfo.board 保持一致：B股/科创板/创业板按代码段，
-    主板按交易所前缀（sh.6xxxxx→沪市主板、sz.0xxxxx→深市主板）。合成标的返回空串。
+    主板按交易所前缀（sh.6xxxxx→沪市主板、sz.0xxxxx→深市主板），ETF 按代码段
+    单独识别。合成标的返回空串。
     北交所（bj 前缀 / 43/82/83/87/88/920）数据源未覆盖，未建模，返回空串走合成回退。
     """
     text = str(symbol or "").strip().lower()
@@ -150,6 +175,8 @@ def board_of(symbol: str) -> str:
     exchange = text.split(".", 1)[0] if "." in text else ""
     if not code.isdigit() or len(code) != 6:
         return ""
+    if is_etf_code(code):
+        return "ETF"
     if code.startswith("900"):
         return "沪市B股"
     if code.startswith("200"):
@@ -174,8 +201,8 @@ def rules_for(symbol: str) -> BoardRules:
 
 
 def all_board_rules() -> list[BoardRules]:
-    """六板块规则表，按科创板/创业板/沪深主板顺序输出（B股附后）。"""
-    order = ("科创板", "创业板", "沪市主板", "深市主板", "沪市B股", "深市B股")
+    """全部板块规则表，按科创板/创业板/沪深主板/ETF顺序输出（B股附后）。"""
+    order = ("科创板", "创业板", "沪市主板", "深市主板", "沪市B股", "深市B股", "ETF")
     table = _all_rules()
     return [table[name] for name in order]
 

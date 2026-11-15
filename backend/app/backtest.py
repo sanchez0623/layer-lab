@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -8,10 +9,14 @@ from pathlib import Path
 from statistics import mean, stdev
 from typing import Any, Callable
 
+from .beta_sleeve import entry_allowed, exit_reason, target_quantity
 from .broker import BrokerAccount
-from .domain import Bar, Fill, StrategyConfig, money, utc_now
+from .domain import Bar, Fill, OrderRequest, StrategyConfig, money, utc_now
+from .etf_data import cache_path as etf_cache_path
+from .etf_data import ensure_etf_bars
 from .screener import ScreenerConfig, run_screener
 from .strategy import LayeredTStrategy
+from .trading_rules import rules_for
 from .universe import BOARD_INDEX, UniverseStore
 
 
@@ -463,7 +468,205 @@ class FunnelRotationBacktest:
         self.max_float_loss = 0.0
         # 后台任务协作钩子（默认不传 = 与旧同步行为完全一致），语义同 BacktestEngine。
         self.hooks = hooks or {}
+        # 指数 beta 腿（ETF）：与个股轮动共用账户与同一份决策逻辑
+        # （beta_sleeve，模拟盘复用），ETF 成交记 BETA 账本，不占轮动序列。
+        self.etf_enabled = bool(self.config.etf_beta_enabled)
+        self.etf_symbol = self.config.etf_symbol
+        self.etf_bars: list[Bar] = []
+        self.etf_bars_by_date: dict[str, Bar] = {}
+        self._beta_fills: list[dict[str, Any]] = []
+        self._beta_entry_cost = 0.0
+        self._beta_entry_date: str | None = None
+        self._beta_last_exit_reason: str | None = None
+        self._beta_source = ""
         self._prepare_data()
+        if self.etf_enabled:
+            self._prepare_etf()
+
+    # -- ETF beta 腿数据 --------------------------------------------------
+
+    @staticmethod
+    def _data_dir() -> Path:
+        """与 main.py 同口径的数据目录（ETF 缓存落这里，双端共用）。"""
+        default = Path(__file__).resolve().parent.parent / "data"
+        return Path(os.environ.get("WB_DATA_DIR", str(default)))
+
+    def _prepare_etf(self) -> None:
+        """装入 ETF 日线：优先本地缓存，缺失时联网补采一次并落盘。"""
+        start = self.timeline[0] if self.timeline else None
+        end = self.timeline[-1] if self.timeline else None
+        path = etf_cache_path(self._data_dir(), self.etf_symbol)
+        fetcher = None
+        if getattr(self, "market", None) is not None and hasattr(self.market, "fetch_tencent_daily"):
+            exchange, code = self.etf_symbol.split(".", 1)
+
+            def fetcher(symbol: str, start_date: str | None, end_date: str | None):
+                bars = self.market.fetch_tencent_daily(
+                    f"{exchange}{code}", start_date or "2020-01-01", end_date or utc_now()[:10],
+                )
+                for bar in bars:
+                    bar.symbol = symbol
+                return bars
+
+        self.etf_bars, self._beta_source = ensure_etf_bars(
+            path, self.etf_symbol, start, end, fetcher=fetcher,
+        )
+        if not self.etf_bars:
+            self.etf_enabled = False
+            self.warnings.append(
+                f"ETF beta 腿已启用，但 {self.etf_symbol} 日线缓存与联网补采均不可用，本轮按关闭处理"
+            )
+            return
+        self.etf_bars_by_date = {bar.date: bar for bar in self.etf_bars}
+        if self._beta_source != "cache":
+            self.warnings.append(
+                f"ETF beta 腿：{self.etf_symbol} 日线本地缓存缺失，已联网补采并写入 "
+                f"{path.name}（之后回测只读本地缓存）"
+            )
+        self.warnings.append(
+            f"ETF beta 腿已启用：{self.etf_symbol}，仓位 {self.config.etf_position_pct * 100:.0f}% 权益，"
+            f"入场 指数>{self.config.etf_entry_ma_days}日线，出场 指数<{self.config.etf_exit_ma_days}日线 "
+            f"或 ETF 硬止损 {self.config.etf_hard_stop_pct * 100:.1f}%；个股空仓期间持有、选到个股后卖出换股"
+        )
+
+    def _etf_bar_for(self, day: str) -> Bar | None:
+        return self.etf_bars_by_date.get(day)
+
+    def _beta_index_history(self, day: str) -> list[Bar]:
+        """ETF 对应的板块指数日线（截至 day 收盘，含当日）。创业板 ETF → 创业板指。
+
+        用 ETF 跟踪指数做趋势信号，而不是用 ETF 自身价格算均线：指数不受 ETF
+        折溢价/分红影响，信号更稳；成交与止损仍用 ETF 真实价格。
+        """
+        bars = self.index_history.get("创业板") or []
+        return [bar for bar in bars if bar.date <= day]
+
+    def _has_pending_beta(self, side: str) -> bool:
+        return any(
+            order.purpose == "BETA" and order.side == side
+            and order.status in {"PENDING", "PARTIALLY_FILLED"}
+            for order in self.account.orders
+        )
+
+    def _beta_position(self):
+        return self.account.positions.get(self.etf_symbol)
+
+    def _beta_qty(self) -> int:
+        position = self._beta_position()
+        return position.beta_qty if position else 0
+
+    def _manage_beta(self, day: str) -> None:
+        """收盘后的 ETF 决策：先处理出场/换股，再处理空仓入场。"""
+        if not self.etf_enabled:
+            return
+        position = self._beta_position()
+        beta_qty = position.beta_qty if position else 0
+        index_bars = self._beta_index_history(day)
+        etf_bar = self._etf_bar_for(day)
+        if beta_qty > 0:
+            entry_cost = (
+                position.beta_cost / position.beta_qty if position.beta_qty else 0.0
+            )
+            last_price = etf_bar.close if etf_bar else position.last_price
+            reason = exit_reason(
+                index_bars, entry_cost, last_price,
+                exit_ma_days=self.config.etf_exit_ma_days,
+                hard_stop_pct=self.config.etf_hard_stop_pct,
+            )
+            if reason is None and (self._has_stock_target() or self.account.has_stock_position):
+                # 一旦选出个股（或个股已建仓），ETF 立即清仓让位：个股与 ETF 不允许同时持有。
+                reason = "选到个股换仓"
+            if reason and not self._has_pending_beta("SELL"):
+                self._beta_last_exit_reason = reason
+                self._submit_beta_sell(day, beta_qty, reason)
+            return
+        # 空仓（无个股、无 ETF）且指数趋势向上 → 建 beta 腿。
+        if self.account.has_stock_position or self._has_stock_target():
+            return
+        if self._has_pending_beta("BUY"):
+            return
+        if not entry_allowed(index_bars, self.config.etf_entry_ma_days,
+                             self.config.etf_exit_ma_days):
+            return
+        if etf_bar is None or etf_bar.close <= 0:
+            return
+        rules = rules_for(self.etf_symbol)
+        qty = target_quantity(
+            self.account.equity, self.config.etf_position_pct, etf_bar.close,
+            min_qty=rules.min_qty, step=rules.step,
+        )
+        if qty <= 0:
+            return
+        self._submit_beta_order(day, "BUY", qty, "指数趋势向上，空仓建 beta 腿")
+
+    def _has_stock_target(self) -> bool:
+        return bool(getattr(self, "_current_symbol", None))
+
+    def _submit_beta_sell(self, day: str, qty: int, reason: str) -> None:
+        self._submit_beta_order(day, "SELL", qty, reason)
+
+    def _submit_beta_order(self, day: str, side: str, qty: int, reason: str) -> None:
+        timestamp = datetime.fromisoformat(f"{day}T15:00:00")
+        request = OrderRequest(
+            symbol=self.etf_symbol, side=side, quantity=int(qty),
+            order_type="MARKET", purpose="BETA", execution_mode="NEXT_OPEN",
+            reason=reason,
+        )
+        for order in self.account.submit_split(request, timestamp):
+            self.events.append({
+                "date": timestamp.isoformat(), "type": "SIGNAL", "order_id": order.id,
+                "symbol": order.symbol, "side": order.side, "purpose": order.purpose,
+                "quantity": order.quantity, "reason": order.reason,
+                "status": order.status, "execution_mode": order.execution_mode,
+            })
+            if order.status == "REJECTED":
+                message = f"[ETF委托被拒] {order.symbol} {order.side} {order.quantity}份：{order.message}"
+                if message not in self.warnings:
+                    self.warnings.append(message)
+
+    def _handle_beta_fills(self, fills: list[Fill]) -> None:
+        sold = False
+        for fill in fills:
+            if fill.purpose != "BETA":
+                continue
+            self._beta_fills.append({
+                "date": fill.timestamp[:10], "side": fill.side,
+                "quantity": fill.quantity, "price": fill.price,
+                "fee": fill.total_fee, "realized_pnl": fill.realized_pnl,
+            })
+            if fill.side == "BUY":
+                if self._beta_entry_date is None:
+                    self._beta_entry_date = fill.timestamp[:10]
+                    self._beta_last_exit_reason = None
+            else:
+                sold = True
+            self.events.append({
+                "date": fill.timestamp, "type": "ETF_FILL", "fill_id": fill.id,
+                "side": fill.side, "quantity": fill.quantity, "price": fill.price,
+                "fee": fill.total_fee, "reason": self._beta_last_exit_reason,
+            })
+        if sold and self._beta_qty() == 0:
+            self.events.append({
+                "date": fills[-1].timestamp, "type": "ETF_EXIT",
+                "reason": self._beta_last_exit_reason or "ETF 清仓",
+            })
+            self._beta_entry_date = None
+
+    def _beta_summary(self) -> dict[str, Any]:
+        buys = [item for item in self._beta_fills if item["side"] == "BUY"]
+        sells = [item for item in self._beta_fills if item["side"] == "SELL"]
+        pnl = money(sum(item["realized_pnl"] for item in sells))
+        return {
+            "enabled": self.etf_enabled, "symbol": self.etf_symbol,
+            "source": self._beta_source,
+            "trade_count": len(self._beta_fills),
+            "buy_count": len(buys), "sell_count": len(sells),
+            "entry_date": buys[0]["date"] if buys else None,
+            "last_exit_date": sells[-1]["date"] if sells else None,
+            "exit_reason": self._beta_last_exit_reason,
+            "pnl": pnl,
+            "position_qty": self._beta_qty(),
+        }
 
     # -- 数据准备 ---------------------------------------------------------
 
@@ -731,6 +934,9 @@ class FunnelRotationBacktest:
         self._screen_by_symbol = dict(resume_state.get("screen_by_symbol", {}))
         self._trail = list(resume_state.get("trail", []))
         self._round_just_closed = bool(resume_state.get("round_just_closed", False))
+        self._beta_fills = list(resume_state.get("beta_fills", []))
+        self._beta_entry_date = resume_state.get("beta_entry_date")
+        self._beta_last_exit_reason = resume_state.get("beta_last_exit_reason")
         self.rounds = list(resume_state.get("rounds", []))
         self.current_round = resume_state.get("current_round")
         self.events = list(resume_state.get("events", []))
@@ -757,6 +963,14 @@ class FunnelRotationBacktest:
             used_dates.append(date_str)
             # cancel_previous=False：隔夜 NEXT_OPEN 挂单要保留到次日开盘撮合（与 BacktestEngine 一致）。
             self.account.new_day(date_str, cancel_previous=False)
+            # ETF beta 腿：先撮合 ETF 的隔夜单（卖出回款优先到账，再给个股建仓用）。
+            if self.etf_enabled:
+                etf_bar = self._etf_bar_for(date_str)
+                if etf_bar is not None:
+                    beta_fills = self.account.process_bar(etf_bar, modes={"NEXT_OPEN"})
+                    self._handle_beta_fills(beta_fills)
+                    self.account.mark(self.etf_symbol, etf_bar.close)
+            self._current_symbol = current_symbol
             submitted_signal = False
             if self._round_just_closed:
                 # 前一交易日轮次闭合：清掉持有标的，今日收盘重新选股（rotation v2 语义）。
@@ -827,7 +1041,8 @@ class FunnelRotationBacktest:
                             entry["round"] = round_id
                             break
             # 清仓后（无持仓）重新选股；与 rotation v2「清仓后重新选股」一致
-            flat = not any(position.total_qty > 0 for position in self.account.positions.values())
+            # 个股空仓（不含 ETF beta 腿）：ETF 持有期间仍要每天跑筛选，选到个股后换仓。
+            flat = not self.account.has_stock_position
             has_live_order = any(order.status in {"PENDING", "PARTIALLY_FILLED"} for order in self.account.orders)
             if current_symbol is not None and flat and self.current_round is None:
                 if has_live_order or submitted_signal:
@@ -882,9 +1097,13 @@ class FunnelRotationBacktest:
                         "date": date_str, "type": "WAIT",
                         "reason": "L0 大盘门关闭" if not snapshot["gate_open"] else "L0–L4 后无候选，空仓等待",
                     })
+            # ETF beta 腿收盘决策：个股空仓且指数趋势向上→持有/建仓；选到个股→卖 ETF 换股。
+            self._current_symbol = current_symbol
+            self._manage_beta(date_str)
             # 净值曲线点
             held = current_symbol if current_symbol else None
             position = self.account.position(held) if held else None
+            beta_position = self._beta_position()
             equity_curve.append({
                 "date": date_str, "equity": self.account.equity, "cash": self.account.cash,
                 "market_value": self.account.market_value,
@@ -892,6 +1111,9 @@ class FunnelRotationBacktest:
                 "drawdown": 0.0,
                 "position_qty": position.total_qty if position else 0,
                 "symbol": held,
+                "beta_qty": beta_position.beta_qty if beta_position else 0,
+                "beta_value": money(beta_position.beta_qty * beta_position.last_price) if beta_position else 0.0,
+                "beta_symbol": self.etf_symbol if (beta_position and beta_position.beta_qty) else None,
             })
             if self.hooks.get("on_progress"):
                 self.hooks["on_progress"](len(used_dates), total, date_str, self._engine_snapshot(
@@ -920,6 +1142,8 @@ class FunnelRotationBacktest:
             "current_symbol": current_symbol, "flat_wait_days": flat_wait_days,
             "intraday_by_date_keys": intraday_by_date_keys,
             "t_trade_count": t_trade_count,
+            "beta_fills": self._beta_fills, "beta_entry_date": self._beta_entry_date,
+            "beta_last_exit_reason": self._beta_last_exit_reason,
         }
 
     def _finalize(self, equity_curve: list[dict[str, Any]], used_dates: list[str],
@@ -981,6 +1205,10 @@ class FunnelRotationBacktest:
             buy_hold_return,
         )
         screening_count = len(self._trail)
+        beta = self._beta_summary()
+        if beta["enabled"]:
+            metrics["beta_pnl"] = beta["pnl"]
+            metrics["beta_trade_count"] = beta["trade_count"]
         data_info = {
             "mode": "funnel_rotation", "boards": list(self.screener_config.boards),
             "universe_codes": len(self.candidates), "codes_with_daily": self.codes_with_daily,
@@ -993,6 +1221,7 @@ class FunnelRotationBacktest:
             "screening_count": screening_count,
             "reference_symbol": reference_symbol,
             "rotation_trail": self._trail,
+            "beta": beta,
         }
         return {
             "id": str(uuid.uuid4()), "name": self.name, "status": status,
