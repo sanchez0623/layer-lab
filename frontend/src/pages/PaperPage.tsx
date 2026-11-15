@@ -777,13 +777,13 @@ export default function PaperPage() {
           {account.auto_strategy && (
             <Panel className="mb-3" title="做 T 止盈与截止" description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；到 T+1 尾盘截止时间仍未止盈则无条件强平。改动保存后下一根 K 线起生效。" action={<Badge tone="indigo">即时生效</Badge>}>
               <div className="grid gap-2.5 lg:grid-cols-2">
-                <div className="flex items-end gap-2">
+                <div className="flex items-start gap-2">
                   <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="flex-1"><UnitInput unit="%" min={0} max={100} step={0.1} placeholder={number(tNetSpread * 100, 2)} value={tSpreadInput} onChange={setTSpreadInput} disabled={savingTSpread} /></Field>
-                  <Button size="sm" onClick={() => void saveTNetSpread()} disabled={savingTSpread || tSpreadInput === ''}>{savingTSpread ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTSpread ? '正在保存' : '保存止盈'}</Button>
+                  <Button size="sm" className="mt-[26px]" onClick={() => void saveTNetSpread()} disabled={savingTSpread || tSpreadInput === ''}>{savingTSpread ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTSpread ? '正在保存' : '保存止盈'}</Button>
                 </div>
-                <div className="flex items-end gap-2">
+                <div className="flex items-start gap-2">
                   <Field label="T+1 截止时间" hint={`当前 ${tCutoff}（HH:MM，尾盘强平）`} className="flex-1"><Input type="time" step={300} value={tCutoffInput} onChange={(event) => setTCutoffInput(event.target.value)} disabled={savingTCutoff} /></Field>
-                  <Button size="sm" onClick={() => void saveTCutoff()} disabled={savingTCutoff || tCutoffInput === ''}>{savingTCutoff ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTCutoff ? '正在保存' : '保存截止'}</Button>
+                  <Button size="sm" className="mt-[26px]" onClick={() => void saveTCutoff()} disabled={savingTCutoff || tCutoffInput === ''}>{savingTCutoff ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTCutoff ? '正在保存' : '保存截止'}</Button>
                 </div>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
@@ -792,10 +792,10 @@ export default function PaperPage() {
 
           {account.auto_strategy && (
             <Panel className="mb-3" title="超期降阈止盈" description={`持有交易日数达到阈值后，价格轨/账户轨止盈阈值从 15% 降为设定值。当前：${holdingDays != null && holdingTp != null ? `持有 ≥${holdingDays} 日 → ${number(holdingTp * 100, 2)}%` : '关闭'}。两项需同时填写，保存后下一根 K 线起生效。`} action={<Badge tone={holdingDays != null && holdingTp != null ? 'indigo' : 'neutral'}>{holdingDays != null && holdingTp != null ? '已开启' : '关闭'}</Badge>}>
-              <div className="grid items-end gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid items-start gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
                 <Field label="超期天数（交易日）" hint="持有 ≥N 个交易日后降阈"><UnitInput unit="日" min={1} max={250} step={1} placeholder={holdingDays != null ? String(holdingDays) : '22'} value={holdingDaysInput} onChange={setHoldingDaysInput} disabled={savingHolding} /></Field>
                 <Field label="降阈后止盈（%）" hint="价格轨/账户轨同时降为该值"><UnitInput unit="%" min={0} max={100} step={0.1} placeholder={holdingTp != null ? number(holdingTp * 100, 2) : '3'} value={holdingTpInput} onChange={setHoldingTpInput} disabled={savingHolding} /></Field>
-                <Button size="sm" onClick={() => void saveHoldingOverride()} disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}>{savingHolding ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingHolding ? '正在保存' : '保存降阈'}</Button>
+                <Button size="sm" className="sm:mt-[26px]" onClick={() => void saveHoldingOverride()} disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}>{savingHolding ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingHolding ? '正在保存' : '保存降阈'}</Button>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
             </Panel>
@@ -809,9 +809,11 @@ export default function PaperPage() {
                 <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfEntryMa)} value={etfEntryMaInput} onChange={setEtfEntryMaInput} disabled={savingEtf || !etfEnabled} /></Field>
                 <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfExitMa)} value={etfExitMaInput} onChange={setEtfExitMaInput} disabled={savingEtf || !etfEnabled} /></Field>
                 <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`}><UnitInput unit="%" min={0.1} max={99} step={0.1} placeholder={number(etfStop * 100, 1)} value={etfStopInput} onChange={setEtfStopInput} disabled={savingEtf || !etfEnabled} /></Field>
-                <Button size="sm" className="self-end" onClick={() => void saveEtfConfig()} disabled={savingEtf || !etfEnabled}>{savingEtf ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingEtf ? '正在保存' : '保存 ETF'}</Button>
               </div>
-              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值；ETF 不占 16 笔加仓序列，与个股互斥：个股建仓后 ETF 自动卖出。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={() => void saveEtfConfig()} disabled={savingEtf || !etfEnabled}>{savingEtf ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingEtf ? '正在保存' : '保存 ETF'}</Button>
+                <p className="text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值；ETF 不占 16 笔加仓序列，与个股互斥：个股建仓后 ETF 自动卖出。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
+              </div>
             </Panel>
           )}
 

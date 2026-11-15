@@ -50,12 +50,10 @@ export function Panel({
 
 export function Field({ label, hint, children, className = '' }: { label: string; hint?: string; children: ReactNode; className?: string }) {
   return (
-    <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
-      <span className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5 text-[13px] font-medium text-foreground/80">
-        <span className="min-w-0">{label}</span>
-        {hint && <small className="min-w-0 max-w-full break-words text-right text-[11px] font-normal leading-4 text-muted-foreground">{hint}</small>}
-      </span>
+    <div className={cn('flex min-w-0 flex-col gap-1', className)}>
+      <span className="block text-[13px] font-medium text-foreground/80">{label}</span>
       {children}
+      {hint && <small className="block text-[10px] leading-4 text-muted-foreground">{hint}</small>}
     </div>
   );
 }
