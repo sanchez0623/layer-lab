@@ -189,6 +189,26 @@ export interface EquityPoint {
   position_qty: number;
 }
 
+/** 回测报告「每月盈亏」：按自然月汇总的账户权益变动（后端 monthly_breakdown 口径）。 */
+export interface MonthlyPnl {
+  /** 自然月，格式 YYYY-MM。 */
+  month: string;
+  /** 基期权益（首月为初始资金，其余为上月末权益）。 */
+  start_equity: number;
+  /** 当月末权益。 */
+  end_equity: number;
+  /** 当月盈亏（含未实现盈亏与手续费）。 */
+  pnl: number;
+  /** 当月收益率 = pnl / start_equity。 */
+  return_rate: number;
+  /** 当月实际回测交易日数。 */
+  trading_days: number;
+  /** 月内最大回撤（正数，0 表示无回撤）。 */
+  max_drawdown: number;
+  /** 当月末累计收益率（相对初始资金）。 */
+  cumulative_return: number;
+}
+
 export interface ReportMetrics {
   initial_cash: number;
   final_equity: number;
@@ -211,6 +231,8 @@ export interface ReportMetrics {
   exposure: number;
   max_float_loss: number;
   buy_hold_return: number;
+  /** 每月盈亏。旧报告由后端读取时按权益曲线补算；极端情况下缺失则前端隐藏该面板。 */
+  monthly?: MonthlyPnl[];
 }
 
 export interface Trade {

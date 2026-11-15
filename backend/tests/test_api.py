@@ -47,6 +47,13 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     assert report["status"] == "COMPLETED"
     assert report["metrics"]["initial_cash"] == 4_000_000
     assert len(report["equity_curve"]) == 320
+    # 每月盈亏：月度切分覆盖全部净值点，累计盈亏等于期末权益 - 初始资金（分位四舍五入内）。
+    monthly = report["metrics"]["monthly"]
+    assert monthly and sum(item["trading_days"] for item in monthly) == len(report["equity_curve"])
+    assert monthly[-1]["month"] == report["equity_curve"][-1]["date"][:7]
+    assert sum(item["pnl"] for item in monthly) == pytest.approx(
+        report["metrics"]["final_equity"] - report["metrics"]["initial_cash"], abs=0.05,
+    )
     assert report["data_info"]["actual_granularity"] == "daily_only"
     assert report["data_info"]["is_synthetic"] is True
     assert any("降级" in item for item in report["warnings"])

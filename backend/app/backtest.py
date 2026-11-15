@@ -98,6 +98,57 @@ _GLOBAL_WARNING_MARKERS = (
 )
 
 
+def monthly_breakdown(
+    equity_curve: list[dict[str, Any]], initial_cash: float,
+) -> list[dict[str, Any]]:
+    """按自然月汇总账户盈亏，供回测报告「每月盈亏」面板。
+
+    口径（与 performance_metrics 的净值口径一致，含未实现盈亏与手续费）：
+    - ``pnl``：当月最后一个交易日权益 - 上月最后一个交易日权益（首月以初始资金为基期），
+      即「当月账户权益变动」，不把换仓当外部现金流；
+    - ``return_rate``：``pnl / 基期权益``；
+    - ``trading_days``：当月实际回测交易日数（净值曲线点数）；
+    - ``max_drawdown``：当月内从峰值（峰值基期取进入当月时的权益）起的最大回撤，正数；
+    - ``cumulative_return``：当月末权益 / 初始资金 - 1。
+
+    净值曲线按日期升序，顺序扫描天然按月切分；空曲线返回空列表（不抛错，
+    供 ``performance_metrics([])`` 之外的读路径兜底）。
+    """
+    if not equity_curve:
+        return []
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for item in equity_curve:
+        month = str(item.get("date") or "")[:7]
+        if len(month) == 7 and month[4] == "-":
+            buckets.setdefault(month, []).append(item)
+    base_cash = float(initial_cash)
+    previous_equity = base_cash
+    result: list[dict[str, Any]] = []
+    for month in sorted(buckets):
+        points = buckets[month]
+        end_equity = float(points[-1]["equity"])
+        pnl = end_equity - previous_equity
+        peak = previous_equity
+        month_drawdown = 0.0
+        for point in points:
+            equity = float(point["equity"])
+            peak = max(peak, equity)
+            if peak > 0:
+                month_drawdown = max(month_drawdown, 1 - equity / peak)
+        result.append({
+            "month": month,
+            "start_equity": money(previous_equity),
+            "end_equity": money(end_equity),
+            "pnl": money(pnl),
+            "return_rate": pnl / previous_equity if previous_equity > 0 else 0.0,
+            "trading_days": len(points),
+            "max_drawdown": month_drawdown,
+            "cumulative_return": end_equity / base_cash - 1 if base_cash > 0 else 0.0,
+        })
+        previous_equity = end_equity
+    return result
+
+
 def performance_metrics(
     equity_curve: list[dict[str, Any]], initial_cash: float,
     rounds: list[dict[str, Any]], trades: list[dict[str, Any]],
@@ -147,6 +198,7 @@ def performance_metrics(
         "t_trade_count": sum(1 for item in trades if item["purpose"] == "T"),
         "max_invested": money(max_invested), "exposure": exposure,
         "max_float_loss": money(max_float_loss), "buy_hold_return": buy_hold_return,
+        "monthly": monthly_breakdown(equity_curve, initial_cash),
     }
 
 

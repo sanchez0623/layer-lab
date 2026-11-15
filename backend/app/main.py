@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .backtest import BacktestEngine, FunnelRotationBacktest, run_backtest, run_funnel_backtest
+from .backtest import BacktestEngine, FunnelRotationBacktest, monthly_breakdown, run_backtest, run_funnel_backtest
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
 from .beta_sleeve import entry_allowed, exit_reason, reentry_cooldown_ready, target_quantity
 from .broker import BrokerAccount
@@ -329,6 +329,22 @@ def _slim_records(report: dict) -> dict:
     return report
 
 
+def _ensure_monthly(report: dict) -> dict:
+    """旧报告没有 ``metrics.monthly``：读取时按权益曲线补算，让历史报告也有「每月盈亏」。
+
+    新报告在 ``performance_metrics`` 里已算好并随 payload 落库；这里只兜底旧 payload，
+    避免为了一个派生统计去批量重写数据库。初始资金优先取 metrics，缺失时回退配置快照。
+    """
+    metrics = report.get("metrics")
+    if not isinstance(metrics, dict) or "monthly" in metrics:
+        return report
+    base = metrics.get("initial_cash") or (report.get("config") or {}).get("initial_cash") or 0.0
+    monthly = monthly_breakdown(report.get("equity_curve") or [], float(base))
+    if monthly:
+        metrics["monthly"] = monthly
+    return report
+
+
 # 用途（purpose）的中文展示标签，与前端 lib/format.ts purposeLabel 口径一致；
 # 用途过滤既接受原始枚举值（PERMANENT/T/BETA，大小写不敏感），也接受这里的中文标签。
 _PURPOSE_LABELS: dict[str, str] = {
@@ -419,7 +435,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.1.2",
+        version="2.1.3",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1588,7 +1604,7 @@ def create_app() -> FastAPI:
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
-        return _slim_records(_slim_rotation_trail(report))
+        return _slim_records(_slim_rotation_trail(_ensure_monthly(report)))
 
     @application.get("/api/backtests/{backtest_id}/rotation-trail")
     def backtest_rotation_trail(

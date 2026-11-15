@@ -4,7 +4,7 @@ import {
   CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
-  Area, CartesianGrid, ComposedChart, Line, ResponsiveContainer, Tooltip, XAxis, YAxis,
+  Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from 'recharts';
 import { api, downloadBacktestCsv } from '../lib/api';
 import {
@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
-import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, Order, Paginated, RecordsPage, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
+import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -109,6 +109,12 @@ const roundNumber = (round: Round, keys: string[]): number | undefined => {
   return typeof value === 'number' ? value : value === undefined ? undefined : Number(value);
 };
 
+/** 月度最大回撤按「负号 + 百分比」展示；0 不加负号。 */
+const drawdownLabel = (value: number): string => (value > 0 ? `-${percent(value)}` : percent(0));
+
+/** 图表 X 轴月份压缩为 YY-MM（2026-01 → 26-01），满轴时避免标签相互挤压。 */
+const shortMonth = (month: string): string => month.slice(2);
+
 function UnitInput({
   value, onChange, unit, min, max, step, type = 'number',
 }: {
@@ -169,6 +175,9 @@ export default function BacktestPage() {
   const [recordPage, setRecordPage] = useState(1);
   const [recordPageSize, setRecordPageSize] = useState(20);
   const [recordLoading, setRecordLoading] = useState(false);
+  // 每月盈亏表前端分页：月度数据由后端 metrics.monthly 下发（派生自权益曲线），无需额外请求。
+  const [monthPage, setMonthPage] = useState(1);
+  const [monthPageSize, setMonthPageSize] = useState(12);
   // 成交明细筛选：symbolDraft 是输入框即时值（防抖后提交进 tradeFilter），
   // purpose / side 由下拉直接提交；三者都是空串表示「全部」。
   const [symbolDraft, setSymbolDraft] = useState('');
@@ -534,6 +543,23 @@ export default function BacktestPage() {
   const visibleWarnings = (report?.warnings ?? []).filter(
     (warning) => !String(warning).includes('T+1可卖数量不足'),
   );
+  // 每月盈亏：后端 monthly_breakdown 按自然月汇总（旧报告由读取端点按权益曲线补算）。
+  const monthly = useMemo<MonthlyPnl[]>(() => metrics?.monthly ?? [], [metrics]);
+  const monthlySummary = useMemo(() => {
+    const wins = monthly.filter((item) => item.pnl > 0).length;
+    const losses = monthly.filter((item) => item.pnl < 0).length;
+    const best = monthly.reduce<MonthlyPnl | null>((acc, item) => (!acc || item.pnl > acc.pnl ? item : acc), null);
+    const worst = monthly.reduce<MonthlyPnl | null>((acc, item) => (!acc || item.pnl < acc.pnl ? item : acc), null);
+    return {
+      wins, losses, best, worst,
+      winRate: monthly.length ? wins / monthly.length : 0,
+      average: monthly.length ? monthly.reduce((sum, item) => sum + item.pnl, 0) / monthly.length : 0,
+    };
+  }, [monthly]);
+  const monthPageCount = Math.max(1, Math.ceil(monthly.length / monthPageSize));
+  // 切换每页条数后旧页码可能越界：渲染前收敛到最后一页，避免出现空表。
+  const safeMonthPage = Math.min(monthPage, monthPageCount);
+  const monthRows = monthly.slice((safeMonthPage - 1) * monthPageSize, safeMonthPage * monthPageSize);
   const rotationTrail = useMemo<RotationTrailItem[]>(() => trailData?.items ?? [], [trailData]);
   // 换票轨迹行展开：查看该选股日的逐轮决策日志（为什么开门/关门/空仓/旁路几只）+ 漏斗计数。
   const [expandedTrails, setExpandedTrails] = useState<Set<string>>(new Set());
@@ -546,7 +572,7 @@ export default function BacktestPage() {
   };
 
   // 切换报告时回到第一页（同一 report 内翻页不重置）。
-  useEffect(() => { setTrailPage(1); }, [report?.id]);
+  useEffect(() => { setTrailPage(1); setMonthPage(1); }, [report?.id]);
 
   useEffect(() => {
     if (!report || !isFunnel) { setTrailData(null); return; }
@@ -944,6 +970,53 @@ export default function BacktestPage() {
                     <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-muted/60 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground"><Gauge className="mt-0.5 size-3 shrink-0" /><span>风险表现需结合数据粒度、成交假设与样本区间共同判断。</span></div>
                   </Panel>
                 </div>
+
+                {monthly.length > 0 && (
+                  <Panel className="mb-3" title="每月盈亏" description={`按自然月汇总账户权益变动（含未实现盈亏与手续费）· 共 ${monthly.length} 个月 · 红涨绿跌`} action={<CalendarDays className="size-4" />}>
+                    <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                      <span>盈利月 <strong className="font-mono text-destructive">{monthlySummary.wins}</strong></span>
+                      <span>亏损月 <strong className="font-mono text-success">{monthlySummary.losses}</strong></span>
+                      <span>月胜率 <strong className="font-mono text-foreground">{percent(monthlySummary.winRate)}</strong></span>
+                      <span>月均盈亏 <strong className={cn('font-mono', monthlySummary.average >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(monthlySummary.average)}</strong></span>
+                      <span>最佳月 <strong className="font-mono text-destructive">{monthlySummary.best?.month || '—'} {monthlySummary.best ? signedMoney(monthlySummary.best.pnl) : ''}</strong></span>
+                      <span>最差月 <strong className="font-mono text-success">{monthlySummary.worst?.month || '—'} {monthlySummary.worst ? signedMoney(monthlySummary.worst.pnl) : ''}</strong></span>
+                    </div>
+                    <div className="h-[220px] w-full">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={monthly} margin={{ top: 8, right: 4, left: 4, bottom: 0 }}>
+                          <CartesianGrid stroke="#ececf1" strokeDasharray="3 4" vertical={false} />
+                          <XAxis dataKey="month" tickFormatter={shortMonth} tick={{ fill: '#85858f', fontSize: 10 }} axisLine={false} tickLine={false} minTickGap={28} dy={6} />
+                          <YAxis tickFormatter={(value: number) => `${(value / 10000).toFixed(0)}万`} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} width={52} domain={['auto', 'auto']} />
+                          <ReferenceLine y={0} stroke="#c9c9d2" strokeWidth={1} />
+                          <Tooltip cursor={{ fill: '#f4f4f7' }} content={({ active, payload }) => {
+                            const item = active && payload?.length ? (payload[0].payload as MonthlyPnl) : null;
+                            return item ? <div className="rounded-lg border bg-popover p-3 text-xs shadow-md"><strong className="block text-foreground">{item.month}</strong>{[['净盈亏', signedMoney(item.pnl)], ['收益率', signedPercent(item.return_rate)], ['基期权益', money(item.start_equity, 0)], ['月末权益', money(item.end_equity, 0)], ['交易日', `${integer(item.trading_days)} 天`], ['当月最大回撤', drawdownLabel(item.max_drawdown)], ['累计收益率', signedPercent(item.cumulative_return)]].map(([k, v]) => <div key={String(k)} className="mt-1 flex items-center justify-between gap-4"><span className="text-muted-foreground">{k}</span><b className="font-mono text-foreground">{v}</b></div>)}</div> : null;
+                          }} />
+                          <Bar dataKey="pnl" maxBarSize={28} radius={[2, 2, 0, 0]}>
+                            {monthly.map((item) => <Cell key={item.month} fill={item.pnl >= 0 ? '#cc454c' : '#138064'} />)}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>柱高＝当月净盈亏（元），向上盈利 / 向下亏损</span><span>月度盈亏基于每月最后一个交易日权益，不含外部资金进出</span></div>
+                    <Table className="mt-2">
+                      <TableHeader><TableRow><TableHead>月份</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead className="text-right">收益率</TableHead><TableHead className="text-right">交易日</TableHead><TableHead className="text-right">当月最大回撤</TableHead><TableHead className="text-right">累计收益率</TableHead></TableRow></TableHeader>
+                      <TableBody>
+                        {monthRows.map((item) => (
+                          <TableRow key={item.month}>
+                            <TableCell><strong className="font-mono text-[12px]">{item.month}</strong></TableCell>
+                            <TableCell className={cn('text-right font-mono text-[12px]', item.pnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(item.pnl)}</TableCell>
+                            <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(item.return_rate)}</TableCell>
+                            <TableCell className="text-right font-mono text-[12px]">{integer(item.trading_days)}</TableCell>
+                            <TableCell className="text-right font-mono text-[12px] text-muted-foreground">{drawdownLabel(item.max_drawdown)}</TableCell>
+                            <TableCell className={cn('text-right font-mono text-[12px]', item.cumulative_return >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(item.cumulative_return)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    <div className="pt-3"><PaginationBar page={safeMonthPage} pageSize={monthPageSize} total={monthly.length} totalPages={monthPageCount} onPageChange={setMonthPage} onPageSizeChange={(size) => { setMonthPageSize(size); setMonthPage(1); }} pageSizeOptions={[12, 24, 36, 60]} /></div>
+                  </Panel>
+                )}
 
                 <Panel className="mb-3" title="数据血缘与口径" description="本报告基于后端实际返回的数据元信息" action={<Layers3 className="size-4" />}>
                   <div className="mb-2 flex flex-wrap gap-1.5"><Badge>{reportDailySource} 日线</Badge>{reportIntradaySource && <Badge tone="indigo">{reportIntradaySource} 5分钟</Badge>}{reportIndexSource && <Badge tone="green">指数大盘门</Badge>}{reportSynthetic && <SyntheticNotice compact />}</div>

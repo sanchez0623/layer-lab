@@ -192,6 +192,9 @@ def test_funnel_backtest_completes_with_round_and_screen(tmp_path):
         assert "after_l1" in closed["screen"]["funnel"]
         assert closed["chg20d_at_select"] is not None
     assert report["data_info"]["screening_count"] >= 1
+    # 每月盈亏：月度切分覆盖全部净值点（漏斗引擎同样走 performance_metrics）。
+    monthly = report["metrics"]["monthly"]
+    assert monthly and sum(item["trading_days"] for item in monthly) == len(report["equity_curve"])
     # JSON 安全
     import json
     json.dumps(report, ensure_ascii=False, allow_nan=False)
