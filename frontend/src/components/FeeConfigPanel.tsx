@@ -55,11 +55,11 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
 
   return (
     <div className="rounded-xl border bg-muted/25 p-3">
-      <div className="grid gap-3 lg:grid-cols-[1fr_220px]">
-        <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-2 lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
           {FEE_FIELDS.map((field) => (
-            <label className="flex min-w-0 flex-col gap-1" key={field.key}>
-              <span className="text-[12px] font-medium text-foreground/80">{field.label}</span>
+            <label className="flex min-w-0 max-w-full flex-col gap-1 sm:max-w-[180px]" key={field.key}>
+              <span className="truncate text-[12px] font-medium text-foreground/80" title={field.label}>{field.label}</span>
               <div className="relative">
                 <Input
                   type="number"
@@ -69,11 +69,11 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
                   value={value[field.key]}
                   onChange={(event) => update(field.key, event.target.value)}
                   aria-label={field.label}
-                  className="pr-9"
+                  className="h-8 pr-9"
                 />
                 <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{field.unit === '万分之' ? '‱' : field.unit}</span>
               </div>
-              <small className="text-[10px] leading-4 text-muted-foreground">{field.note}</small>
+              <small className="truncate text-[10px] leading-4 text-muted-foreground" title={field.note}>{field.note}</small>
             </label>
           ))}
         </div>
@@ -86,14 +86,14 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
         </aside>
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button type="button" size="sm" onClick={() => void run('save')} disabled={busy !== null}>
+        <Button type="button" size="sm" className="h-8" onClick={() => void run('save')} disabled={busy !== null}>
           {busy === 'save' ? <Loader2 className="animate-spin" /> : <Save />}保存为全局默认
         </Button>
-        <Button type="button" variant="outline" size="sm" onClick={() => void run('reset')} disabled={busy !== null}>
+        <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => void run('reset')} disabled={busy !== null}>
           <RotateCcw />恢复默认
         </Button>
         {accountId && (
-          <Button type="button" variant="outline" size="sm" onClick={() => void run('apply')} disabled={busy !== null}>
+          <Button type="button" variant="outline" size="sm" className="h-8" onClick={() => void run('apply')} disabled={busy !== null}>
             <Settings2 />应用到当前账户
           </Button>
         )}
@@ -103,3 +103,5 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
     </div>
   );
 }
+
+

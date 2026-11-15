@@ -16,7 +16,7 @@ import FeeConfigPanel from '../components/FeeConfigPanel';
 import ScreenerConfigPanel from '../components/ScreenerConfigPanel';
 import PaginationBar from '../components/PaginationBar';
 import { ConfirmDialog } from '../components/ConfirmDialog';
-import { Badge, EmptyState, ErrorBanner, Field, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
+import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -585,48 +585,47 @@ export default function BacktestPage() {
                 </div>
               </div>
 
-              <div className="grid gap-2.5">
+              <div className="grid gap-2">
                 <SwitchRow label="启用做 T" description="可选，不占用 16 笔序列" checked={config.enable_t} onCheckedChange={(checked) => updateConfig('enable_t', checked)} />
 
-                {config.enable_t && (
-                  <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-                    <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T" className="lg:col-span-2">
-                      <UnitInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
-                    </Field>
-                    <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平" className="lg:col-span-2">
-                      <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
-                    </Field>
-                  </div>
-                )}
-
-                <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-                  <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降到右侧阈值；留空=关闭" className="lg:col-span-2">
+                <FormGrid>
+                  {config.enable_t && (
+                    <>
+                      <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T">
+                        <UnitInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
+                      </Field>
+                      <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平">
+                        <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
+                      </Field>
+                    </>
+                  )}
+                  <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降阈；留空=关闭">
                     <UnitInput unit="交易日" min={1} max={250} step={1} value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
                   </Field>
-                  <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值；与左侧天数需同时填写" className="lg:col-span-2">
+                  <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值">
                     <UnitInput unit="%" min={0} max={100} step={0.1} value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
                   </Field>
-                </div>
+                </FormGrid>
 
                 {mode === 'funnel' && (
                   <div className="rounded-xl border bg-muted/25 p-3">
                     <SwitchRow label="指数 beta 腿（创业板 ETF）" description="个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列" checked={Boolean(config.etf_beta_enabled)} onCheckedChange={(checked) => updateConfig('etf_beta_enabled', checked)} />
                     {config.etf_beta_enabled && (
-                      <div className="mt-2.5 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-                        <Field label="ETF 代码" hint="默认创业板 ETF 159915" className="lg:col-span-2">
+                      <FormGrid className="mt-2">
+                        <Field label="ETF 代码" hint="默认创业板 ETF 159915">
                           <SelectField value={config.etf_symbol ?? 'sz.159915'} onValueChange={(value) => updateConfig('etf_symbol', value)} options={[
                             { value: 'sz.159915', label: 'sz.159915 · 创业板ETF易方达' },
                             { value: 'sz.159952', label: 'sz.159952 · 创业板ETF广发' },
                             { value: 'sz.159964', label: 'sz.159964 · 创业板ETF平安' },
                           ]} />
                         </Field>
-                        <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例" className="lg:col-span-2">
+                        <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例">
                           <UnitInput unit="%" min={1} max={100} step={1} value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(value) => updateConfig('etf_position_pct', Number(value) / 100)} />
                         </Field>
                         <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
                         <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
                         <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓"><UnitInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
-                      </div>
+                      </FormGrid>
                     )}
                   </div>
                 )}
@@ -638,12 +637,12 @@ export default function BacktestPage() {
                   </div>
                 )}
 
-                <div className={cn('grid gap-2.5', mode === 'funnel' ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-2 lg:grid-cols-4')}>
-                  <Field label="实验名称" className={mode === 'funnel' ? 'sm:col-span-2' : 'sm:col-span-2'}>
+                <FormGrid>
+                  <Field label="实验名称" wide>
                     <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" />
                   </Field>
                   {mode === 'single' && (
-                    <Field label="主数据集" hint="quan_parquet / baostock 日线" className="sm:col-span-2">
+                    <Field label="主数据集" hint="quan_parquet / baostock 日线" wide>
                       <SelectField
                         value={datasetId}
                         onValueChange={(value) => {
@@ -681,7 +680,7 @@ export default function BacktestPage() {
                       </Field>
                     </>
                   )}
-                </div>
+                </FormGrid>
 
                 {mode === 'funnel' && <ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff />}
 
@@ -689,12 +688,12 @@ export default function BacktestPage() {
                   <span className="inline-flex items-center gap-2"><Gauge className="size-3.5" />交易摩擦与撮合参数</span>{advanced ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
                 </button>
                 {advanced && (
-                  <div className="grid gap-2.5">
+                  <div className="grid gap-2">
                     <FeeConfigPanel value={fees} onChange={setFees} />
-                    <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
+                    <FormGrid>
                       <Field label="滑点"><UnitInput unit="bps" min={0} step={1} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
                       <Field label="成交量参与上限"><UnitInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
-                    </div>
+                    </FormGrid>
                   </div>
                 )}
               </div>
@@ -708,10 +707,10 @@ export default function BacktestPage() {
                   ) : <span>请选择主数据集以查看数据边界</span>}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" type="button" onClick={() => void applyToPaper()} disabled={applying || jobActive}>
+                  <Button variant="outline" size="sm" className="h-8" type="button" onClick={() => void applyToPaper()} disabled={applying || jobActive}>
                     {applying ? <><Loader2 className="animate-spin" />正在应用</> : <><ArrowDownToLine />应用到模拟盘</>}
                   </Button>
-                  <Button size="sm" type="submit" disabled={jobActive || (mode === 'single' && !datasetId)}>
+                  <Button size="sm" className="h-8" type="submit" disabled={jobActive || (mode === 'single' && !datasetId)}>
                     {jobActive ? <><Loader2 className="animate-spin" />正在运行回测</> : <><Play />运行回测</>}
                   </Button>
                 </div>
@@ -954,3 +953,5 @@ export default function BacktestPage() {
     </div>
   );
 }
+
+

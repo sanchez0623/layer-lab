@@ -10,11 +10,11 @@ import { Switch } from '@/components/ui/switch';
 
 export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string; title: string; description: string; actions?: ReactNode }) {
   return (
-    <div className="mb-4 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+    <div className="mb-3 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
       <div className="min-w-0">
-        {eyebrow && <div className="mb-1.5 font-mono text-xs font-medium tracking-[0.14em] text-primary">{eyebrow}</div>}
-        <h1 className="text-3xl font-semibold tracking-[-0.025em] text-foreground">{title}</h1>
-        <p className="mt-1.5 max-w-[680px] text-sm leading-7 text-muted-foreground">{description}</p>
+        {eyebrow && <div className="mb-1 font-mono text-[11px] font-medium tracking-[0.14em] text-primary">{eyebrow}</div>}
+        <h1 className="text-[28px] font-semibold leading-tight tracking-[-0.025em] text-foreground">{title}</h1>
+        <p className="mt-1 max-w-[680px] text-[13px] leading-6 text-muted-foreground">{description}</p>
       </div>
       {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
     </div>
@@ -35,27 +35,47 @@ export function Panel({
   return (
     <Card className={cn('gap-0 py-0 shadow-xs', className)}>
       {(title || description || action) && (
-        <CardHeader className="mb-3 flex flex-row items-start justify-between gap-3 space-y-0 px-4 pt-4">
+        <CardHeader className="mb-2.5 flex flex-row items-start justify-between gap-3 space-y-0 px-3.5 pt-3.5">
           <div className="min-w-0">
             {title && <CardTitle className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">{title}</CardTitle>}
-            {description && <CardDescription className="mt-1 text-[13px] leading-6">{description}</CardDescription>}
+            {description && <CardDescription className="mt-0.5 text-[12px] leading-5">{description}</CardDescription>}
           </div>
           {action && <div className="flex shrink-0 items-center gap-2 text-muted-foreground">{action}</div>}
         </CardHeader>
       )}
-      {flush ? children : <CardContent className="px-4 pb-4">{children}</CardContent>}
+      {flush ? children : <CardContent className="px-3.5 pb-3.5">{children}</CardContent>}
     </Card>
   );
 }
 
-export function Field({ label, hint, children, className = '' }: { label: string; hint?: string; children: ReactNode; className?: string }) {
+export function Field({
+  label, hint, children, className = '', wide = false,
+}: {
+  label: string;
+  hint?: string;
+  children: ReactNode;
+  className?: string;
+  /** 名称 / 数据集等需要展示长文本的字段；默认紧凑宽度。 */
+  wide?: boolean;
+}) {
   return (
-    <div className={cn('flex min-w-0 flex-col gap-1', className)}>
-      <span className="block text-[13px] font-medium text-foreground/80">{label}</span>
+    <div className={cn(
+      'flex w-full min-w-0 shrink-0 flex-col gap-1 [&_[data-slot=input]]:h-8 [&_[data-slot=select-trigger]]:h-8',
+      wide ? 'sm:max-w-[360px]' : 'sm:max-w-[200px]',
+      className,
+    )}>
+      <span className="block h-5 truncate text-[13px] font-medium leading-5 text-foreground/80" title={label}>{label}</span>
       {children}
-      {hint && <small className="block text-[10px] leading-4 text-muted-foreground">{hint}</small>}
+      {hint
+        ? <small className="block h-4 truncate text-[10px] leading-4 text-muted-foreground" title={hint}>{hint}</small>
+        : <small className="block h-4" aria-hidden="true" />}
     </div>
   );
+}
+
+/** 紧凑型表单栅格：固定宽度字段左对齐排布，不再把每个输入框拉满整列。 */
+export function FormGrid({ children, className = '' }: { children: ReactNode; className?: string }) {
+  return <div className={cn('flex flex-wrap items-start gap-x-4 gap-y-2', className)}>{children}</div>;
 }
 
 export function Loading({ label = '正在读取数据' }: { label?: string }) {
@@ -130,17 +150,17 @@ export function TableEmpty({ colSpan, message = '暂无记录' }: { colSpan: num
 
 export function Metric({ label, value, sub, tone = '', icon }: { label: string; value: ReactNode; sub?: ReactNode; tone?: 'positive' | 'negative' | ''; icon?: ReactNode }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1 rounded-xl border border-border bg-card px-3.5 py-3 shadow-xs">
-      <div className="flex items-center justify-between gap-2 text-xs font-medium text-muted-foreground">{label}{icon}</div>
-      <div className={cn('font-mono text-xl font-medium tracking-tight text-foreground', tone === 'positive' && 'text-destructive', tone === 'negative' && 'text-success')}>{value}</div>
-      {sub && <div className="truncate text-[11px] text-muted-foreground">{sub}</div>}
+    <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border bg-card px-3 py-2.5 shadow-xs">
+      <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">{label}{icon}</div>
+      <div className={cn('font-mono text-lg font-medium tracking-tight text-foreground', tone === 'positive' && 'text-destructive', tone === 'negative' && 'text-success')}>{value}</div>
+      {sub && <div className="truncate text-[10px] text-muted-foreground">{sub}</div>}
     </div>
   );
 }
 
 export function MetricGrid({ children, columns = 4, className = '' }: { children: ReactNode; columns?: 4 | 6; className?: string }) {
   return (
-    <div className={cn('mb-3 grid gap-2.5', columns === 6 ? 'grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6' : 'grid-cols-1 sm:grid-cols-2 md:grid-cols-4', className)}>
+    <div className={cn('mb-2.5 grid gap-2', columns === 6 ? 'grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6' : 'grid-cols-1 sm:grid-cols-2 md:grid-cols-4', className)}>
       {children}
     </div>
   );
@@ -168,7 +188,7 @@ export function SelectField({
 }) {
   return (
     <Select value={value} onValueChange={(next) => onValueChange(String(next ?? ''))} disabled={disabled}>
-      <SelectTrigger className={cn('w-full', className)} aria-label={ariaLabel}>
+      <SelectTrigger className={cn('h-8 w-full', className)} aria-label={ariaLabel}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent>

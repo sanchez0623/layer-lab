@@ -19,10 +19,10 @@ interface Props {
 
 function Param({ label, hint, children }: { label: string; hint: string; children: ReactNode }) {
   return (
-    <label className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-[12px] font-medium text-foreground/80">{label}</span>
-      {children}
-      <small className="text-[10px] leading-4 text-muted-foreground">{hint}</small>
+    <label className="flex min-w-0 flex-col gap-1">
+      <span className="truncate text-[12px] font-medium text-foreground/80" title={label}>{label}</span>
+      <div className="max-w-full [&_[data-slot=input]]:h-8 sm:max-w-[170px]">{children}</div>
+      <small className="truncate text-[10px] leading-4 text-muted-foreground" title={hint}>{hint}</small>
     </label>
   );
 }
@@ -142,9 +142,9 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
         </div>
       </div>
 
-      <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         {stages.map((stage) => (
-          <section key={stage.tag} className="flex min-w-0 flex-col gap-2.5 rounded-lg border bg-card p-2.5 shadow-xs">
+          <section key={stage.tag} className="flex min-w-0 flex-col gap-2 rounded-lg border bg-card p-2 shadow-xs">
             <header className="flex items-center gap-2">
               <Badge tone="indigo">{stage.tag}</Badge>
               <div><strong className="block text-[12px]">{stage.title}</strong><small className="block text-[10px] text-muted-foreground">{stage.note}</small></div>
@@ -161,3 +161,5 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
     </div>
   );
 }
+
+

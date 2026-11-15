@@ -6,7 +6,7 @@ import {
 import { toast } from 'sonner';
 import { api } from '../lib/api';
 import { cleanSymbolInput, dateTime, displaySymbol, integer, shortDate } from '../lib/format';
-import { Badge, EmptyState, ErrorBanner, Field, Loading, PageHeader, Panel, SyntheticNotice } from '../components/Ui';
+import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, PageHeader, Panel, SyntheticNotice } from '../components/Ui';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -102,7 +102,7 @@ export default function DataPage() {
 
       <div className="mb-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
         {stats.map(({ icon: Icon, tone, label, value, note }) => (
-          <Card key={label} className="flex-row items-center gap-3 px-4 py-3.5 shadow-xs">
+          <Card key={label} className="flex-row items-center gap-2.5 px-3.5 py-3 shadow-xs">
             <span className={`grid size-10 shrink-0 place-items-center rounded-lg ${tone}`}><Icon className="size-5" /></span>
             <div className="min-w-0">
               <small className="block text-[11px] text-muted-foreground">{label}</small>
@@ -113,9 +113,9 @@ export default function DataPage() {
         ))}
       </div>
 
-      <div className="mb-3 grid gap-3 xl:grid-cols-2">
+      <div className="mb-2.5 grid gap-2.5 xl:grid-cols-2">
         <Panel title="接入行情数据" description="输入标的与区间，后端直接拉取并缓存" action={<Search className="size-4" />}>
-          <div className="grid gap-3 sm:grid-cols-2">
+          <FormGrid>
             <Field label="标的代码" hint="6 位数字，自动识别沪深">
               <Input value={symbol} onChange={(event) => setSymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} />
             </Field>
@@ -134,15 +134,15 @@ export default function DataPage() {
                 <Input type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} className="pl-8" />
               </div>
             </Field>
-            <label className="flex items-center justify-between gap-4 rounded-lg border bg-card px-3 py-2.5 sm:col-span-2">
+            <label className="flex w-full items-center justify-between gap-4 rounded-lg border bg-card px-3 py-2.5 sm:w-[260px] sm:self-start">
               <span>
                 <strong className="block text-[13px] font-medium text-foreground">同时接入腾讯 5 分钟</strong>
                 <small className="mt-0.5 block text-[11px] text-muted-foreground">用于盘中路径与模拟盘</small>
               </span>
               <Switch checked={includeIntraday} onCheckedChange={setIncludeIntraday} />
             </label>
-          </div>
-          <Button className="mt-3 w-full" onClick={() => void fetchMarket()} disabled={fetching}>
+          </FormGrid>
+          <Button className="mt-2 w-fit min-w-[220px]" onClick={() => void fetchMarket()} disabled={fetching}>
             {fetching ? <><RefreshCw className="animate-spin" />正在拉取行情</> : <><Search />接入 历史日线 + 腾讯</>}
           </Button>
           <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-muted/60 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
@@ -223,3 +223,5 @@ export default function DataPage() {
     </div>
   );
 }
+
+

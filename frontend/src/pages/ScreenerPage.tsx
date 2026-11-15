@@ -5,7 +5,7 @@ import {
 import { toast } from 'sonner';
 import { ApiError, api } from '../lib/api';
 import { dateTime, displaySymbol, integer, money, number, percent, shortDate, signedPercent } from '../lib/format';
-import { Badge, EmptyState, ErrorBanner, Field, Loading, PageHeader, Panel, TableEmpty } from '../components/Ui';
+import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, PageHeader, Panel, TableEmpty } from '../components/Ui';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -313,7 +313,7 @@ export default function ScreenerPage() {
           <EmptyState compact icon={<Database className="size-6" />} title="尚未读取覆盖数据" description="后端 universe.db 覆盖信息不可用；请确认服务已启动后重试。" action={<Button variant="outline" size="sm" onClick={() => void load()}>重试</Button>} />
         ) : (
           <>
-            <div className="grid gap-2.5 sm:grid-cols-2 xl:grid-cols-4">
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
               {[
                 { icon: Database, tone: 'text-primary bg-accent', label: '覆盖代码', value: integer(coverage.codes), note: '双创 universe' },
                 { icon: Layers3, tone: 'text-foreground bg-muted', label: '日线行数', value: integer(coverage.rows), note: `${shortDate(coverage.start)} → ${shortDate(coverage.end)}` },
@@ -372,7 +372,7 @@ export default function ScreenerPage() {
           })}
           <span className="text-[10px] text-muted-foreground">板块决定 L0 使用哪个指数；至少保留一个。</span>
         </div>
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <FormGrid>
           <Field label="A1 20日跌幅阈值" hint="Chg20D < 阈值"><UnitInput value={percentValue(config.chg20_max)} onChange={(value) => setRatio('chg20_max', value)} unit="%" step={1} /></Field>
           <Field label="距52周高回撤" hint="Close < High250 × (1 - 回撤)"><UnitInput value={percentValue(config.week52_drawdown)} onChange={(value) => setRatio('week52_drawdown', value)} unit="%" min={0} step={1} /></Field>
           <Field label="L3 当日成交额门槛" hint="当日 amount ≥"><UnitInput value={Number((config.min_amount / 1e8).toFixed(2))} onChange={(value) => setYi('min_amount', value)} unit="亿" min={0} step={0.5} /></Field>
@@ -380,15 +380,15 @@ export default function ScreenerPage() {
           <Field label="当日涨幅上限" hint="L2 超过即否决"><UnitInput value={percentValue(config.day_change_max)} onChange={(value) => setRatio('day_change_max', value)} unit="%" step={1} /></Field>
           <Field label="上市最少交易日" hint="L2 上市不足否决"><Input type="number" min={1} step={1} value={config.min_listing_sessions} onChange={(event) => patchConfig({ min_listing_sessions: Math.max(1, Number(event.target.value) || 1) })} /></Field>
           <Field label="L4 深筛上限" hint="最多逐只做财务深筛"><Input type="number" min={0} step={1} value={config.max_deep_checks} onChange={(event) => patchConfig({ max_deep_checks: Math.max(0, Number(event.target.value) || 0) })} /></Field>
-          <label className="flex items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2">
+          <label className="flex w-full items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2 sm:w-[240px] sm:self-start">
             <span><strong className="block text-[12px] font-medium">L2 财务深筛</strong><small className="block text-[10px] text-muted-foreground">亏损且营收&lt;1亿 / 净资产为负</small></span>
             <Switch checked={config.enable_fundamental_veto} onCheckedChange={(checked) => patchConfig({ enable_fundamental_veto: checked })} />
           </label>
-          <label className="flex items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2">
+          <label className="flex w-full items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2 sm:w-[240px] sm:self-start">
             <span><strong className="block text-[12px] font-medium">叠加实时快照</strong><small className="block text-[10px] text-muted-foreground">腾讯批量快照重算 20日与当日涨幅</small></span>
             <Switch checked={includeRealtime} onCheckedChange={setIncludeRealtime} />
           </label>
-        </div>
+        </FormGrid>
         <div className="mt-3 flex flex-col gap-2 border-t pt-3 sm:flex-row sm:items-center sm:justify-between">
           <span className="text-[10px] leading-4 text-muted-foreground">首轮建议关闭实时快照，用最近收盘口径复现 L1 计数。{notes.length > 0 ? ` 后端说明：${notes[0]}` : ''}</span>
           <Button size="sm" onClick={() => void runScreen()} disabled={running || config.boards.length === 0}>
@@ -451,7 +451,7 @@ export default function ScreenerPage() {
             {!first ? (
               <EmptyState compact icon={<Filter className="size-6" />} title="本轮没有可用第一名" description="可能是 L0 关门、L2 全部否决或 L4 深筛逐只否决；请查看候选池与 warnings。" />
             ) : (
-              <div className="grid gap-3 lg:grid-cols-[1fr_auto] lg:items-center">
+              <div className="grid gap-2 lg:grid-cols-[1fr_auto] lg:items-center">
                 <div className="flex flex-col gap-2.5">
                   <div className="flex items-center gap-3">
                     <div className="rounded-lg bg-accent px-3 py-2 text-center"><strong className="block font-mono text-xl text-accent-foreground">{displaySymbol(first.code)}</strong><span className="block font-mono text-[10px] text-muted-foreground">{first.code}</span></div>
@@ -580,3 +580,4 @@ export default function ScreenerPage() {
     </div>
   );
 }
+
