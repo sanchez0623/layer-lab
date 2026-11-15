@@ -402,13 +402,19 @@ def test_funnel_etf_cache_symbol_is_normalized(tmp_path, monkeypatch):
     assert fills and all(event.get("symbol") in (None, "sz.159915") for event in fills)
 
 
-def test_funnel_etf_beta_disabled_by_default(tmp_path, monkeypatch):
+def test_funnel_etf_beta_can_be_disabled(tmp_path, monkeypatch):
+    """显式关闭 beta 腿：报告标注 disabled、零成交（默认值是开启）。"""
     monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
     store = _build_store(tmp_path / "u.db", gate_up=True)
-    report = _run(store)
+    report = _run(store, config=StrategyConfig(etf_beta_enabled=False))
     beta = report["data_info"]["beta"]
     assert beta["enabled"] is False
     assert beta["trade_count"] == 0
+
+
+def test_strategy_config_enables_etf_beta_by_default():
+    """StrategyConfig 默认开启指数 beta 腿（回测页 / 新建模拟账户共用此默认）。"""
+    assert StrategyConfig().etf_beta_enabled is True
 
 
 def test_funnel_etf_sells_once_stock_selected(tmp_path, monkeypatch):

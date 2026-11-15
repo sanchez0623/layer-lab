@@ -164,7 +164,9 @@ class StrategyConfig:
     # ---- 指数 beta 腿（ETF）------------------------------------------------
     # 个股轮动空仓期间，用创业板 ETF 承接 beta，避免「大门关闭 → 整段上涨 0 收益」。
     # 与个股互斥：选到股票时先卖 ETF 再建个股仓；ETF 期间不占用轮动序列。
-    etf_beta_enabled: bool = False
+    # 默认开启：回测页 / 新建模拟账户均直接带 beta 腿（仍可显式关闭）。
+    # 老账户在创建时已快照 config，不受本默认值变化影响（架构原则 3）。
+    etf_beta_enabled: bool = True
     etf_symbol: str = "sz.159915"           # 创业板 ETF（易方达）
     # 仓位占「当前账户权益」的比例（0~1）。0.2 = 20%。
     etf_position_pct: float = 0.20

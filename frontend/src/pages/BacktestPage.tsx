@@ -26,10 +26,10 @@ import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
-import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
+import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
-import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade } from '../types';
+import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, Dataset, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -45,7 +45,8 @@ const fallbackConfig: StrategyConfig = {
   t_exit_cutoff: '14:50',
   max_holding_days: 22,
   holding_tp_override: 0.03,
-  etf_beta_enabled: false,
+  // 指数 beta 腿默认开启（需求：空仓期默认用创业板 ETF 承接 beta，可手动关闭）。
+  etf_beta_enabled: true,
   etf_symbol: 'sz.159915',
   etf_position_pct: 0.2,
   etf_entry_ma_days: 60,
@@ -99,6 +100,19 @@ const fallbackScreener: ScreenerConfig = {
   max_deep_checks: 10,
   blacklist: [],
 };
+
+/** 草稿/报告配置合并：只覆盖表单已有的键（null 也保留，如「超期降阈天数清空=关闭」）。 */
+const mergeKnown = <T extends object>(base: T, saved?: Partial<T> | null): T => {
+  if (!saved) return base;
+  const source = saved as Record<string, unknown>;
+  const next = { ...base } as Record<string, unknown>;
+  Object.keys(base).forEach((key) => {
+    if (key in source && source[key] !== undefined) next[key] = source[key];
+  });
+  return next as T;
+};
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}/;
 
 const roundValue = (round: Round, keys: string[]): unknown => {
   for (const key of keys) if (round[key] !== undefined && round[key] !== null) return round[key];
@@ -212,12 +226,22 @@ export default function BacktestPage() {
   const [reportListLoading, setReportListLoading] = useState(false);
   const [reportListVersion, setReportListVersion] = useState(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // 回测表单草稿：服务端持久化，改完自动保存，进入页面优先恢复（不再被默认值重置）。
+  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [resettingDraft, setResettingDraft] = useState(false);
+  const draftHydratedRef = useRef(false);
+  const lastSavedDraftRef = useRef('');
 
-  const loadInitial = async () => {
+  const loadInitial = async (resetForm = false) => {
     setLoading(true);
     setError('');
     try {
-      const [datasetResult, defaults] = await Promise.all([api.datasets(), api.strategyDefaults()]);
+      const [datasetResult, defaults, draftResponse] = await Promise.all([
+        api.datasets(),
+        api.strategyDefaults(),
+        // 草稿读取失败不阻塞页面：退回服务端默认配置。
+        api.backtestConfigDraft().catch(() => ({ draft: null, updated_at: null })),
+      ]);
       setDatasets(datasetResult);
       // 重挂载时重新挂到仍在跑的后台作业（导航离开后服务端继续跑），避免丢失进度条。
       // 除 RUNNING 外还要重挂「可续跑但没在跑」的作业（刷新前进程重启/取消/失败）：
@@ -241,22 +265,58 @@ export default function BacktestPage() {
         }
       } catch { /* 作业列表不可用时静默忽略，不影响页面初始化 */ }
       const defaultConfig = defaults.config || defaults;
+      const draft = resetForm ? null : draftResponse.draft;
       // 超期降阈默认预填 22 天 / 3%（后端默认 None = 关闭，UI 侧给推荐值，可由用户改空关闭）。
       // ETF 入场保护同理：后端 StrategyConfig 默认 0（关闭，保证旧账户/接口调用方行为不变），
       // 回测表单默认预填推荐值 8% / 5 个交易日，用户可改成 0 关闭。
-      setConfig((current) => ({
-        ...current, ...defaultConfig,
+      // 有服务端草稿时，草稿字段覆盖默认值（null 也保留，如清空超期降阈=关闭）。
+      const baseConfig: StrategyConfig = {
+        ...fallbackConfig,
+        ...defaultConfig,
+        etf_beta_enabled: defaultConfig.etf_beta_enabled ?? true,
         max_holding_days: defaultConfig.max_holding_days ?? 22,
         holding_tp_override: defaultConfig.holding_tp_override ?? 0.03,
         etf_entry_max_deviation: defaultConfig.etf_entry_max_deviation || 0.08,
         etf_reentry_cooldown_days: defaultConfig.etf_reentry_cooldown_days || 5,
-      }));
-      setFees(defaults.fees || strategyToFeeConfig(defaultConfig));
-      if (defaults.initial_cash) setInitialCash(defaults.initial_cash);
+      };
+      const baseFees = defaults.fees || strategyToFeeConfig(defaultConfig);
+      const restoredFees = draft?.fees ? { ...baseFees, ...draft.fees } : baseFees;
+      setConfig({ ...mergeKnown(baseConfig, draft?.config), ...feeConfigToStrategyPatch(restoredFees) });
+      setFees(restoredFees);
+      setScreener(mergeKnown(fallbackScreener, draft?.screener));
+      setInitialCash(
+        typeof draft?.initial_cash === 'number' ? draft.initial_cash : (defaults.initial_cash ?? 4_000_000),
+      );
+      if (draft) {
+        if (draft.mode) setMode(draft.mode);
+        if (draft.name !== undefined) setName(draft.name);
+        if (draft.start_date && ISO_DATE.test(draft.start_date)) setStartDate(draft.start_date.slice(0, 10));
+        if (draft.end_date && ISO_DATE.test(draft.end_date)) setEndDate(draft.end_date.slice(0, 10));
+        const available = (id?: string | null) => Boolean(id && datasetResult.some((item) => item.id === id));
+        if (available(draft.dataset_id)) setDatasetId(draft.dataset_id as string);
+        if (available(draft.intraday_dataset_id)) setIntradayId(draft.intraday_dataset_id as string);
+        if (available(draft.index_dataset_id)) setIndexId(draft.index_dataset_id as string);
+      } else if (resetForm) {
+        // 「恢复默认」：表单字段一并回到出厂状态，再由下方数据集默认选择逻辑补齐。
+        setMode('funnel');
+        setName('分层双账本策略回测');
+        setStartDate('');
+        setEndDate('');
+        setDatasetId('');
+        setIntradayId('');
+        setIndexId('');
+        setAdvanced(false);
+      }
       // 漏斗轮动回测：用后端选股默认阈值打底（失败不阻塞，沿用本地 fallbackScreener）。
+      // 有草稿时草稿字段优先级最高，避免异步默认值把用户改过的阈值覆盖掉。
       api.screenerDefaults().then((screenerDefaults) => {
         if (screenerDefaults?.config) {
-          setScreener((current) => ({ ...current, ...screenerDefaults.config, enable_fundamental_veto: false }));
+          setScreener((current) => ({
+            ...current,
+            ...screenerDefaults.config,
+            ...(draft?.screener ?? {}),
+            enable_fundamental_veto: false,
+          }));
         }
       }).catch(() => undefined);
       const daily = datasetResult.find((item) => item.timeframe === 'daily' && item.source === 'baostock')
@@ -314,6 +374,8 @@ export default function BacktestPage() {
           // 忽略损坏的 sessionStorage 数据
         }
       }
+      // 初始化完成前不自动保存，避免把默认值写回覆盖已有草稿。
+      draftHydratedRef.current = true;
       // 报告列表按需在「回测报告」tab 加载，进入页面不再自动拉取最新报告（大 payload 只在打开详情时读取）。
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '初始化失败，请检查后端服务。');
@@ -323,6 +385,36 @@ export default function BacktestPage() {
   };
 
   useEffect(() => { void loadInitial(); }, []);
+
+  // 回测表单草稿自动保存：任何改动 700ms 后把整份表单 PUT 到服务端。
+  // 初始金额暂不合法（用户清空重输）时跳过，避免每敲一个字符报一次 422。
+  useEffect(() => {
+    if (!draftHydratedRef.current) return;
+    if (!Number.isFinite(initialCash) || initialCash <= 0) return;
+    const payload: BacktestConfigDraft = {
+      mode,
+      name: name.trim(),
+      initial_cash: initialCash,
+      start_date: startDate || null,
+      end_date: endDate || null,
+      dataset_id: datasetId || null,
+      intraday_dataset_id: intradayId || null,
+      index_dataset_id: indexId || null,
+      config: stripFeeFields(config),
+      fees,
+      screener,
+    };
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastSavedDraftRef.current) return;
+    setDraftStatus('saving');
+    const timer = window.setTimeout(() => {
+      api.saveBacktestConfigDraft(payload).then(() => {
+        lastSavedDraftRef.current = serialized;
+        setDraftStatus('saved');
+      }).catch(() => setDraftStatus('error'));
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [mode, name, initialCash, startDate, endDate, datasetId, intradayId, indexId, config, fees, screener]);
 
   const selectedDataset = datasets.find((item) => item.id === datasetId);
   const intradayOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === '5m');
@@ -422,6 +514,21 @@ export default function BacktestPage() {
       setError(cause instanceof Error ? cause.message : '应用到模拟盘失败，请确认模拟盘服务可用。');
     } finally {
       setApplying(false);
+    }
+  };
+
+  /** 恢复默认：删除服务端草稿并重新载入默认配置（数据集/日期也回到默认选择）。 */
+  const resetConfigDraft = async () => {
+    setResettingDraft(true);
+    setError('');
+    try {
+      await api.resetBacktestConfigDraft();
+      await loadInitial(true);
+      toast.success('已恢复默认回测配置。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '恢复默认配置失败，请稍后重试。');
+    } finally {
+      setResettingDraft(false);
     }
   };
 
@@ -536,6 +643,31 @@ export default function BacktestPage() {
   };
 
   const updateConfig = <K extends keyof StrategyConfig>(key: K, value: StrategyConfig[K]) => setConfig((current) => ({ ...current, [key]: value }));
+
+  /** 报告详情「带入回测」：把报告快照里的参数回填到运行表单（含日期/费率/选股阈值/数据集）。 */
+  const applyReportToForm = () => {
+    if (!report) return;
+    const saved = report.config as ReportConfig;
+    const reportFees = strategyToFeeConfig(saved);
+    const funnel = String(report.data_info?.mode) === 'funnel_rotation';
+    setConfig({ ...mergeKnown(fallbackConfig, saved), ...feeConfigToStrategyPatch(reportFees) });
+    setFees(reportFees);
+    if (saved.screener) setScreener(mergeKnown(fallbackScreener, saved.screener));
+    setMode(funnel ? 'funnel' : 'single');
+    setName(report.name || '回测');
+    if (typeof saved.initial_cash === 'number') setInitialCash(saved.initial_cash);
+    if (saved.start_date && ISO_DATE.test(saved.start_date)) setStartDate(saved.start_date.slice(0, 10));
+    if (saved.end_date && ISO_DATE.test(saved.end_date)) setEndDate(saved.end_date.slice(0, 10));
+    if (!funnel) {
+      const available = (id?: string | null) => Boolean(id && datasets.some((item) => item.id === id));
+      if (saved.dataset_id && available(saved.dataset_id)) setDatasetId(saved.dataset_id);
+      setIntradayId(available(saved.intraday_dataset_id) ? (saved.intraday_dataset_id as string) : '');
+      setIndexId(available(saved.index_dataset_id) ? (saved.index_dataset_id as string) : '');
+    }
+    setAdvanced(false);
+    setWorkspaceTab('run');
+    toast.success(`已把报告「${report.name}」的参数带入回测配置，可直接运行或微调。`);
+  };
   const metrics = report?.metrics;
   // ETF beta 腿摘要（新报告才有；旧报告 undefined）。
   const betaInfo = (report?.data_info?.beta as {
@@ -920,8 +1052,19 @@ export default function BacktestPage() {
                   ) : selectedDataset ? (
                     <><span>{selectedDataset.rows.toLocaleString('zh-CN')} 行</span><i className="size-1 rounded-full bg-border" /><span>{selectedDataset.timeframe} 粒度</span><i className="size-1 rounded-full bg-border" /><span>{shortDate(selectedDataset.start)} — {shortDate(selectedDataset.end)}</span>{selectedDataset.is_synthetic && <SyntheticNotice compact />}</>
                   ) : <span>请选择主数据集以查看数据边界</span>}
+                  {draftStatus !== 'idle' && (
+                    <>
+                      <i className="size-1 rounded-full bg-border" />
+                      <span className={cn(draftStatus === 'error' && 'text-destructive')}>
+                        {draftStatus === 'saving' ? '配置保存中…' : draftStatus === 'saved' ? '配置已自动保存' : '配置保存失败，改动仍保留在页面'}
+                      </span>
+                    </>
+                  )}
                 </div>
                 <div className="flex flex-wrap gap-2">
+                  <Button variant="ghost" size="sm" className="h-8" type="button" onClick={() => void resetConfigDraft()} disabled={resettingDraft || jobActive}>
+                    {resettingDraft ? <><Loader2 className="animate-spin" />正在恢复</> : <><RotateCcw />恢复默认</>}
+                  </Button>
                   <Button variant="outline" size="sm" className="h-8" type="button" onClick={() => void applyToPaper()} disabled={applying || jobActive}>
                     {applying ? <><Loader2 className="animate-spin" />正在应用</> : <><ArrowDownToLine />应用到模拟盘</>}
                   </Button>
@@ -967,6 +1110,7 @@ export default function BacktestPage() {
                     <p className="mt-1 text-[12px] text-muted-foreground">生成于 {dateTime(report.created_at)} · 初始资金 {money(metrics.initial_cash, 0)}</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={applyReportToForm}><FlaskConical />带入回测</Button>
                     <Button variant="outline" size="sm" onClick={() => void exportCsv('trades')} disabled={exporting !== null}><ArrowDownToLine />{exporting === 'trades' ? '导出中' : '导出成交'}</Button>
                     <Button variant="outline" size="sm" onClick={() => void exportCsv('orders')} disabled={exporting !== null}><ArrowDownToLine />{exporting === 'orders' ? '导出中' : '导出委托'}</Button>
                     <Button variant="destructive" size="sm" onClick={() => setPendingDelete({ id: report.id, name: report.name })} disabled={deletingId === report.id}><Trash2 />{deletingId === report.id ? '删除中' : '删除报告'}</Button>

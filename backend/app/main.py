@@ -50,6 +50,9 @@ from .trading_rules import NOT_MODELED, all_board_rules, board_of, price_cage_bo
 BASE_DIR = Path(__file__).resolve().parents[1]
 FEE_SETTING_KEY = "fee_config_v1"
 FEE_CONFIG_VERSION = "v1"
+# 回测页表单草稿：用户改过的策略参数 / 费率 / 选股阈值等，落 app_settings 持久化，
+# 下次进入回测页（或换浏览器）自动恢复，不再被 /strategy/defaults 重置。
+BACKTEST_DRAFT_SETTING_KEY = "backtest_config_draft_v1"
 
 # 可复用的日线数据集来源：quan_parquet（当前）与 baostock（旧链路）。
 DAILY_DATASET_SOURCES = ("quan_parquet", "baostock")
@@ -151,6 +154,28 @@ class BacktestJobRequest(BaseModel):
     config: dict = Field(default_factory=dict)
     fees: dict | None = None
     screener: dict | None = None
+
+
+class BacktestConfigDraftRequest(BaseModel):
+    """PUT /api/backtest/config-draft：回测页表单草稿（整份覆盖保存）。
+
+    只做「表单记忆」，不驱动交易。``config`` 与回测请求同口径（前端已剥离费率字段），
+    服务端用 ``resolve_config`` 做同样校验，避免把非法参数存进草稿、下次恢复时才炸。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["single", "funnel"] | None = None
+    name: str | None = Field(default=None, max_length=120)
+    initial_cash: float | None = Field(default=None, gt=0)
+    start_date: str | None = None
+    end_date: str | None = None
+    dataset_id: str | None = None
+    intraday_dataset_id: str | None = None
+    index_dataset_id: str | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    fees: dict[str, Any] | None = None
+    screener: dict[str, Any] | None = None
 
 
 class PaperAccountRequest(BaseModel):
@@ -514,6 +539,12 @@ def create_app() -> FastAPI:
                 "intraday_source": intraday_dataset.source if intraday_dataset else None,
                 "index_source": index_dataset.source if index_dataset else None,
             })
+            # 记录数据集选择：报告详情「带入回测」据此恢复主/分钟/指数数据集。
+            report["config"].update({
+                "dataset_id": params.get("dataset_id"),
+                "intraday_dataset_id": params.get("intraday_dataset_id"),
+                "index_dataset_id": params.get("index_dataset_id"),
+            })
             storage.save_backtest(report)
             return _slim_records(report)
 
@@ -573,6 +604,22 @@ def create_app() -> FastAPI:
     def save_fee_config(fees: FeeConfig) -> None:
         storage.set_setting(FEE_SETTING_KEY, json.dumps(fees.to_dict(), ensure_ascii=False))
         storage.set_setting(FEE_SETTING_KEY + "_at", utc_now())
+
+    def load_backtest_draft() -> dict | None:
+        raw = storage.get_setting(BACKTEST_DRAFT_SETTING_KEY)
+        if not raw:
+            return None
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def backtest_draft_response() -> dict:
+        return {
+            "draft": load_backtest_draft(),
+            "updated_at": storage.get_setting(BACKTEST_DRAFT_SETTING_KEY + "_at"),
+        }
 
     def fee_response(fees: FeeConfig) -> dict:
         return {
@@ -991,19 +1038,24 @@ def create_app() -> FastAPI:
         ), bar.timestamp)
 
     def scheduled_symbol(account: BrokerAccount) -> str | None:
-        """定时器选标的：轮动当前标的优先，其次 beta 腿 ETF，最后账户绑定的日线数据集。"""
+        """定时器选标的：轮动当前标的优先，其次账户绑定的日线数据集，最后 beta 腿 ETF。
+
+        注意 ETF 在 scheduler_run_once 里已经单独先 tick 一次；这里把数据集标的放在
+        ETF 之前，保证「自动策略 + 绑定日线数据集」的单标的账户在默认开启 beta 腿后
+        仍会推进个股（ETF 持有时由 perform_live_tick 的互斥守卫挡住个股，不会双持）。
+        """
         if account.rotation_enabled:
             index = int(account.rotation_index)
             if 0 <= index < len(account.rotation_pool):
                 symbol = str(account.rotation_pool[index].get("symbol") or "")
                 if symbol:
                     return symbol
-        if account.config.etf_beta_enabled:
-            return account.config.etf_symbol
         if account.dataset_id:
             dataset = storage.get_dataset(account.dataset_id)
             if dataset is not None and dataset.symbol:
                 return dataset.symbol
+        if account.config.etf_beta_enabled:
+            return account.config.etf_symbol
         return None
 
     def _beta_qty(account: BrokerAccount) -> int:
@@ -1232,6 +1284,35 @@ def create_app() -> FastAPI:
             "initial_cash": 4_000_000.0,
             "rules": STRATEGY_RULES,
         }
+
+    # -- 回测页表单草稿：修改即保存，下次进入自动恢复 --------------------------
+
+    @application.get("/api/backtest/config-draft")
+    def get_backtest_config_draft():
+        """读取回测页表单草稿；从未保存过时 ``draft`` 为 null。"""
+        return backtest_draft_response()
+
+    @application.put("/api/backtest/config-draft")
+    def save_backtest_config_draft(request: BacktestConfigDraftRequest):
+        """整份保存回测页表单草稿。参数校验与真正跑回测同口径（fail fast）。"""
+        draft = request.model_dump(exclude_none=True)
+        start_date, end_date = draft.get("start_date"), draft.get("end_date")
+        if start_date and end_date and start_date > end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        # 与 /backtests/jobs 相同的合并与校验：全局费率打底 → 草稿 fees → 草稿 config。
+        resolve_config(draft.get("config") or {}, draft.get("fees"))
+        if draft.get("screener"):
+            ScreenerConfig.from_dict({**draft["screener"], "enable_fundamental_veto": False})
+        storage.set_setting(BACKTEST_DRAFT_SETTING_KEY, json.dumps(draft, ensure_ascii=False))
+        storage.set_setting(BACKTEST_DRAFT_SETTING_KEY + "_at", utc_now())
+        return backtest_draft_response()
+
+    @application.delete("/api/backtest/config-draft")
+    def reset_backtest_config_draft():
+        """清除草稿：回测页下次进入回到 /strategy/defaults 的默认配置。"""
+        storage.delete_setting(BACKTEST_DRAFT_SETTING_KEY)
+        storage.delete_setting(BACKTEST_DRAFT_SETTING_KEY + "_at")
+        return backtest_draft_response()
 
     @application.get("/api/fees")
     def get_fees():
@@ -1515,6 +1596,12 @@ def create_app() -> FastAPI:
             "daily_source": daily_dataset.source,
             "intraday_source": intraday_dataset.source if intraday_dataset else None,
             "index_source": index_dataset.source if index_dataset else None,
+        })
+        # 记录数据集选择：报告详情「带入回测」据此恢复主/分钟/指数数据集。
+        report["config"].update({
+            "dataset_id": request.dataset_id,
+            "intraday_dataset_id": request.intraday_dataset_id,
+            "index_dataset_id": request.index_dataset_id,
         })
         storage.save_backtest(report)
         return report

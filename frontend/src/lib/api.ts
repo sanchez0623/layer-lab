@@ -1,5 +1,7 @@
 import type {
   AccountState,
+  BacktestConfigDraft,
+  BacktestConfigDraftResponse,
   BacktestJobRequest,
   BacktestJobView,
   BacktestRequest,
@@ -104,6 +106,12 @@ function query(params: Record<string, string | undefined>): string {
 export const api = {
   health: () => request<HealthResponse>('/health'),
   strategyDefaults: () => request<StrategyDefaults>('/strategy/defaults'),
+  // 回测页表单草稿：修改即保存到服务端，下次进页面自动恢复；DELETE = 恢复默认配置。
+  backtestConfigDraft: () => request<BacktestConfigDraftResponse>('/backtest/config-draft'),
+  saveBacktestConfigDraft: (draft: BacktestConfigDraft) =>
+    request<BacktestConfigDraftResponse>('/backtest/config-draft', { method: 'PUT', body: JSON.stringify(draft) }),
+  resetBacktestConfigDraft: () =>
+    request<BacktestConfigDraftResponse>('/backtest/config-draft', { method: 'DELETE' }),
   // 分板块 A 股交易规则：下单页按 symbol 拉取，驱动快捷档位 / 默认数量 / 实时校验。
   tradingRules: (symbol: string) =>
     request<TradingRulesResponse>(`/trading-rules/${encodeURIComponent(symbol)}`),

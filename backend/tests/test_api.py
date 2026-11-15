@@ -26,6 +26,7 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     defaults = client.get("/api/strategy/defaults").json()
     assert len(defaults["installment_amounts"]) == 16
     assert sum(defaults["installment_amounts"]) == 4_000_000
+    assert defaults["config"]["etf_beta_enabled"] is True  # 指数 beta 腿默认开启
 
     demo_response = client.post("/api/datasets/demo")
     assert demo_response.status_code == 200
@@ -56,6 +57,9 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     )
     assert report["data_info"]["actual_granularity"] == "daily_only"
     assert report["data_info"]["is_synthetic"] is True
+    # 报告 config 记录数据集选择，供前端「带入回测」恢复。
+    assert report["config"]["dataset_id"] == demo["daily"]["id"]
+    assert report["config"]["index_dataset_id"] == demo["index"]["id"]
     assert any("降级" in item for item in report["warnings"])
     assert client.get(f"/api/backtests/{report['id']}").status_code == 200
     listed = client.get("/api/backtests").json()
@@ -70,6 +74,7 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     })
     assert created.status_code == 200
     account = created.json()
+    assert account["config"]["etf_beta_enabled"] is True  # 新建账户默认带 beta 腿
     order_response = client.post(f"/api/paper/accounts/{account['id']}/orders", json={
         "symbol": "SYNTH001", "side": "BUY", "order_type": "MARKET", "quantity": 100,
     })

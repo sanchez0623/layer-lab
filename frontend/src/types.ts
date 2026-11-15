@@ -82,6 +82,26 @@ export type StrategyDefaults = Partial<StrategyConfig> & {
   initial_cash?: number;
 };
 
+/** 回测页表单草稿：服务端持久化，进入回测页时优先恢复（而不是重置为默认值）。 */
+export interface BacktestConfigDraft {
+  mode?: 'single' | 'funnel';
+  name?: string;
+  initial_cash?: number;
+  start_date?: string | null;
+  end_date?: string | null;
+  dataset_id?: string | null;
+  intraday_dataset_id?: string | null;
+  index_dataset_id?: string | null;
+  config?: Partial<StrategyConfig>;
+  fees?: FeeConfig;
+  screener?: Partial<ScreenerConfig>;
+}
+
+export interface BacktestConfigDraftResponse {
+  draft: BacktestConfigDraft | null;
+  updated_at: string | null;
+}
+
 export interface BacktestRequest {
   name: string;
   dataset_id: string;
@@ -396,12 +416,23 @@ export interface BacktestEvent {
   [key: string]: unknown;
 }
 
+/** 报告快照里的配置：策略字段 + 回测边界与数据集选择（供「带入回测」恢复表单）。 */
+export interface ReportConfig extends StrategyConfig {
+  initial_cash?: number;
+  start_date?: string | null;
+  end_date?: string | null;
+  dataset_id?: string | null;
+  intraday_dataset_id?: string | null;
+  index_dataset_id?: string | null;
+  screener?: ScreenerConfig;
+}
+
 export interface Report {
   id: string;
   name: string;
   status: string;
   created_at: string;
-  config: StrategyConfig;
+  config: ReportConfig;
   metrics: ReportMetrics;
   equity_curve: EquityPoint[];
   /**
