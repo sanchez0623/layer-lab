@@ -34,6 +34,13 @@ from .market import (
 from .pagination import paginate, page_params
 from .quan_data import QuanRefresher, QuanStore, quan_data_dir
 from .rotation import rescreen_and_advance, set_from_run as set_rotation_from_run, set_pool as set_rotation_pool
+from .rotation_trail import (
+    TRAIL_CSV_FIELDS,
+    aggregate_trail,
+    collapse_waiting_spans,
+    enrich_trail,
+    flatten_for_csv,
+)
 from .screener import ScreenerConfig, ScreenerService, ScreeningResult
 from .storage import SQLiteStorage
 from .strategy import LayeredTStrategy
@@ -435,7 +442,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.1.4",
+        version="2.1.5",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1610,17 +1617,28 @@ def create_app() -> FastAPI:
     def backtest_rotation_trail(
         backtest_id: str,
         params: tuple[int, int] = Depends(page_params),
+        collapse_waiting: bool = Query(
+            False, description="是否把连续同因的空仓日合并成区间行（前端表格默认 true，原始逐日传 false）",
+        ),
     ):
         """换票轨迹分页：后台切片返回，支持上下页 / 跳转 / 自定义页大小。
 
-        全量轨迹已落库；这里只返回请求的那一页，避免一次性下发大数据量。
+        读时派生（不落库）：用报告里的 rounds 补轮次收益 / 持有交易日 / 建仓延迟 /
+        退出原因；``collapse_waiting=true`` 时把连续同因空仓合并成区间（线上 5 年报告
+        278 条 → 48 行）。响应附带 ``summary`` 汇总块，供面板顶部统计。
         """
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
-        trail = report.get("data_info", {}).get("rotation_trail") or []
+        info = report.get("data_info") or {}
+        raw = info.get("rotation_trail") or []
+        trading_dates = [str(point.get("date")) for point in (report.get("equity_curve") or [])]
+        enriched = enrich_trail(raw, report.get("rounds") or [], trading_dates)
+        items = collapse_waiting_spans(enriched) if collapse_waiting else enriched
         page, page_size = params
-        return paginate(trail, page=page, page_size=page_size)
+        body = paginate(items, page=page, page_size=page_size)
+        body["summary"] = aggregate_trail(enriched, len(trading_dates))
+        return body
 
     @application.get("/api/backtests/{backtest_id}/records/{kind}")
     def backtest_records(
@@ -1672,12 +1690,22 @@ def create_app() -> FastAPI:
         return body
 
     @application.get("/api/backtests/{backtest_id}/export")
-    def export_backtest(backtest_id: str, kind: Literal["trades", "orders"]):
+    def export_backtest(backtest_id: str, kind: Literal["trades", "orders", "trail"]):
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
-        rows = report[kind]
-        fields = list(rows[0].keys()) if rows else (["id", "order_id", "symbol", "side", "quantity", "price"] if kind == "trades" else ["id", "symbol", "side", "quantity", "status"])
+        if kind == "trail":
+            # 轨迹导出与面板同口径派生（轮次收益 / 持有交易日 / 建仓延迟），
+            # 但保留原始逐日粒度（便于 Excel 透视空仓天数），不合并区间。
+            info = report.get("data_info") or {}
+            trading_dates = [str(point.get("date")) for point in (report.get("equity_curve") or [])]
+            rows = flatten_for_csv(enrich_trail(
+                info.get("rotation_trail") or [], report.get("rounds") or [], trading_dates,
+            ))
+            fields = list(TRAIL_CSV_FIELDS)
+        else:
+            rows = report[kind]
+            fields = list(rows[0].keys()) if rows else (["id", "order_id", "symbol", "side", "quantity", "price"] if kind == "trades" else ["id", "symbol", "side", "quantity", "status"])
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
         writer.writeheader()

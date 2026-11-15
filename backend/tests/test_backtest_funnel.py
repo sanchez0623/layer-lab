@@ -13,6 +13,7 @@ import pytest
 from app.backtest import FunnelRotationBacktest
 from app.domain import Bar, StrategyConfig
 from app.etf_data import cache_path, save_etf_bars
+from app.rotation_trail import aggregate_trail, enrich_trail
 from app.screener import ScreenerConfig
 from app.strategy import LayeredTStrategy
 from app.universe import BOARD_GEM, BOARD_INDEX, BOARD_STAR, UniverseRow, UniverseStore
@@ -195,6 +196,21 @@ def test_funnel_backtest_completes_with_round_and_screen(tmp_path):
     # 每月盈亏：月度切分覆盖全部净值点（漏斗引擎同样走 performance_metrics）。
     monthly = report["metrics"]["monthly"]
     assert monthly and sum(item["trading_days"] for item in monthly) == len(report["equity_curve"])
+    # 换票轨迹：选中轮次带 gate 与候选前三；读时派生能算出轮次收益与空仓汇总。
+    trail = report["data_info"]["rotation_trail"]
+    trading_dates = [point["date"] for point in report["equity_curve"]]
+    enriched = enrich_trail(trail, report["rounds"], trading_dates)
+    selected = [item for item in enriched if item["kind"] == "ROUND"]
+    assert selected, "至少应有一次选中标的"
+    assert all(item.get("candidates") for item in selected)
+    assert all(item.get("gate") is not None for item in enriched)
+    closed = [item for item in selected if item.get("status") == "CLOSED"]
+    assert closed and all(item["return_rate"] is not None for item in closed)
+    assert all(item["holding_days"] >= 1 for item in closed if item.get("holding_days") is not None)
+    summary = aggregate_trail(enriched, len(trading_dates))
+    assert summary["screens"] == len(trail)
+    assert summary["waiting_days"] + summary["rounds"] == summary["screens"]
+    assert summary["holding_days"] <= len(trading_dates)
     # JSON 安全
     import json
     json.dumps(report, ensure_ascii=False, allow_nan=False)

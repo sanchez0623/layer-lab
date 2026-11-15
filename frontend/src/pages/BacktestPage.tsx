@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
-import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, Round, RotationTrailItem, ScreenerConfig, StrategyConfig, Trade } from '../types';
+import type { BacktestJobView, BacktestSummary, Dataset, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -115,6 +115,22 @@ const drawdownLabel = (value: number): string => (value > 0 ? `-${percent(value)
 /** 图表 X 轴月份压缩为 YY-MM（2026-01 → 26-01），满轴时避免标签相互挤压。 */
 const shortMonth = (month: string): string => month.slice(2);
 
+/** 空仓瓶颈层 → 可读标签（与后端 rotation_trail.funnel_bottleneck 口径对应）。 */
+const trailBottleneckLabel: Record<string, string> = {
+  L1: 'L1 超跌',
+  L2: 'L2 否决',
+  L3: 'L3 容量',
+  L4: 'L4 深筛',
+  unknown: '未知阶段',
+};
+
+/** 空仓区间行的原因文案：L0 关门 / 无候选（卡在哪一层）。 */
+const trailWaitReason = (item: RotationTrailItem): string => {
+  if (item.reason === 'gate_closed') return 'L0 大盘门关闭';
+  const stage = item.bottleneck ? trailBottleneckLabel[item.bottleneck] ?? item.bottleneck : '漏斗';
+  return `无候选（${stage}后为空）`;
+};
+
 function UnitInput({
   value, onChange, unit, min, max, step, type = 'number',
 }: {
@@ -162,11 +178,12 @@ export default function BacktestPage() {
   // 本会话内已落地为终态的作业 id：重挂载时用它避免把刚「放弃」的已完成作业重新拉起。
   const settledJobIdsRef = useRef<Set<string>>(new Set());
   const [tableTab, setTableTab] = useState<'rounds' | 'trades' | 'orders'>('rounds');
-  const [exporting, setExporting] = useState<'trades' | 'orders' | null>(null);
+  const [exporting, setExporting] = useState<'trades' | 'orders' | 'trail' | null>(null);
   const [mode, setMode] = useState<BacktestMode>('funnel');
   const [screener, setScreener] = useState<ScreenerConfig>(fallbackScreener);
-  // 换票轨迹后台分页状态：主报告已瘦身不含全量 trail，列表按页拉取。
-  const [trailData, setTrailData] = useState<Paginated<RotationTrailItem> | null>(null);
+  // 换票轨迹后台分页状态：主报告已瘦身不含全量 trail，列表按页拉取；
+  // 后端默认把连续同因空仓合并成区间并附带 summary 汇总块。
+  const [trailData, setTrailData] = useState<RotationTrailPage | null>(null);
   const [trailPage, setTrailPage] = useState(1);
   const [trailPageSize, setTrailPageSize] = useState(20);
   const [trailLoading, setTrailLoading] = useState(false);
@@ -509,7 +526,7 @@ export default function BacktestPage() {
     }
   };
 
-  const exportCsv = async (kind: 'trades' | 'orders') => {
+  const exportCsv = async (kind: 'trades' | 'orders' | 'trail') => {
     if (!report) return;
     setExporting(kind);
     setError('');
@@ -561,6 +578,23 @@ export default function BacktestPage() {
   const safeMonthPage = Math.min(monthPage, monthPageCount);
   const monthRows = monthly.slice((safeMonthPage - 1) * monthPageSize, safeMonthPage * monthPageSize);
   const rotationTrail = useMemo<RotationTrailItem[]>(() => trailData?.items ?? [], [trailData]);
+  // 换票轨迹汇总（后端读时聚合；旧报告同样有）：节奏、空仓构成、胜率与退出原因。
+  const trailSummary = useMemo<RotationTrailSummary | null>(() => trailData?.summary ?? null, [trailData]);
+  const trailStageSummary = useMemo(() => {
+    if (!trailSummary) return '';
+    return Object.entries(trailSummary.no_candidate_by_stage)
+      .sort(([, a], [, b]) => b - a)
+      .map(([stage, days]) => `${trailBottleneckLabel[stage] ?? stage} ${integer(days)} 天`)
+      .join(' / ');
+  }, [trailSummary]);
+  const trailExitSummary = useMemo(() => {
+    if (!trailSummary) return '';
+    return Object.entries(trailSummary.exit_reasons)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 4)
+      .map(([reason, count]) => `${reason} ${integer(count)}`)
+      .join(' · ');
+  }, [trailSummary]);
   // 换票轨迹行展开：查看该选股日的逐轮决策日志（为什么开门/关门/空仓/旁路几只）+ 漏斗计数。
   const [expandedTrails, setExpandedTrails] = useState<Set<string>>(new Set());
   const toggleTrail = (key: string) => {
@@ -568,6 +602,23 @@ export default function BacktestPage() {
       const next = new Set(current);
       if (next.has(key)) { next.delete(key); } else { next.add(key); }
       return next;
+    });
+  };
+  // 轮次行 →「成交明细」联动：切 tab 会清空筛选，因此先把标的存 ref，由下面的 effect 清空后应用。
+  const pendingTrailSymbolRef = useRef<string | null>(null);
+  const focusRoundTrades = (symbol: string) => {
+    const code = displaySymbol(symbol);
+    if (!code || code === '—') return;
+    if (tableTab === 'trades') {
+      setSymbolDraft(code);
+      setTradeFilter((previous) => ({ ...previous, symbol: code }));
+      setRecordPage(1);
+    } else {
+      pendingTrailSymbolRef.current = code;
+      setTableTab('trades');
+    }
+    window.requestAnimationFrame(() => {
+      document.getElementById('backtest-records')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   };
 
@@ -589,9 +640,12 @@ export default function BacktestPage() {
   useEffect(() => { setRecordPage(1); }, [report?.id, tableTab]);
 
   // 成交明细筛选：切 tab / 换报告时清空（筛选栏只服务成交明细 tab）。
+  // 换票轨迹「在成交明细中查看」会先把标的放进 ref，这里清空后立即应用，避免被覆盖。
   useEffect(() => {
-    setSymbolDraft('');
-    setTradeFilter(EMPTY_TRADE_FILTERS);
+    const pending = pendingTrailSymbolRef.current;
+    pendingTrailSymbolRef.current = null;
+    setSymbolDraft(pending ?? '');
+    setTradeFilter(pending ? { ...EMPTY_TRADE_FILTERS, symbol: pending } : EMPTY_TRADE_FILTERS);
   }, [report?.id, tableTab]);
 
   /** 提交标的筛选（防抖回调与 Enter 立即提交共用）；值未变化时返回 prev，避免多余请求。 */
@@ -1031,39 +1085,124 @@ export default function BacktestPage() {
                 </Panel>
 
                 {isFunnel && trailData && trailData.total > 0 && (
-                  <Panel className="mb-3" title="换票轨迹" description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；WAITING 为 L0 关门或无候选的空仓等待 · 共 ${trailData.total} 次筛选`} action={<Layers3 className="size-4" />} flush>
+                  <Panel
+                    className="mb-3"
+                    title="换票轨迹"
+                    description={`每次清仓后重跑选股漏斗（L0→L4）取当时第一名；连续同因空仓合并为区间，可展开看逐轮决策日志${trailSummary ? ` · 共 ${integer(trailSummary.screens)} 次筛选` : ''}`}
+                    action={<div className="flex items-center gap-2">
+                      <Button variant="outline" size="sm" className="h-7" type="button" onClick={() => void exportCsv('trail')} disabled={exporting !== null || !report}>
+                        <ArrowDownToLine />{exporting === 'trail' ? '导出中' : '导出轨迹'}
+                      </Button>
+                      <Layers3 className="size-4" />
+                    </div>}
+                    flush
+                  >
+                    {trailSummary && (
+                      <div className="border-b bg-muted/20 px-4 py-2.5">
+                        <div className="flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[11px] text-muted-foreground">
+                          <span>筛选 <strong className="font-mono text-foreground">{integer(trailSummary.screens)}</strong> 次</span>
+                          <span>换票 <strong className="font-mono text-foreground">{integer(trailSummary.rounds)}</strong> 轮（已结束 {integer(trailSummary.closed_rounds)}）</span>
+                          <span>空仓 <strong className="font-mono text-foreground">{integer(trailSummary.waiting_days)}</strong> 天 · {percent(trailSummary.waiting_ratio)}</span>
+                          <span>持仓利用率 <strong className="font-mono text-foreground">{percent(trailSummary.holding_ratio)}</strong></span>
+                          <span>轮次胜率 <strong className="font-mono text-foreground">{percent(trailSummary.win_rate)}</strong></span>
+                          <span>平均单轮 <strong className={cn('font-mono', (trailSummary.avg_return ?? 0) >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(trailSummary.avg_return)}</strong></span>
+                          {trailSummary.avg_entry_delay_days != null && <span>平均建仓延迟 <strong className="font-mono text-foreground">{number(trailSummary.avg_entry_delay_days, 1)}</strong> 天</span>}
+                          {trailSummary.longest_wait && (
+                            <span>最长空仓 <strong className="font-mono text-foreground">{integer(trailSummary.longest_wait.days)}</strong> 天（{shortDate(trailSummary.longest_wait.start_date)} ~ {shortDate(trailSummary.longest_wait.end_date)}）</span>
+                          )}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
+                          <span>空仓构成：L0 关门 {integer(trailSummary.gate_closed_days)} 天 · 无候选 {integer(trailSummary.no_candidate_days)} 天{trailStageSummary ? `（${trailStageSummary}）` : ''}</span>
+                          {trailExitSummary && <span>退出原因：{trailExitSummary}</span>}
+                        </div>
+                      </div>
+                    )}
                     <Table>
-                      <TableHeader><TableRow><TableHead className="w-8" /><TableHead>轮次</TableHead><TableHead>选股日</TableHead><TableHead>标的</TableHead><TableHead>名称</TableHead><TableHead className="text-right">入选 Chg20D</TableHead><TableHead>L0 门</TableHead><TableHead className="text-right">入场</TableHead><TableHead className="text-right">出场</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead>状态</TableHead></TableRow></TableHeader>
+                      <TableHeader><TableRow>
+                        <TableHead className="w-8" />
+                        <TableHead>轮次 / 空仓</TableHead>
+                        <TableHead>选股日 / 区间</TableHead>
+                        <TableHead>标的 / 原因</TableHead>
+                        <TableHead>板块</TableHead>
+                        <TableHead className="text-right">入选 Chg20D</TableHead>
+                        <TableHead>L0 门</TableHead>
+                        <TableHead>持仓区间</TableHead>
+                        <TableHead className="text-right">持有交易日</TableHead>
+                        <TableHead className="text-right">本轮收益率</TableHead>
+                        <TableHead className="text-right">净盈亏</TableHead>
+                        <TableHead>状态 / 退出</TableHead>
+                      </TableRow></TableHeader>
                       <TableBody>
                         {rotationTrail.map((item, index) => {
-                          const trailKey = item.round || `${item.select_date}-${index}`;
+                          const isSpan = item.kind === 'WAITING_SPAN';
+                          const trailKey = isSpan
+                            ? `span-${item.start_date}-${index}`
+                            : item.round || `row-${item.select_date}-${index}`;
                           const expanded = expandedTrails.has(trailKey);
+                          const status = String(item.status || '').toUpperCase();
+                          const gateBoards = Object.entries(item.gate?.boards ?? {});
+                          const candidates = item.candidates ?? [];
                           return (
                             <Fragment key={trailKey}>
-                              <TableRow className={item.status === 'WAITING' ? 'bg-muted/25' : ''}>
+                              <TableRow className={isSpan ? 'bg-muted/25' : ''}>
                                 <TableCell><button className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>{expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</button></TableCell>
-                                <TableCell><strong className="font-mono text-[11px] text-primary">{item.round || `#${(trailPage - 1) * trailPageSize + index + 1}`}</strong></TableCell>
-                                <TableCell>{shortDate(item.select_date)}</TableCell>
-                                <TableCell>{item.symbol ? <strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
-                                <TableCell>{item.name || '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.chg20d_at_select != null && (item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success'))}>{item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</TableCell>
+                                <TableCell>{isSpan ? <Badge tone="amber">空仓</Badge> : item.round ? <strong className="font-mono text-[11px] text-primary">{item.round}</strong> : <span className="text-[11px] text-muted-foreground">待建仓</span>}</TableCell>
+                                <TableCell>{isSpan ? <span className="font-mono text-[11px]">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}<small className="ml-1 text-muted-foreground">（{integer(item.days)} 个交易日）</small></span> : shortDate(item.select_date)}</TableCell>
+                                <TableCell>{isSpan ? <div><span className="text-muted-foreground">空仓等待</span><small className="block text-[10px] text-muted-foreground">{trailWaitReason(item)}</small></div> : item.symbol ? <div><strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong><small className="ml-1 text-[11px] text-muted-foreground">{item.name || '—'}</small></div> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
+                                <TableCell>{isSpan ? '—' : item.board || '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.chg20d_at_select != null && (item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</TableCell>
                                 <TableCell><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></TableCell>
-                                <TableCell className="text-right">{item.entry_date ? shortDate(item.entry_date) : '—'}</TableCell>
-                                <TableCell className="text-right">{item.exit_date ? shortDate(item.exit_date) : '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
-                                <TableCell><Badge tone={item.status === 'CLOSED' ? 'green' : item.status === 'OPEN' ? 'indigo' : 'amber'}>{item.status === 'CLOSED' ? '已结束' : item.status === 'OPEN' ? '持仓中' : '空仓等待'}</Badge></TableCell>
+                                <TableCell>{isSpan ? '—' : item.entry_date || item.exit_date ? <span className="font-mono text-[11px]">{item.entry_date ? shortDate(item.entry_date) : '—'} → {item.exit_date ? shortDate(item.exit_date) : '持仓中'}</span> : '—'}</TableCell>
+                                <TableCell className="text-right font-mono text-[12px]">{isSpan ? '—' : item.holding_days ?? '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.return_rate != null ? signedPercent(item.return_rate) : '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
+                                <TableCell>{isSpan ? <span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span> : <div><Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>{item.close_reason && <small className="ml-1 text-[10px] text-muted-foreground">{item.close_reason}</small>}</div>}</TableCell>
                               </TableRow>
                               {expanded && (
                                 <TableRow className="bg-muted/20">
                                   <TableCell />
-                                  <TableCell colSpan={10}>
+                                  <TableCell colSpan={11}>
                                     <div className="py-1">
                                       <div className="flex flex-wrap gap-1.5">
                                         {[{ tag: '全市场', value: item.funnel?.universe }, { tag: 'L0 大盘门', value: item.funnel?.after_l0 }, { tag: 'L1 超跌', value: item.funnel?.after_l1 }, { tag: 'L2 否决', value: item.funnel?.after_l2 }, { tag: 'L3 容量', value: item.funnel?.after_l3 }, { tag: '可用候选', value: item.funnel?.eligible }].map((stage) => (
                                           <span key={stage.tag} className="rounded-md border bg-card px-2 py-1 text-[10px]"><small className="mr-1 text-muted-foreground">{stage.tag}</small><strong className="font-mono">{stage.value ?? '—'}</strong></span>
                                         ))}
                                       </div>
-                                      {item.screen_warnings && item.screen_warnings.length > 0 ? <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-muted-foreground">{item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}</ul> : <p className="mt-1.5 text-[10px] text-muted-foreground">本轮选股无逐轮决策提示。</p>}
+                                      {gateBoards.length > 0 && (
+                                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                          <small className="text-muted-foreground">L0 板块门：</small>
+                                          {gateBoards.map(([board, entry]) => (
+                                            <span key={board} className="rounded-md border bg-card px-2 py-0.5 text-[10px]">
+                                              {board} <strong className={cn('font-mono', (entry.ret20 ?? 0) < 0 ? 'text-success' : 'text-destructive')}>{entry.ret20 != null ? signedPercent(entry.ret20) : '—'}</strong>
+                                              <small className="ml-1 text-muted-foreground">{entry.open ? '开门' : '关门'}{entry.bypass ? '·超跌旁路' : ''}</small>
+                                            </span>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {!isSpan && candidates.length > 0 && (
+                                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                          <small className="text-muted-foreground">候选前三：</small>
+                                          {candidates.map((candidate) => (
+                                            <span key={candidate.code} className="rounded-md border bg-card px-2 py-0.5 text-[10px]">
+                                              <strong className="font-mono">{displaySymbol(candidate.code)}</strong> {candidate.name}
+                                              <span className={cn('ml-1 font-mono', candidate.chg20d >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(candidate.chg20d)}</span>
+                                            </span>
+                                          ))}
+                                        </div>
+                                      )}
+                                      {!isSpan && (item.entry_delay_days != null || item.max_invested != null || item.t_net_profit != null) && (
+                                        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+                                          {item.entry_delay_days != null && <span>建仓延迟 <b className="font-mono text-foreground">{integer(item.entry_delay_days)}</b> 天</span>}
+                                          {item.max_invested != null && <span>峰值投入 <b className="font-mono text-foreground">{money(item.max_invested)}</b></span>}
+                                          {item.t_net_profit != null && <span>做 T 净贡献 <b className="font-mono text-foreground">{signedMoney(item.t_net_profit)}</b></span>}
+                                        </div>
+                                      )}
+                                      {item.screen_warnings && item.screen_warnings.length > 0 ? <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-muted-foreground">{item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}</ul> : <p className="mt-1.5 text-[10px] text-muted-foreground">{isSpan ? '该空仓区间无额外决策提示。' : '本轮选股无逐轮决策提示。'}</p>}
+                                      {!isSpan && item.symbol && (
+                                        <Button variant="outline" size="sm" className="mt-1.5 h-7" type="button" onClick={() => focusRoundTrades(String(item.symbol))}>
+                                          <ArrowDownToLine className="rotate-180" />在成交明细中查看
+                                        </Button>
+                                      )}
                                     </div>
                                   </TableCell>
                                 </TableRow>
@@ -1078,7 +1217,7 @@ export default function BacktestPage() {
                 )}
 
                 <Panel className="mb-3" flush>
-                  <div className="flex flex-col gap-2 border-b px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
+                  <div id="backtest-records" className="flex flex-col gap-2 border-b px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
                     <Tabs value={tableTab} onValueChange={(value) => setTableTab(value as 'rounds' | 'trades' | 'orders')}>
                       <TabsList>
                         <TabsTrigger value="rounds">已结束轮次<span className="ml-1 font-mono text-[10px] text-muted-foreground">{roundsTotal}</span></TabsTrigger>

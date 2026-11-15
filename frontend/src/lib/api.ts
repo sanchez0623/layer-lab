@@ -23,7 +23,7 @@ import type {
   Report,
   Round,
   RotationRequest,
-  RotationTrailItem,
+  RotationTrailPage,
   ScreenerCoverageResponse,
   ScreenerDefaults,
   ScreenerPrepareRequest,
@@ -148,9 +148,13 @@ export const api = {
   resumeBacktestJob: (jobId: string) =>
     request<{ job_id: string; status: string; resumed: boolean }>(`/backtests/jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST' }),
   // 换票轨迹后台分页：主报告已瘦身不含全量 trail，列表按页拉取。
-  backtestRotationTrail: (id: string, page = 1, pageSize = 20) =>
-    request<Paginated<RotationTrailItem>>(
-      `/backtests/${encodeURIComponent(id)}/rotation-trail${query({ page: String(page), page_size: String(pageSize) })}`,
+  // collapseWaiting=true 时后端把连续同因空仓合并成区间（面板表格默认用），
+  // 响应附带 summary 汇总块；传 false 可拿原始逐日轨迹。
+  backtestRotationTrail: (id: string, page = 1, pageSize = 20, collapseWaiting = true) =>
+    request<RotationTrailPage>(
+      `/backtests/${encodeURIComponent(id)}/rotation-trail${query({
+        page: String(page), page_size: String(pageSize), collapse_waiting: String(collapseWaiting),
+      })}`,
     ),
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
   // filters 可选：symbol（子串）/ purpose（枚举或中文标签）/ side（BUY|SELL）组合过滤；
@@ -228,7 +232,7 @@ export const api = {
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/rotation`, { method: 'POST', body: JSON.stringify(payload) }),
 };
 
-export async function downloadBacktestCsv(id: string, kind: 'trades' | 'orders'): Promise<void> {
+export async function downloadBacktestCsv(id: string, kind: 'trades' | 'orders' | 'trail'): Promise<void> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}/backtests/${encodeURIComponent(id)}/export?kind=${kind}`);
