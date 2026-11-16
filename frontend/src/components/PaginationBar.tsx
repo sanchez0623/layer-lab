@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronDownIcon, ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { cn } from '@/lib/utils';
 
 /**
  * 通用后台分页控件（与 backend/app/pagination.py 的 paginate() 信封配套）。
@@ -91,14 +91,23 @@ export function PaginationBar({
         {onPageSizeChange && (
           <label className="flex items-center gap-1.5">
             每页
-            <Select value={String(pageSize)} onValueChange={(value) => onPageSizeChange(Number(value))} disabled={disabled}>
-              <SelectTrigger size="sm" className="h-7 min-w-[64px]" aria-label="每页条数">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {pageSizeOptions.map((size) => <SelectItem key={size} value={String(size)}>{size}</SelectItem>)}
-              </SelectContent>
-            </Select>
+            <span className="relative inline-block">
+              <select
+                value={String(pageSize)}
+                onChange={(event) => onPageSizeChange(Number(event.target.value))}
+                disabled={disabled}
+                aria-label="每页条数"
+                className={cn(
+                  'h-7 min-w-[64px] cursor-pointer appearance-none rounded-lg border border-input bg-transparent pl-2 pr-6 text-xs outline-none transition-colors',
+                  'focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
+                  'disabled:cursor-not-allowed disabled:opacity-50',
+                  'dark:bg-input/30 dark:hover:bg-input/50',
+                )}
+              >
+                {pageSizeOptions.map((size) => <option key={size} value={String(size)}>{size}</option>)}
+              </select>
+              <ChevronDownIcon className="pointer-events-none absolute right-1.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            </span>
           </label>
         )}
       </div>

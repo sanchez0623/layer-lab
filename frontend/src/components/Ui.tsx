@@ -1,11 +1,10 @@
 import type { ReactNode } from 'react';
-import { AlertCircle, FlaskConical, Inbox, Loader2, X } from 'lucide-react';
+import { AlertCircle, ChevronDownIcon, FlaskConical, Inbox, Loader2, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge as ShadcnBadge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
 
 export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?: string; title: string; description: string; actions?: ReactNode }) {
@@ -176,6 +175,11 @@ export function StatusBadge({ status }: { status?: string }) {
   return <Badge tone={tone}>{status || '—'}</Badge>;
 }
 
+/**
+ * 下拉选择框：原生 `<select>`（浏览器/系统渲染弹出菜单，无 portal 定位，
+ * 不会出现错位/裁剪/打不开问题）。用于短选项列表（2~5 项）。
+ * 保持与 Base UI Select 相同的 props 签名，调用点零改动。
+ */
 export function SelectField({
   value, onValueChange, options, placeholder = '请选择', className = '', ariaLabel, disabled = false,
 }: {
@@ -188,14 +192,24 @@ export function SelectField({
   disabled?: boolean;
 }) {
   return (
-    <Select value={value} onValueChange={(next) => onValueChange(String(next ?? ''))} disabled={disabled}>
-      <SelectTrigger className={cn('h-8 w-full', className)} aria-label={ariaLabel}>
-        <SelectValue placeholder={placeholder} />
-      </SelectTrigger>
-      <SelectContent>
-        {options.map((option) => <SelectItem key={option.value} value={option.value} disabled={option.disabled}>{option.label}</SelectItem>)}
-      </SelectContent>
-    </Select>
+    <div className={cn('relative w-full', className)}>
+      <select
+        value={value}
+        onChange={(event) => onValueChange(event.target.value)}
+        disabled={disabled}
+        aria-label={ariaLabel}
+        className={cn(
+          'h-8 w-full cursor-pointer appearance-none rounded-lg border border-input bg-transparent pl-2.5 pr-8 text-sm outline-none transition-colors',
+          'focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
+          'disabled:cursor-not-allowed disabled:opacity-50',
+          'dark:bg-input/30 dark:hover:bg-input/50',
+        )}
+      >
+        {!value && <option value="" disabled hidden>{placeholder}</option>}
+        {options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
+      </select>
+      <ChevronDownIcon className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+    </div>
   );
 }
 
