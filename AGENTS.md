@@ -161,6 +161,11 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
 - **深跌幅当日做T（t_deep_drop_pct，默认 0.10）**：当日盘中跌幅（相对前收）≥ 10% 时绕过底仓笔数门槛
   （sequence_index≥4）允许做T（20cm 板极端恐慌日抢反弹，退出仍走净利止盈 + T+1 尾盘强平）。
   None/0 = 关闭；__post_init__ 校验开启时必须 ≥0.10。模拟盘做T面板与回测页均可视化编辑。
+- **加仓间隔按成交日期动态换算（2026-11-16 第二次联特误拦事故修复）**：加仓「间隔≥min_add_gap_days 交易日」
+  判定改用 `_add_gap_blocked`——以最近一笔永久仓成交日为基准，按 `history ∪ {bar}` 中
+  (成交日, bar.date] 的交易日数计算；旧行序号口径（session_index − last_add_session）仅在账户
+  无成交记录时兜底。数据集刷新去重/补数会让行序号整体移位（当日 session_index=240 vs 存储值
+  241 → gap=−1 误拦），日期口径天然免疫。
 - ⚠️ **幽灵配置键**：服务器历史回测报告（如 P5-base 00e01918）的 config 里可能含
   `add_tier_strict`/`t_deep_drop_pct` 键——2026-11-16 起它们已是合法字段；更早的报告若还带
   其他未知键，`StrategyConfig.from_dict` 会拒绝（400），导入前需剥离。
