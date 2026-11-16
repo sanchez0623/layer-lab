@@ -82,6 +82,26 @@ export type StrategyDefaults = Partial<StrategyConfig> & {
   initial_cash?: number;
 };
 
+/** 回测页表单草稿：服务端持久化，进入回测页时优先恢复（而不是重置为默认值）。 */
+export interface BacktestConfigDraft {
+  mode?: 'single' | 'funnel';
+  name?: string;
+  initial_cash?: number;
+  start_date?: string | null;
+  end_date?: string | null;
+  dataset_id?: string | null;
+  intraday_dataset_id?: string | null;
+  index_dataset_id?: string | null;
+  config?: Partial<StrategyConfig>;
+  fees?: FeeConfig;
+  screener?: Partial<ScreenerConfig>;
+}
+
+export interface BacktestConfigDraftResponse {
+  draft: BacktestConfigDraft | null;
+  updated_at: string | null;
+}
+
 export interface BacktestRequest {
   name: string;
   dataset_id: string;
@@ -135,9 +155,31 @@ export interface BacktestJobView {
   updated_at: string;
 }
 
-/** 单轮换票轨迹（漏斗轮动回测 data_info.rotation_trail 元素）。 */
+/** 选股日 L4 候选前三（仅新报告写入；旧报告为 undefined）。 */
+export interface RotationCandidate {
+  code: string;
+  name: string;
+  board: string;
+  chg20d: number;
+  score: number;
+  deep_checked: boolean;
+}
+
+/** 板块大盘门快照（L0）：ret20 < 开门阈值才开门。 */
+export interface RotationGateBoard {
+  ret20?: number | null;
+  open?: boolean;
+  bypass?: boolean;
+}
+
+export interface RotationGate {
+  open?: boolean;
+  boards?: Record<string, RotationGateBoard>;
+}
+
+/** 单轮换票轨迹（漏斗轮动回测 data_info.rotation_trail 元素；读取端点会补派生字段）。 */
 export interface RotationTrailItem {
-  round: string;
+  round: string | null;
   symbol: string | null;
   name: string;
   board: string;
@@ -152,6 +194,80 @@ export interface RotationTrailItem {
   screen_warnings?: string[];
   /** 本轮漏斗计数 universe→L0→L1→L2→L3→eligible。 */
   funnel?: Record<string, number>;
+  /* ---------- 读取端点派生 / 新报告增强（旧报告可能缺省） ---------- */
+  /** ROUND = 轮次行；WAITING = 原始逐日空仓；WAITING_SPAN = 合并后的空仓区间。 */
+  kind?: 'ROUND' | 'WAITING' | 'WAITING_SPAN' | string;
+  /** 本轮收益率 = 净盈亏 / 峰值投入（资金效率口径）。 */
+  return_rate?: number | null;
+  /** 持仓交易日数（含首尾）。 */
+  holding_days?: number | null;
+  /** 选股日 → 建仓日相差的交易日数。 */
+  entry_delay_days?: number | null;
+  close_reason?: string | null;
+  max_invested?: number | null;
+  t_net_profit?: number | null;
+  /** 选股日候选前三（按 Chg20D 升序），仅选中标的的轮次行有。 */
+  candidates?: RotationCandidate[];
+  /** 各板块 ret20 / 开门状态，解释「为什么空仓」。 */
+  gate?: RotationGate | null;
+  /* ---------- 空仓区间行（kind=WAITING_SPAN） ---------- */
+  start_date?: string;
+  end_date?: string;
+  days?: number;
+  reason?: 'gate_closed' | 'no_candidate' | string;
+  /** 空仓时漏斗卡在哪一层：L1 / L2 / L3 / L4。 */
+  bottleneck?: string | null;
+}
+
+/** 轮次摘要（汇总里的最佳/最差轮）。 */
+export interface RotationRoundDigest {
+  round: string | null;
+  symbol: string | null;
+  name: string;
+  pnl: number | null;
+  return_rate: number | null;
+  entry_date: string | null;
+  exit_date: string | null;
+  holding_days: number | null;
+  close_reason: string | null;
+}
+
+/** 换票轨迹汇总（GET /backtests/{id}/rotation-trail 的 summary）。 */
+export interface RotationTrailSummary {
+  screens: number;
+  rounds: number;
+  closed_rounds: number;
+  open_rounds: number;
+  waiting_days: number;
+  gate_closed_days: number;
+  no_candidate_days: number;
+  no_candidate_by_stage: Record<string, number>;
+  waiting_ratio: number;
+  trading_days: number;
+  holding_days: number;
+  holding_ratio: number;
+  win_rate: number;
+  avg_return: number | null;
+  avg_pnl: number | null;
+  total_pnl: number;
+  avg_holding_days: number | null;
+  avg_entry_delay_days: number | null;
+  best: RotationRoundDigest | null;
+  worst: RotationRoundDigest | null;
+  longest_wait: {
+    start_date: string | null;
+    end_date: string | null;
+    days: number;
+    gate_open: boolean;
+    reason: string | null;
+    bottleneck: string | null;
+  } | null;
+  exit_reasons: Record<string, number>;
+}
+
+/** 换票轨迹分页响应：统一分页信封 + 汇总块。 */
+export interface RotationTrailPage extends Paginated<RotationTrailItem> {
+  summary: RotationTrailSummary;
 }
 
 /**
@@ -300,12 +416,23 @@ export interface BacktestEvent {
   [key: string]: unknown;
 }
 
+/** 报告快照里的配置：策略字段 + 回测边界与数据集选择（供「带入回测」恢复表单）。 */
+export interface ReportConfig extends StrategyConfig {
+  initial_cash?: number;
+  start_date?: string | null;
+  end_date?: string | null;
+  dataset_id?: string | null;
+  intraday_dataset_id?: string | null;
+  index_dataset_id?: string | null;
+  screener?: ScreenerConfig;
+}
+
 export interface Report {
   id: string;
   name: string;
   status: string;
   created_at: string;
-  config: StrategyConfig;
+  config: ReportConfig;
   metrics: ReportMetrics;
   equity_curve: EquityPoint[];
   /**

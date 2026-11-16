@@ -1,5 +1,7 @@
 import type {
   AccountState,
+  BacktestConfigDraft,
+  BacktestConfigDraftResponse,
   BacktestJobRequest,
   BacktestJobView,
   BacktestRequest,
@@ -23,7 +25,7 @@ import type {
   Report,
   Round,
   RotationRequest,
-  RotationTrailItem,
+  RotationTrailPage,
   ScreenerCoverageResponse,
   ScreenerDefaults,
   ScreenerPrepareRequest,
@@ -104,6 +106,12 @@ function query(params: Record<string, string | undefined>): string {
 export const api = {
   health: () => request<HealthResponse>('/health'),
   strategyDefaults: () => request<StrategyDefaults>('/strategy/defaults'),
+  // 回测页表单草稿：修改即保存到服务端，下次进页面自动恢复；DELETE = 恢复默认配置。
+  backtestConfigDraft: () => request<BacktestConfigDraftResponse>('/backtest/config-draft'),
+  saveBacktestConfigDraft: (draft: BacktestConfigDraft) =>
+    request<BacktestConfigDraftResponse>('/backtest/config-draft', { method: 'PUT', body: JSON.stringify(draft) }),
+  resetBacktestConfigDraft: () =>
+    request<BacktestConfigDraftResponse>('/backtest/config-draft', { method: 'DELETE' }),
   // 分板块 A 股交易规则：下单页按 symbol 拉取，驱动快捷档位 / 默认数量 / 实时校验。
   tradingRules: (symbol: string) =>
     request<TradingRulesResponse>(`/trading-rules/${encodeURIComponent(symbol)}`),
@@ -148,9 +156,13 @@ export const api = {
   resumeBacktestJob: (jobId: string) =>
     request<{ job_id: string; status: string; resumed: boolean }>(`/backtests/jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST' }),
   // 换票轨迹后台分页：主报告已瘦身不含全量 trail，列表按页拉取。
-  backtestRotationTrail: (id: string, page = 1, pageSize = 20) =>
-    request<Paginated<RotationTrailItem>>(
-      `/backtests/${encodeURIComponent(id)}/rotation-trail${query({ page: String(page), page_size: String(pageSize) })}`,
+  // collapseWaiting=true 时后端把连续同因空仓合并成区间（面板表格默认用），
+  // 响应附带 summary 汇总块；传 false 可拿原始逐日轨迹。
+  backtestRotationTrail: (id: string, page = 1, pageSize = 20, collapseWaiting = true) =>
+    request<RotationTrailPage>(
+      `/backtests/${encodeURIComponent(id)}/rotation-trail${query({
+        page: String(page), page_size: String(pageSize), collapse_waiting: String(collapseWaiting),
+      })}`,
     ),
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
   // filters 可选：symbol（子串）/ purpose（枚举或中文标签）/ side（BUY|SELL）组合过滤；
@@ -228,7 +240,7 @@ export const api = {
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/rotation`, { method: 'POST', body: JSON.stringify(payload) }),
 };
 
-export async function downloadBacktestCsv(id: string, kind: 'trades' | 'orders'): Promise<void> {
+export async function downloadBacktestCsv(id: string, kind: 'trades' | 'orders' | 'trail'): Promise<void> {
   let response: Response;
   try {
     response = await fetch(`${API_BASE}/backtests/${encodeURIComponent(id)}/export?kind=${kind}`);

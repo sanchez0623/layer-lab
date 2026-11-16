@@ -1043,13 +1043,37 @@ class FunnelRotationBacktest:
             if any(marker in warning for marker in _GLOBAL_WARNING_MARKERS):
                 if warning not in self.warnings:
                     self.warnings.append(warning)
+        # 大盘门与候选前三：写入轨迹便于复盘「为什么关门 / 为什么选它」。
+        # gate 只保留决策相关信息（板块 / ret20 / 是否开门 / 是否走超跌旁路），
+        # 去掉 index/date 等冗余字段，避免逐日轨迹与断点检查点膨胀。
+        gate_detail = {
+            "open": bool(result.gate.get("open")),
+            "boards": {
+                str(board): {
+                    "ret20": entry.get("ret20"),
+                    "open": bool(entry.get("open")),
+                    "bypass": bool(entry.get("bypass")),
+                }
+                for board, entry in (result.gate.get("boards") or {}).items()
+            },
+        }
+        candidates = [
+            {
+                "code": candidate.code, "name": candidate.name, "board": candidate.board,
+                "chg20d": candidate.chg20d, "score": candidate.score,
+                "deep_checked": bool(candidate.deep_checked),
+            }
+            for candidate in (result.eligible or [])[:3]
+        ]
         snapshot = {
             "as_of": result.as_of,
             "gate_open": bool(result.gate.get("open")),
+            "gate": gate_detail,
             "funnel": dict(result.funnel),
             "first_code": first.code if first else "",
             "first_name": first.name if first else "",
             "first_chg20d": (first.chg20d if first else None),
+            "candidates": candidates,
             "screen_warnings": round_warnings,
         }
         self.events.append({
@@ -1207,7 +1231,7 @@ class FunnelRotationBacktest:
                 first_code = snapshot["first_code"]
                 # 复用本次选股结果里 first 的 Chg20D（与漏斗口径一致）
                 chg20d_at_select = snapshot["first_chg20d"]
-                self._trail.append({
+                trail_item = {
                     "round": None, "symbol": first_code or None,
                     "name": snapshot["first_name"], "board": (
                         self.board_by_code.get(first_code, "") if first_code else ""
@@ -1220,7 +1244,13 @@ class FunnelRotationBacktest:
                     "screen_warnings": snapshot["screen_warnings"],
                     # 漏斗计数（universe→L0→L1→L2→L3→eligible），供展开行显示 narrowing。
                     "funnel": snapshot["funnel"],
-                })
+                    # 各板块 ret20 / 开门状态，解释「为什么空仓」；空仓日同样保留。
+                    "gate": snapshot["gate"],
+                }
+                if first_code:
+                    # 候选前三（按 Chg20D 升序）只在真正选中标的时记录，空仓日不存。
+                    trail_item["candidates"] = snapshot["candidates"]
+                self._trail.append(trail_item)
                 if first_code:
                     current_symbol = first_code
                     flat_wait_days = 0
