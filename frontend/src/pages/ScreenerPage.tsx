@@ -9,7 +9,7 @@ import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, PageHeader, P
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
-import { Input } from '@/components/ui/input';
+import { NumberInput } from '@/components/ui/number-input';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -58,15 +58,6 @@ const fundamentalLabel = (value?: string) => {
     default: return '—';
   }
 };
-
-function UnitInput({ value, onChange, unit, min, step }: { value: number; onChange: (value: string) => void; unit: string; min?: number; step?: number }) {
-  return (
-    <div className="relative">
-      <Input type="number" min={min} step={step} value={value} onChange={(event) => onChange(event.target.value)} className="pr-8" />
-      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
-    </div>
-  );
-}
 
 export default function ScreenerPage() {
   const [config, setConfig] = useState<ScreenerConfig>(defaultConfig);
@@ -367,13 +358,13 @@ export default function ScreenerPage() {
           <span className="text-[10px] text-muted-foreground">板块决定 L0 使用哪个指数；至少保留一个。</span>
         </div>
         <FormGrid>
-          <Field label="A1 20日跌幅阈值" hint="Chg20D < 阈值"><UnitInput value={percentValue(config.chg20_max)} onChange={(value) => setRatio('chg20_max', value)} unit="%" step={1} /></Field>
-          <Field label="距52周高回撤" hint="Close < High250 × (1 - 回撤)"><UnitInput value={percentValue(config.week52_drawdown)} onChange={(value) => setRatio('week52_drawdown', value)} unit="%" min={0} step={1} /></Field>
-          <Field label="L3 当日成交额门槛" hint="当日 amount ≥"><UnitInput value={Number((config.min_amount / 1e8).toFixed(2))} onChange={(value) => setYi('min_amount', value)} unit="亿" min={0} step={0.5} /></Field>
-          <Field label="L3 20日均额门槛" hint="20 日均成交额 ≥"><UnitInput value={Number((config.min_avg_amount_20d / 1e8).toFixed(2))} onChange={(value) => setYi('min_avg_amount_20d', value)} unit="亿" min={0} step={0.5} /></Field>
-          <Field label="当日涨幅上限" hint="L2 超过即否决"><UnitInput value={percentValue(config.day_change_max)} onChange={(value) => setRatio('day_change_max', value)} unit="%" step={1} /></Field>
-          <Field label="上市最少交易日" hint="L2 上市不足否决"><Input type="number" min={1} step={1} value={config.min_listing_sessions} onChange={(event) => patchConfig({ min_listing_sessions: Math.max(1, Number(event.target.value) || 1) })} /></Field>
-          <Field label="L4 深筛上限" hint="最多逐只做财务深筛"><Input type="number" min={0} step={1} value={config.max_deep_checks} onChange={(event) => patchConfig({ max_deep_checks: Math.max(0, Number(event.target.value) || 0) })} /></Field>
+          <Field label="A1 20日跌幅阈值" hint="Chg20D < 阈值"><NumberInput value={percentValue(config.chg20_max)} onChange={(raw) => setRatio('chg20_max', raw)} unit="%" step={1} /></Field>
+          <Field label="距52周高回撤" hint="Close < High250 × (1 - 回撤)"><NumberInput value={percentValue(config.week52_drawdown)} onChange={(raw) => setRatio('week52_drawdown', raw)} unit="%" min={0} step={1} /></Field>
+          <Field label="L3 当日成交额门槛" hint="当日 amount ≥"><NumberInput value={Number((config.min_amount / 1e8).toFixed(2))} onChange={(raw) => setYi('min_amount', raw)} unit="亿" min={0} step={0.5} /></Field>
+          <Field label="L3 20日均额门槛" hint="20 日均成交额 ≥"><NumberInput value={Number((config.min_avg_amount_20d / 1e8).toFixed(2))} onChange={(raw) => setYi('min_avg_amount_20d', raw)} unit="亿" min={0} step={0.5} /></Field>
+          <Field label="当日涨幅上限" hint="L2 超过即否决"><NumberInput value={percentValue(config.day_change_max)} onChange={(raw) => setRatio('day_change_max', raw)} unit="%" step={1} /></Field>
+          <Field label="上市最少交易日" hint="L2 上市不足否决"><NumberInput min={1} step={1} precision={0} value={config.min_listing_sessions} onChange={(raw) => patchConfig({ min_listing_sessions: Math.max(1, Number(raw) || 1) })} /></Field>
+          <Field label="L4 深筛上限" hint="最多逐只做财务深筛"><NumberInput min={0} step={1} precision={0} value={config.max_deep_checks} onChange={(raw) => patchConfig({ max_deep_checks: Math.max(0, Number(raw) || 0) })} /></Field>
           <label className="flex w-full items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2 sm:w-[240px] sm:self-start">
             <span><strong className="block text-[12px] font-medium">L2 财务深筛</strong><small className="block text-[10px] text-muted-foreground">亏损且营收&lt;1亿 / 净资产为负</small></span>
             <Switch checked={config.enable_fundamental_veto} onCheckedChange={(checked) => patchConfig({ enable_fundamental_veto: checked })} />

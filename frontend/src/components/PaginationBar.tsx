@@ -72,7 +72,9 @@ export function PaginationBar({
 
         <span className="flex items-center gap-1.5">
           <Input
-            type="number"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
             min={1}
             max={Math.max(totalPages, 1)}
             value={jump}

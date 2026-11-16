@@ -11,6 +11,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { NumberInput } from '@/components/ui/number-input';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -70,20 +71,6 @@ const defaultConfig: StrategyConfig = {
   handling_fee_rate: 0.0000341, regulatory_fee_rate: 0.00002, transfer_fee_rate: 0.00001,
   slippage_bps: 1, volume_participation: 0.2,
 };
-
-function UnitInput({
-  value, onChange, unit, min, max, step, type = 'number', placeholder, disabled,
-}: {
-  value: string | number; onChange: (value: string) => void; unit: string;
-  min?: number; max?: number; step?: number; type?: string; placeholder?: string; disabled?: boolean;
-}) {
-  return (
-    <div className="relative">
-      <Input type={type} min={min} max={max} step={step} value={value} placeholder={placeholder} disabled={disabled} onChange={(event) => onChange(event.target.value)} className="pr-10" />
-      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
-    </div>
-  );
-}
 
 function Segmented({ options, value, onChange }: { options: Array<{ value: string; label: string }>; value: string; onChange: (value: string) => void }) {
   return (
@@ -801,7 +788,7 @@ export default function PaperPage() {
         <Panel title="建立本地虚拟账户" description="账户仅用于规则与撮合验证，不连接券商，不产生真实资金变动。" action={<Landmark className="size-4" />}>
           <FormGrid>
             <Field label="账户名称" wide><Input value={accountName} onChange={(event) => setAccountName(event.target.value)} /></Field>
-            <Field label="初始资金"><UnitInput unit="CNY" min={1} step={10000} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} /></Field>
+            <Field label="初始资金"><NumberInput unit="CNY" min={1} step={10000} precision={0} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} /></Field>
             <Field label="行情数据集" hint="用于逐根推送" wide>
               <SelectField value={datasetId || '__none__'} onValueChange={(value) => { const nextValue = value === '__none__' ? '' : value; setDatasetId(nextValue); const selected = datasets.find((item) => item.id === nextValue); if (selected) setSymbol(cleanSymbolInput(selected.symbol)); }} options={[{ value: '__none__', label: '暂不绑定' }, ...datasets.map((item) => ({ value: item.id, label: `${item.name} · ${displaySymbol(item.symbol)} · ${item.timeframe}` }))]} ariaLabel="行情数据集" />
             </Field>
@@ -837,7 +824,7 @@ export default function PaperPage() {
             <Panel className="mb-3" title="做 T 止盈与截止" description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；到 T+1 尾盘截止时间仍未止盈则无条件强平。改动保存后下一根 K 线起生效。" action={<Badge tone="indigo">即时生效</Badge>}>
               <div className="grid gap-2 lg:grid-cols-2">
                 <div className="flex items-start gap-2">
-                  <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="flex-1"><UnitInput unit="%" min={0} max={100} step={0.1} placeholder={number(tNetSpread * 100, 2)} value={tSpreadInput} onChange={setTSpreadInput} disabled={savingTSpread} /></Field>
+                  <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="flex-1"><NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty placeholder={number(tNetSpread * 100, 2)} value={tSpreadInput} onChange={setTSpreadInput} disabled={savingTSpread} /></Field>
                   <Button size="sm" className="mt-[24px] h-8" onClick={() => void saveTNetSpread()} disabled={savingTSpread || tSpreadInput === ''}>{savingTSpread ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTSpread ? '正在保存' : '保存止盈'}</Button>
                 </div>
                 <div className="flex items-start gap-2">
@@ -855,7 +842,7 @@ export default function PaperPage() {
                 </div>
                 {deepDropPct != null && (
                   <>
-                    <Field label="阈值（%）" hint="10–20，20cm 板极端恐慌线" className="w-40"><UnitInput unit="%" min={10} max={20} step={0.5} placeholder={number(deepDropPct * 100, 1)} value={deepDropInput} onChange={setDeepDropInput} disabled={savingDeepDrop} /></Field>
+                    <Field label="阈值（%）" hint="10–20，20cm 板极端恐慌线" className="w-40"><NumberInput unit="%" min={10} max={20} step={0.5} allowEmpty placeholder={number(deepDropPct * 100, 1)} value={deepDropInput} onChange={setDeepDropInput} disabled={savingDeepDrop} /></Field>
                     <Button size="sm" className="h-8" onClick={() => void saveDeepDrop(true)} disabled={savingDeepDrop || deepDropInput === ''}>{savingDeepDrop ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingDeepDrop ? '正在保存' : '保存阈值'}</Button>
                   </>
                 )}
@@ -879,8 +866,8 @@ export default function PaperPage() {
           {account.auto_strategy && (
             <Panel className="mb-3" title="超期降阈止盈" description={`持有交易日数达到阈值后，价格轨/账户轨止盈阈值从 15% 降为设定值。当前：${holdingDays != null && holdingTp != null ? `持有 ≥${holdingDays} 日 → ${number(holdingTp * 100, 2)}%` : '关闭'}。两项需同时填写，保存后下一根 K 线起生效。`} action={<Badge tone={holdingDays != null && holdingTp != null ? 'indigo' : 'neutral'}>{holdingDays != null && holdingTp != null ? '已开启' : '关闭'}</Badge>}>
               <div className="grid items-start gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
-                <Field label="超期天数（交易日）" hint="持有 ≥N 个交易日后降阈"><UnitInput unit="日" min={1} max={250} step={1} placeholder={holdingDays != null ? String(holdingDays) : '22'} value={holdingDaysInput} onChange={setHoldingDaysInput} disabled={savingHolding} /></Field>
-                <Field label="降阈后止盈（%）" hint="价格轨/账户轨同时降为该值"><UnitInput unit="%" min={0} max={100} step={0.1} placeholder={holdingTp != null ? number(holdingTp * 100, 2) : '3'} value={holdingTpInput} onChange={setHoldingTpInput} disabled={savingHolding} /></Field>
+                <Field label="超期天数（交易日）" hint="持有 ≥N 个交易日后降阈"><NumberInput unit="日" min={1} max={250} step={1} allowEmpty placeholder={holdingDays != null ? String(holdingDays) : '22'} value={holdingDaysInput} onChange={setHoldingDaysInput} disabled={savingHolding} /></Field>
+                <Field label="降阈后止盈（%）" hint="价格轨/账户轨同时降为该值"><NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty placeholder={holdingTp != null ? number(holdingTp * 100, 2) : '3'} value={holdingTpInput} onChange={setHoldingTpInput} disabled={savingHolding} /></Field>
                 <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveHoldingOverride()} disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}>{savingHolding ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingHolding ? '正在保存' : '保存降阈'}</Button>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
@@ -891,12 +878,12 @@ export default function PaperPage() {
             <Panel className="mb-3" title="指数 beta 腿（创业板 ETF）" description={`个股空仓期间用 ${etfSymbol} 承接 beta：指数收盘站上 ${etfEntryMa} 日线买入，跌破 ${etfExitMa} 日线或 ETF 较成本回撤 ${number(etfStop * 100, 1)}% 卖出；一旦选出个股并建仓，ETF 卖出换股。`} action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{etfEnabled ? '空仓期持有 ETF' : '空仓期纯现金'}</span><Switch checked={etfEnabled} onCheckedChange={(checked) => void toggleEtfBeta(checked)} disabled={savingEtf} /></div>}>
               <FormGrid>
                 <Field label="ETF 代码" hint={`当前 ${etfSymbol}`}><SelectField value={etfSymbolInput || etfSymbol} onValueChange={setEtfSymbolInput} disabled={savingEtf || !etfEnabled} options={[{ value: 'sz.159915', label: 'sz.159915 · 创业板ETF易方达' }, { value: 'sz.159952', label: 'sz.159952 · 创业板ETF广发' }, { value: 'sz.159964', label: 'sz.159964 · 创业板ETF平安' }]} ariaLabel="ETF 代码" /></Field>
-                <Field label="仓位（%权益）" hint={`当前 ${number(etfPct * 100, 0)}%`}><UnitInput unit="%" min={1} max={100} step={1} placeholder={number(etfPct * 100, 0)} value={etfPctInput} onChange={setEtfPctInput} disabled={savingEtf || !etfEnabled} /></Field>
-                <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfEntryMa)} value={etfEntryMaInput} onChange={setEtfEntryMaInput} disabled={savingEtf || !etfEnabled} /></Field>
-                <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`}><UnitInput unit="日" min={2} max={250} step={1} placeholder={String(etfExitMa)} value={etfExitMaInput} onChange={setEtfExitMaInput} disabled={savingEtf || !etfEnabled} /></Field>
-                <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`}><UnitInput unit="%" min={0.1} max={99} step={0.1} placeholder={number(etfStop * 100, 1)} value={etfStopInput} onChange={setEtfStopInput} disabled={savingEtf || !etfEnabled} /></Field>
-                <Field label="不追高上限（偏离均线 %）" hint={`当前 ${etfDev > 0 ? `${number(etfDev * 100, 1)}%（关闭=0）` : '关闭'}`}><UnitInput unit="%" min={0} max={50} step={0.5} placeholder={number(etfDev * 100, 1)} value={etfDevInput} onChange={setEtfDevInput} disabled={savingEtf || !etfEnabled} /></Field>
-                <Field label="清仓后冷却（交易日）" hint={`当前 ${etfCooldown > 0 ? `${etfCooldown} 个交易日（关闭=0）` : '关闭'}`}><UnitInput unit="日" min={0} max={60} step={1} placeholder={String(etfCooldown)} value={etfCooldownInput} onChange={setEtfCooldownInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="仓位（%权益）" hint={`当前 ${number(etfPct * 100, 0)}%`}><NumberInput unit="%" min={1} max={100} step={1} allowEmpty placeholder={number(etfPct * 100, 0)} value={etfPctInput} onChange={setEtfPctInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="入场均线（日）" hint={`当前 ${etfEntryMa} 日`}><NumberInput unit="日" min={2} max={250} step={1} allowEmpty placeholder={String(etfEntryMa)} value={etfEntryMaInput} onChange={setEtfEntryMaInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="出场均线（日）" hint={`当前 ${etfExitMa} 日`}><NumberInput unit="日" min={2} max={250} step={1} allowEmpty placeholder={String(etfExitMa)} value={etfExitMaInput} onChange={setEtfExitMaInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="硬止损（%）" hint={`当前 ${number(etfStop * 100, 1)}%`}><NumberInput unit="%" min={0.1} max={99} step={0.1} allowEmpty placeholder={number(etfStop * 100, 1)} value={etfStopInput} onChange={setEtfStopInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="不追高上限（偏离均线 %）" hint={`当前 ${etfDev > 0 ? `${number(etfDev * 100, 1)}%（关闭=0）` : '关闭'}`}><NumberInput unit="%" min={0} max={50} step={0.5} allowEmpty placeholder={number(etfDev * 100, 1)} value={etfDevInput} onChange={setEtfDevInput} disabled={savingEtf || !etfEnabled} /></Field>
+                <Field label="清仓后冷却（交易日）" hint={`当前 ${etfCooldown > 0 ? `${etfCooldown} 个交易日（关闭=0）` : '关闭'}`}><NumberInput unit="日" min={0} max={60} step={1} allowEmpty placeholder={String(etfCooldown)} value={etfCooldownInput} onChange={setEtfCooldownInput} disabled={savingEtf || !etfEnabled} /></Field>
               </FormGrid>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Button size="sm" className="h-8" onClick={() => void saveEtfConfig()} disabled={savingEtf || !etfEnabled}>{savingEtf ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingEtf ? '正在保存' : '保存 ETF'}</Button>
@@ -984,8 +971,8 @@ export default function PaperPage() {
               <div className="mb-2 flex items-center gap-2 text-[11px]"><span className="text-muted-foreground">委托方式</span><Segmented value={orderType} onChange={(value) => { setOrderType(value as OrderType); resetTier(); }} options={[{ value: 'market', label: '市价' }, { value: 'limit', label: '限价' }]} /></div>
               <FormGrid>
                 <Field label="标的代码" hint="6 位代码"><Input value={symbol} onChange={(event) => applySymbol(cleanSymbolInput(event.target.value))} placeholder="例如 688200" inputMode="numeric" maxLength={6} /></Field>
-                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><UnitInput unit="股" min={1} step={tradingRules?.rules.step || 100} value={quantity} onChange={(value) => { setQuantity(Number(value)); resetTier(); }} /></Field>
-                {orderType === 'limit' && <Field label="委托价格"><UnitInput unit="元" min={0.01} step={0.01} value={limitPrice} onChange={(value) => { setLimitPrice(value); resetTier(); }} placeholder="0.00" /></Field>}
+                <Field label="委托数量" hint={tradingRules ? `最小 ${integer(tradingRules.rules.min_qty)} 股` : '校验中…'}><NumberInput unit="股" min={1} step={tradingRules?.rules.step || 100} value={quantity} onChange={(value) => { setQuantity(Number(value)); resetTier(); }} /></Field>
+                {orderType === 'limit' && <Field label="委托价格"><NumberInput unit="元" min={0.01} step={0.01} allowEmpty value={limitPrice} onChange={(value) => { setLimitPrice(value); resetTier(); }} placeholder="0.00" /></Field>}
               </FormGrid>
               <div className="mt-2 grid grid-cols-4 gap-1.5">
                 {AMOUNT_TIERS.map((amount) => (

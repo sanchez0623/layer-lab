@@ -21,6 +21,7 @@ import SearchInput from '../components/SearchInput';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { NumberInput } from '@/components/ui/number-input';
 import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
@@ -138,25 +139,6 @@ const trailWaitReason = (item: RotationTrailItem): string => {
   const stage = item.bottleneck ? trailBottleneckLabel[item.bottleneck] ?? item.bottleneck : '漏斗';
   return `无候选（${stage}后为空）`;
 };
-
-function UnitInput({
-  value, onChange, unit, min, max, step, type = 'number',
-}: {
-  value: string | number;
-  onChange: (value: string) => void;
-  unit: string;
-  min?: number;
-  max?: number;
-  step?: number;
-  type?: string;
-}) {
-  return (
-    <div className="relative">
-      <Input type={type} min={min} max={max} step={step} value={value} onChange={(event) => onChange(event.target.value)} className="pr-10" />
-      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
-    </div>
-  );
-}
 
 export default function BacktestPage() {
   const [config, setConfig] = useState<StrategyConfig>(fallbackConfig);
@@ -835,21 +817,21 @@ export default function BacktestPage() {
                   {config.enable_t && (
                     <>
                       <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T">
-                        <UnitInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
+                        <NumberInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
                       </Field>
                       <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平">
                         <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
                       </Field>
                       <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（≥10%，20cm 板极端恐慌线）；0 = 关闭">
-                        <UnitInput unit="%" min={0} max={20} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
+                        <NumberInput unit="%" min={0} max={20} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
                       </Field>
                     </>
                   )}
                   <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降阈；留空=关闭">
-                    <UnitInput unit="交易日" min={1} max={250} step={1} value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
+                    <NumberInput unit="交易日" min={1} max={250} step={1} allowEmpty value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
                   </Field>
                   <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值">
-                    <UnitInput unit="%" min={0} max={100} step={0.1} value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
+                    <NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
                   </Field>
                 </FormGrid>
 
@@ -865,13 +847,13 @@ export default function BacktestPage() {
                           ]} />
                         </Field>
                         <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例">
-                          <UnitInput unit="%" min={1} max={100} step={1} value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(value) => updateConfig('etf_position_pct', Number(value) / 100)} />
+                          <NumberInput unit="%" min={1} max={100} step={1} value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(value) => updateConfig('etf_position_pct', Number(value) / 100)} />
                         </Field>
-                        <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
-                        <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF"><UnitInput unit="日" min={2} max={250} step={1} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
-                        <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓"><UnitInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
-                        <Field label="不追高上限（偏离均线 %）" hint="指数收盘高于入场均线超过该幅度时不建仓，等回踩再买；0 关闭"><UnitInput unit="%" min={0} max={50} step={0.5} value={Number(((config.etf_entry_max_deviation ?? 0) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_entry_max_deviation', Number(value) / 100)} /></Field>
-                        <Field label="清仓后冷却（交易日）" hint="ETF 清仓后至少 N 个交易日内不再建仓，抑制均线附近反复打脸；0 关闭"><UnitInput unit="日" min={0} max={60} step={1} value={config.etf_reentry_cooldown_days ?? 0} onChange={(value) => updateConfig('etf_reentry_cooldown_days', Number(value))} /></Field>
+                        <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF"><NumberInput unit="日" min={2} max={250} step={1} precision={0} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
+                        <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF"><NumberInput unit="日" min={2} max={250} step={1} precision={0} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
+                        <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓"><NumberInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
+                        <Field label="不追高上限（偏离均线 %）" hint="指数收盘高于入场均线超过该幅度时不建仓，等回踩再买；0 关闭"><NumberInput unit="%" min={0} max={50} step={0.5} value={Number(((config.etf_entry_max_deviation ?? 0) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_entry_max_deviation', Number(value) / 100)} /></Field>
+                        <Field label="清仓后冷却（交易日）" hint="ETF 清仓后至少 N 个交易日内不再建仓，抑制均线附近反复打脸；0 关闭"><NumberInput unit="日" min={0} max={60} step={1} precision={0} value={config.etf_reentry_cooldown_days ?? 0} onChange={(value) => updateConfig('etf_reentry_cooldown_days', Number(value))} /></Field>
                       </FormGrid>
                     )}
                   </div>
@@ -892,7 +874,7 @@ export default function BacktestPage() {
                     <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={endDate} min={startDate || undefined} onChange={(event) => setEndDate(event.target.value)} className="pl-8" /></div>
                   </Field>
                   <Field label="初始资金">
-                    <UnitInput unit="CNY" min={1} step={10000} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} />
+                    <NumberInput unit="CNY" min={1} step={10000} precision={0} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} />
                   </Field>
                 </FormGrid>
 
@@ -905,8 +887,8 @@ export default function BacktestPage() {
                   <div className="grid gap-2">
                     <FeeConfigPanel value={fees} onChange={setFees} />
                     <FormGrid>
-                      <Field label="滑点"><UnitInput unit="bps" min={0} step={1} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
-                      <Field label="成交量参与上限"><UnitInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
+                      <Field label="滑点"><NumberInput unit="bps" min={0} step={1} precision={0} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
+                      <Field label="成交量参与上限"><NumberInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
                     </FormGrid>
                   </div>
                 )}
