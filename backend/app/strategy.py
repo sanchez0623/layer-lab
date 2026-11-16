@@ -43,6 +43,105 @@ def board_sell_threshold(symbol: str) -> int:
 TAIL_ENTRY_START = dtime(14, 30)
 TAIL_ENTRY_END = dtime(14, 50)
 
+# ------------------------------------------------------------------
+# 策略状态单一来源：字段清单只写这一份，state_dict / load_state 由它生成。
+# （属性名, 类型, 缺省值）。新增状态字段必须同步登记这张表——
+# test_strategy_state.py 校验「实例属性 ⇆ 字段表」双向完备，漏加即测试失败。
+# ------------------------------------------------------------------
+STATE_VERSION = 1
+
+STRATEGY_STATE_FIELDS: list[tuple[str, str, object]] = [
+    ("last_add_price", "float", None),
+    ("last_add_session", "int", None),
+    ("had_new_low", "bool", False),
+    ("armed", "bool", False),
+    ("liquidating", "bool", False),
+    ("close_reason", "str", ""),
+    ("divergence_count", "int", 0),
+    ("vwap_count", "int", 0),
+    ("account_return_peak", "float", 0.0),
+    ("round_t_start", "float", 0.0),
+    ("t_order_submitted", "bool", False),
+    ("t_exit_submitted", "bool", False),
+    ("t_traded_today", "bool", False),
+    ("recent_long_upper", "bool", False),
+    ("event_halt", "bool", False),
+    ("entry_submitted_date", "date", None),
+    ("add_submitted_date", "date", None),
+    ("round_entry_date", "date", None),
+    ("last_intraday_timestamp", "ts", None),
+]
+
+
+def _coerce(kind: str, raw: object, default: object) -> object:
+    """把落库的原始值收敛成字段类型；显式 null / 非法值一律回落缺省（防御式边界）。
+
+    与旧手写 load_state 的口径逐字段对齐；差异只有一处改进：旧实现遇到
+    「显式 null 的 int 字段」会 int(None) 直接抛 TypeError，这里回落缺省。
+    """
+    if raw is None:
+        return default
+    try:
+        if kind == "bool":
+            return bool(raw)
+        if kind == "int":
+            return int(raw)
+        if kind == "float":
+            return float(raw)
+        if kind == "str":
+            return str(raw)
+        if kind == "date":
+            return str(raw) if raw else default
+        if kind == "ts":
+            return datetime.fromisoformat(str(raw)) if raw else default
+    except (TypeError, ValueError):
+        pass
+    return default
+
+
+def ensure_round_state(
+    strategy: "LayeredTStrategy", account: "BrokerAccount", daily_history: list[Bar] | None,
+) -> str:
+    """载入策略状态后的一致性校验与自愈（64f692bb 卡死事故防线）。
+
+    不变式：本轮序列号 sequence_index>0 时，加仓基准价 / 加仓会话 / 建仓日期
+    必须非空——否则加仓永远不发、A3 超跌永不触发、超期降阈止盈失效。
+    违反时从账户成交记录自愈：本轮的永久仓买入 = 最近 sequence_index 笔；
+    last_add_session 取最后一笔成交日所在日线会话序号（与 on_fill 同口径）。
+    无法自愈（找不到永久仓成交）时返回告警文案，由调用方落日志。
+
+    返回："" 表示状态一致；非空表示已自愈或需人工关注的原因说明。
+    """
+    if account.sequence_index <= 0:
+        return ""
+    missing = [
+        name for name in ("last_add_price", "last_add_session", "round_entry_date")
+        if getattr(strategy, name) is None
+    ]
+    if not missing:
+        return ""
+    buys = [
+        fill for fill in (account.trades or [])
+        if fill.side == "BUY" and fill.purpose == "PERMANENT"
+    ]
+    if not buys:
+        return f"round-state missing {missing} 且无永久仓成交记录，无法自愈，请人工核对"
+    round_fills = buys[-int(account.sequence_index):]
+    last = round_fills[-1]
+    if strategy.last_add_price is None:
+        strategy.last_add_price = last.price
+    if strategy.last_add_session is None:
+        fill_date = str(last.timestamp)[:10]
+        strategy.last_add_session = max(
+            0, len([bar for bar in (daily_history or []) if bar.date <= fill_date]) - 1
+        )
+    if strategy.round_entry_date is None:
+        strategy.round_entry_date = str(round_fills[0].timestamp)[:10]
+    return (
+        f"round-state 自愈：{missing} <- price={strategy.last_add_price} "
+        f"session={strategy.last_add_session} entry={strategy.round_entry_date}"
+    )
+
 
 class Strategy(ABC):
     @abstractmethod
@@ -94,50 +193,17 @@ class LayeredTStrategy(Strategy):
         self.last_intraday_timestamp: datetime | None = None
 
     def state_dict(self) -> dict:
-        return {
-            "last_add_price": self.last_add_price, "last_add_session": self.last_add_session,
-            "had_new_low": self.had_new_low, "armed": self.armed,
-            "liquidating": self.liquidating, "close_reason": self.close_reason,
-            "divergence_count": self.divergence_count, "vwap_count": self.vwap_count,
-            "account_return_peak": self.account_return_peak, "round_t_start": self.round_t_start,
-            "t_order_submitted": self.t_order_submitted, "t_exit_submitted": self.t_exit_submitted,
-            "t_traded_today": self.t_traded_today, "recent_long_upper": self.recent_long_upper,
-            "event_halt": self.event_halt,
-            "entry_submitted_date": self.entry_submitted_date,
-            "add_submitted_date": self.add_submitted_date,
-            "round_entry_date": self.round_entry_date,
-            "last_intraday_timestamp": (
-                self.last_intraday_timestamp.isoformat() if self.last_intraday_timestamp else None
-            ),
-        }
+        dump: dict = {"state_version": STATE_VERSION}
+        for name, kind, _default in STRATEGY_STATE_FIELDS:
+            value = getattr(self, name)
+            dump[name] = value.isoformat() if kind == "ts" and value is not None else value
+        return dump
 
     def load_state(self, state: dict) -> None:
-        self.last_add_price = state.get("last_add_price")
-        self.last_add_session = state.get("last_add_session")
-        self.had_new_low = bool(state.get("had_new_low", False))
-        self.armed = bool(state.get("armed", False))
-        self.liquidating = bool(state.get("liquidating", False))
-        self.close_reason = state.get("close_reason") or ""
-        self.divergence_count = int(state.get("divergence_count", 0))
-        self.vwap_count = int(state.get("vwap_count", 0))
-        self.account_return_peak = float(state.get("account_return_peak", 0.0))
-        self.round_t_start = float(state.get("round_t_start", 0.0))
-        self.t_order_submitted = bool(state.get("t_order_submitted", False))
-        self.t_exit_submitted = bool(state.get("t_exit_submitted", False))
-        self.t_traded_today = bool(state.get("t_traded_today", False))
-        self.recent_long_upper = bool(state.get("recent_long_upper", False))
-        self.event_halt = bool(state.get("event_halt", False))
-        submitted_date = state.get("entry_submitted_date")
-        self.entry_submitted_date = str(submitted_date) if submitted_date else None
-        add_date = state.get("add_submitted_date")
-        self.add_submitted_date = str(add_date) if add_date else None
-        raw_entry_date = state.get("round_entry_date")
-        self.round_entry_date = str(raw_entry_date) if raw_entry_date else None
-        raw_timestamp = state.get("last_intraday_timestamp")
-        try:
-            self.last_intraday_timestamp = datetime.fromisoformat(raw_timestamp) if raw_timestamp else None
-        except (TypeError, ValueError):
-            self.last_intraday_timestamp = None
+        # 字段迁移按 version 分支：当前 1 代内所有落库结构同构，直接收敛。
+        # 未来改字段语义时在这里按 _coerce("int", state.get("state_version"), 1) 分支迁移。
+        for name, kind, default in STRATEGY_STATE_FIELDS:
+            setattr(self, name, _coerce(kind, state.get(name), default))
 
     def start_day(self, has_intraday: bool) -> None:
         self.t_order_submitted = False

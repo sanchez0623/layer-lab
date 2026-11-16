@@ -43,7 +43,7 @@ from .rotation_trail import (
 )
 from .screener import ScreenerConfig, ScreenerService, ScreeningResult
 from .storage import SQLiteStorage
-from .strategy import LayeredTStrategy
+from .strategy import LayeredTStrategy, ensure_round_state
 from .trading_rules import NOT_MODELED, all_board_rules, board_of, price_cage_bounds, rules_for
 
 
@@ -467,7 +467,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.1.6",
+        version="2.2.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -744,6 +744,10 @@ def create_app() -> FastAPI:
         if account.auto_strategy:
             strategy = LayeredTStrategy(account.config)
             strategy.load_state(account.strategy_state)
+            repair_note = ensure_round_state(strategy, account, daily_history or [])
+            if repair_note:
+                # 自愈/告警落到容器日志（docker logs 可见）；修复随本 tick 的 save_paper 持久化。
+                print(f"[strategy-state] {account.id[:8]}: {repair_note}")
             if is_new_day:
                 strategy.start_day(bar.timeframe != "daily")
 

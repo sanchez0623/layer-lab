@@ -145,6 +145,13 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
   用 `position.t_qty > today_t_buy_qty` 区分隔夜仓（T1）与当日仓（T0）——**T0 当日不强平**可留到 T1，
   保证做 T 资金最迟 T+1 收盘前了结。两个参数都在模拟盘做 T 面板可视化编辑。
   ⚠️ 旧的 `t_target_spread`（毛价差）**已废弃**，不再驱动平 T，仅保留字段兼容老账户快照，别再读它。
+- **strategy_state 单一来源 + 不变式自愈**：策略状态字段清单收敛在 `strategy.py` 的 `STRATEGY_STATE_FIELDS`
+  （`state_dict`/`load_state` 由它生成，新增字段漏登记会被 `test_strategy_state.py` 拦下）；
+  落库结构带 `state_version`。`ensure_round_state` 在每个 live-tick 载入状态后校验不变式
+  「sequence_index>0 ⇒ last_add_price / last_add_session / round_entry_date 非空」，违反时从
+  最近 sequence_index 笔永久仓买入自愈并打 `[strategy-state]` 日志；无法自愈（无成交记录）时告警。
+  2026-11-16 的 64f692bb 卡死事故（有持仓但 last_add_price=null，加仓永远不发）就是缺这道防线的教训；
+  另：关闭自动策略只暂停调度、不清状态（`/reset` 才是重开一轮）。
 - **baostock 禁止并发**：baostock 数据源**不能并发访问**，并发会被服务端拉黑（封 IP/账号）。任何调用 baostock 的路径必须串行化：
   - `universe.py` 已做对：单 login 复用全部查询 + `threading.RLock` 串行 + 后台单线程回补（`_relogin` 定时轮换）。
   - **`market.py` 是隐患**：`fetch_baostock_daily` / 两处 `fetch_*_index` 各自独立 `bs.login()`（约 317/378/431 行），**没有全局锁**；若调度线程（paper-scheduler）与用户触发请求并发打 baostock，会撞车。新增任何 baostock 调用前，先确认已被全局锁串行化，或复用 `universe.py` 的会话，别再各开 login。
