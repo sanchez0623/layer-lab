@@ -4,8 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.broker import BrokerAccount
-from app.domain import Bar, OrderRequest
+from app.domain import Bar, FeeConfig, OrderRequest
 from app.main import (
+    build_strategy_config,
     create_app,
     intraday_bucket,
     latest_closed_intraday_bar,
@@ -38,36 +39,6 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     assert "file_path" not in demo["daily"]
     assert len(client.get("/api/datasets").json()) == 3
 
-    backtest_response = client.post("/api/backtests", json={
-        "name": "API日线降级测试", "dataset_id": demo["daily"]["id"],
-        "index_dataset_id": demo["index"]["id"], "initial_cash": 4_000_000,
-        "config": {"enable_t": False},
-    })
-    assert backtest_response.status_code == 200, backtest_response.text
-    report = backtest_response.json()
-    assert report["status"] == "COMPLETED"
-    assert report["metrics"]["initial_cash"] == 4_000_000
-    assert len(report["equity_curve"]) == 320
-    # 每月盈亏：月度切分覆盖全部净值点，累计盈亏等于期末权益 - 初始资金（分位四舍五入内）。
-    monthly = report["metrics"]["monthly"]
-    assert monthly and sum(item["trading_days"] for item in monthly) == len(report["equity_curve"])
-    assert monthly[-1]["month"] == report["equity_curve"][-1]["date"][:7]
-    assert sum(item["pnl"] for item in monthly) == pytest.approx(
-        report["metrics"]["final_equity"] - report["metrics"]["initial_cash"], abs=0.05,
-    )
-    assert report["data_info"]["actual_granularity"] == "daily_only"
-    assert report["data_info"]["is_synthetic"] is True
-    # 报告 config 记录数据集选择，供前端「带入回测」恢复。
-    assert report["config"]["dataset_id"] == demo["daily"]["id"]
-    assert report["config"]["index_dataset_id"] == demo["index"]["id"]
-    assert any("降级" in item for item in report["warnings"])
-    assert client.get(f"/api/backtests/{report['id']}").status_code == 200
-    listed = client.get("/api/backtests").json()
-    assert listed["total"] == 1 and len(listed["items"]) == 1
-    exported = client.get(f"/api/backtests/{report['id']}/export?kind=orders")
-    assert exported.status_code == 200
-    assert "text/csv" in exported.headers["content-type"]
-
     created = client.post("/api/paper/accounts", json={
         "name": "API模拟", "initial_cash": 100_000,
         "dataset_id": demo["intraday"]["id"],
@@ -94,29 +65,6 @@ def test_full_api_workflow(tmp_path, monkeypatch):
     assert reset.json()["cash"] == 100_000
     assert reset.json()["cursor"] == 0
     assert reset.json()["positions"] == []
-
-
-def test_backtest_accepts_5m_intraday(tmp_path, monkeypatch):
-    """后续回测统一用 5 分钟线：intraday 数据集粒度原样进入报告。"""
-    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
-    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
-    client = TestClient(create_app())
-    demo = client.post("/api/datasets/demo").json()
-    response = client.post("/api/backtests", json={
-        "name": "5分钟路径回测",
-        "dataset_id": demo["daily"]["id"],
-        "intraday_dataset_id": demo["intraday"]["id"],
-        "index_dataset_id": demo["index"]["id"],
-        "initial_cash": 4_000_000,
-        "config": {"enable_t": True},
-    })
-    assert response.status_code == 200, response.text
-    report = response.json()
-    assert report["status"] == "COMPLETED"
-    assert report["data_info"]["intraday_timeframe"] == "5m"
-    assert report["data_info"]["actual_granularity"] == "5m"
-    assert report["data_info"]["intraday_rows"] == 48 * 48
-    assert any("5m" in item for item in report["warnings"])
 
 
 def test_multiple_paper_accounts_can_reuse_local_order_ids(tmp_path, monkeypatch):
@@ -313,13 +261,13 @@ def test_fee_config_defaults_customization_and_persistence(tmp_path, monkeypatch
     assert reloaded["config"]["min_commission"] == 2.0
 
     demo = client.post("/api/datasets/demo").json()
-    report = client.post("/api/backtests", json={
-        "name": "费用自定义回测", "dataset_id": demo["daily"]["id"],
-        "index_dataset_id": demo["index"]["id"], "initial_cash": 4_000_000,
-        "config": {"enable_t": False}, "fees": {"commission_rate": 2.0},
-    }).json()
-    assert report["config"]["commission_rate"] == pytest.approx(0.0002)  # 本次覆盖全局
-    assert report["config"]["stamp_tax_rate"] == pytest.approx(0.0008)   # 其余沿用全局
+    # 费率合并口径：全局打底 → 本次 fees 覆盖（万分之转小数），不再依赖单标的回测端点。
+    global_fees = FeeConfig.from_dict(custom)
+    merged = build_strategy_config(global_fees, {"commission_rate": 2.0}, {"enable_t": False})
+    assert merged.commission_rate == pytest.approx(0.0002)   # 本次覆盖全局
+    assert merged.stamp_tax_rate == pytest.approx(0.0008)    # 其余沿用全局
+    assert merged.enable_t is False                          # 显式 config 最高优先
+    assert demo["daily"]["rows"] == 320
 
     account = client.post("/api/paper/accounts", json={
         "name": "费用账户", "initial_cash": 100_000,
@@ -463,25 +411,76 @@ def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeyp
 
 
 def test_backtest_job_flow_submit_progress_complete(tmp_path, monkeypatch):
-    """后台回测任务端到端：提交→轮询进度→COMPLETED→取报告；串行不排队（忙时 409）。"""
+    """后台回测任务端到端（HTTP 契约）：提交→轮询进度→COMPLETED→取报告；忙时 409。
+
+    引擎用毫秒级替身替换（真实漏斗引擎的生命周期由 test_backtest_funnel 覆盖）。
+    """
     import time
+    from app.backtest_jobs import Execution
+
     monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
-    client = TestClient(create_app())
-    demo = client.post("/api/datasets/demo").json()
+    application = create_app()
+    client = TestClient(application)
 
-    # 缺 dataset_id → 400
-    assert client.post("/api/backtests/jobs", json={"mode": "single"}).status_code == 400
+    class _StubAccount:
+        def snapshot_state(self) -> dict:
+            return {"cash": 1.0}
 
-    submitted = client.post("/api/backtests/jobs", json={
-        "mode": "single", "name": "后台任务回测",
-        "dataset_id": demo["daily"]["id"], "initial_cash": 4_000_000,
-        "config": {"enable_t": True},
-    })
+        def restore_state(self, state) -> None:
+            self.state = state
+
+    class _StubStrategy:
+        def state_dict(self) -> dict:
+            return {"armed": False}
+
+        def load_state(self, state) -> None:
+            self.state = state
+
+    class _StubEngine:
+        def __init__(self) -> None:
+            self.account = _StubAccount()
+            self.strategy = _StubStrategy()
+            self.hooks: dict = {}
+
+        def run(self, resume_state=None) -> dict:
+            self.hooks["on_progress"](1, 1, "2025-01-02", {"cursor_index": 0})
+            return {
+                "status": "COMPLETED", "metrics": {}, "trades": [], "orders": [],
+                "equity_curve": [], "rounds": [], "events": [], "warnings": [],
+                "data_info": {}, "config": {}, "name": "stub", "created_at": "2026-01-01T00:00:00",
+            }
+
+    def fake_builder(params, hooks, resume_state, checkpoint):
+        engine = _StubEngine()
+        engine.hooks = hooks
+        report_storage = application.state.storage
+
+        def on_complete(report):
+            report["data_info"]["daily_source"] = "stub"
+            report_storage.save_backtest(report)
+
+        return Execution(engine, on_complete)
+
+    application.state.backtest_jobs._builder = fake_builder
+
+    funnel_payload = {
+        "mode": "funnel", "name": "后台任务回测", "initial_cash": 4_000_000,
+        "screener": {"boards": ["创业板"]}, "config": {},
+    }
+
+    # 缺板块 → 400
+    assert client.post("/api/backtests/jobs", json={"mode": "funnel"}).status_code == 400
+    # mode=single 已下线 → 422（pydantic Literal 校验）
+    assert client.post("/api/backtests/jobs", json={
+        "mode": "single", "dataset_id": "whatever",
+    }).status_code == 422
+
+    submitted = client.post("/api/backtests/jobs", json=funnel_payload)
     assert submitted.status_code == 202, submitted.text
     job_id = submitted.json()["job_id"]
 
-    # 轮询直到终态（demo 数据很小，应当很快完成）
+    # 轮询直到终态（替身引擎立即完成）
     deadline = time.time() + 30
     job = None
     while time.time() < deadline:
@@ -498,10 +497,7 @@ def test_backtest_job_flow_submit_progress_complete(tmp_path, monkeypatch):
     assert report.json()["status"] == "COMPLETED"
 
     # 任务已结束，再次提交不再 409（串行槽已释放）
-    again = client.post("/api/backtests/jobs", json={
-        "mode": "single", "name": "第二次",
-        "dataset_id": demo["daily"]["id"], "initial_cash": 4_000_000, "config": {},
-    })
+    again = client.post("/api/backtests/jobs", json={**funnel_payload, "name": "第二次"})
     assert again.status_code == 202
     second_id = again.json()["job_id"]
     deadline = time.time() + 30

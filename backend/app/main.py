@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .backtest import BacktestEngine, FunnelRotationBacktest, monthly_breakdown, run_backtest, run_funnel_backtest
+from .backtest import FunnelRotationBacktest, monthly_breakdown, run_funnel_backtest
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
 from .beta_sleeve import entry_allowed, exit_reason, reentry_cooldown_ready, target_quantity
 from .broker import BrokerAccount
@@ -64,6 +64,20 @@ def is_daily_dataset(dataset, symbol: str | None = None) -> bool:
     if symbol is not None and dataset.symbol != symbol:
         return False
     return dataset.source in DAILY_DATASET_SOURCES
+
+
+def build_strategy_config(
+    base_fees: FeeConfig, raw_fees: dict | None, raw_config: dict | None,
+) -> StrategyConfig:
+    """策略配置的合并口径（纯函数）：全局费用打底 → 本次 fees 覆盖 → 显式 config 最高。
+
+    fees 为万分之口径（FeeConfig.to_strategy_patch 负责转小数）；回测请求 / 模拟盘 /
+    表单草稿校验共用同一份实现，避免各入口各写一套。
+    """
+    merged = base_fees.to_dict()
+    if raw_fees:
+        merged.update(raw_fees)
+    return StrategyConfig.from_dict({**FeeConfig.from_dict(merged).to_strategy_patch(), **(raw_config or {})})
 
 
 def trading_minutes_elapsed(timestamp: datetime) -> int:
@@ -116,18 +130,6 @@ def snapshot_execution_bar(
     )
 
 
-class BacktestRequest(BaseModel):
-    name: str = "分层加仓做T回测"
-    dataset_id: str
-    intraday_dataset_id: str | None = None
-    index_dataset_id: str | None = None
-    initial_cash: float = Field(default=4_000_000.0, gt=0)
-    start_date: str | None = None
-    end_date: str | None = None
-    config: dict = Field(default_factory=dict)
-    fees: dict | None = None  # 万分之口径的自定义费用，覆盖全局默认
-
-
 class FunnelBacktestRequest(BaseModel):
     """选股漏斗轮动回测请求；screener 为 ScreenerConfig 局部覆盖（未知键→400）。"""
 
@@ -141,13 +143,10 @@ class FunnelBacktestRequest(BaseModel):
 
 
 class BacktestJobRequest(BaseModel):
-    """后台回测任务请求：mode 决定单标的还是漏斗轮动，其余字段同对应同步请求。"""
+    """后台回测任务请求：仅支持漏斗轮动（单标的模式已随前端下线而移除）。"""
 
-    mode: Literal["single", "funnel"] = "single"
-    name: str = "回测"
-    dataset_id: str | None = None
-    intraday_dataset_id: str | None = None
-    index_dataset_id: str | None = None
+    mode: Literal["funnel"] = "funnel"
+    name: str = "选股漏斗轮动回测"
     initial_cash: float = Field(default=4_000_000.0, gt=0)
     start_date: str | None = None
     end_date: str | None = None
@@ -467,7 +466,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.1.5",
+        version="2.2.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -499,54 +498,25 @@ def create_app() -> FastAPI:
 
     def build_backtest_execution(params, hooks, resume_state, checkpoint):
         """按任务参数重建引擎（断点续传时同样走此工厂，保证口径一致）。"""
-        mode = params.get("mode", "single")
+        mode = params.get("mode", "funnel")
         config = resolve_config(params.get("config") or {}, params.get("fees"))
         name = params.get("name") or "回测"
-        if mode == "funnel":
-            screener = ScreenerConfig.from_dict({**(params.get("screener") or {}), "enable_fundamental_veto": False})
-            service = screener_service()
-            engine = FunnelRotationBacktest(
-                store=service.store, market=application.state.market_service,
-                screener_config=screener, initial_cash=params["initial_cash"],
-                config=config, start_date=params.get("start_date"), end_date=params.get("end_date"),
-                name=name, quan=getattr(application.state, "quan_store", None), hooks=hooks,
-            )
-
-            def on_complete(report):
-                report["data_info"]["daily_source"] = getattr(service.store, "provider", "universe_db")
-                report["data_info"]["universe_db"] = str(service.store.path)
-                storage.save_backtest(report)
-                return _slim_records(_slim_rotation_trail(report))
-
-            return Execution(engine, on_complete)
-
-        daily = load_dataset(params["dataset_id"], {"daily"})
-        intraday = load_dataset(params["intraday_dataset_id"], {"1m", "5m", "tick"}) if params.get("intraday_dataset_id") else None
-        index = load_dataset(params["index_dataset_id"], {"daily"}) if params.get("index_dataset_id") else None
-        daily_dataset = get_dataset(params["dataset_id"])
-        intraday_dataset = get_dataset(params["intraday_dataset_id"]) if params.get("intraday_dataset_id") else None
-        index_dataset = get_dataset(params["index_dataset_id"]) if params.get("index_dataset_id") else None
-        engine = BacktestEngine(
-            daily=daily, intraday=intraday, index=index,
-            initial_cash=params["initial_cash"], config=config,
-            start_date=params.get("start_date"), end_date=params.get("end_date"),
-            name=name, hooks=hooks,
+        if mode != "funnel":
+            raise ValueError(f"不支持的回测模式: {mode}（单标的回测已下线，仅支持漏斗轮动）")
+        screener = ScreenerConfig.from_dict({**(params.get("screener") or {}), "enable_fundamental_veto": False})
+        service = screener_service()
+        engine = FunnelRotationBacktest(
+            store=service.store, market=application.state.market_service,
+            screener_config=screener, initial_cash=params["initial_cash"],
+            config=config, start_date=params.get("start_date"), end_date=params.get("end_date"),
+            name=name, quan=getattr(application.state, "quan_store", None), hooks=hooks,
         )
 
         def on_complete(report):
-            report["data_info"].update({
-                "daily_source": daily_dataset.source,
-                "intraday_source": intraday_dataset.source if intraday_dataset else None,
-                "index_source": index_dataset.source if index_dataset else None,
-            })
-            # 记录数据集选择：报告详情「带入回测」据此恢复主/分钟/指数数据集。
-            report["config"].update({
-                "dataset_id": params.get("dataset_id"),
-                "intraday_dataset_id": params.get("intraday_dataset_id"),
-                "index_dataset_id": params.get("index_dataset_id"),
-            })
+            report["data_info"]["daily_source"] = getattr(service.store, "provider", "universe_db")
+            report["data_info"]["universe_db"] = str(service.store.path)
             storage.save_backtest(report)
-            return _slim_records(report)
+            return _slim_records(_slim_rotation_trail(report))
 
         return Execution(engine, on_complete)
 
@@ -640,7 +610,7 @@ def create_app() -> FastAPI:
 
     def resolve_config(raw_config: dict | None, raw_fees: dict | None) -> StrategyConfig:
         """全局费用配置打底 → 本次请求 fees 覆盖 → 显式 config 字段最高优先级。"""
-        return StrategyConfig.from_dict({**merge_fees(raw_fees).to_strategy_patch(), **(raw_config or {})})
+        return build_strategy_config(load_fee_config(), raw_fees, raw_config)
 
     def standard_symbol(raw: str) -> str:
         try:
@@ -1578,34 +1548,6 @@ def create_app() -> FastAPI:
             destination.unlink(missing_ok=True)
             raise
 
-    @application.post("/api/backtests")
-    def create_backtest(request: BacktestRequest):
-        daily_dataset = get_dataset(request.dataset_id)
-        intraday_dataset = get_dataset(request.intraday_dataset_id) if request.intraday_dataset_id else None
-        index_dataset = get_dataset(request.index_dataset_id) if request.index_dataset_id else None
-        daily = load_dataset(request.dataset_id, {"daily"})
-        intraday = load_dataset(request.intraday_dataset_id, {"1m", "5m", "tick"}) if request.intraday_dataset_id else None
-        index = load_dataset(request.index_dataset_id, {"daily"}) if request.index_dataset_id else None
-        config = resolve_config(request.config, request.fees)
-        report = run_backtest(
-            daily=daily, intraday=intraday, index=index,
-            initial_cash=request.initial_cash, config=config,
-            start_date=request.start_date, end_date=request.end_date, name=request.name,
-        )
-        report["data_info"].update({
-            "daily_source": daily_dataset.source,
-            "intraday_source": intraday_dataset.source if intraday_dataset else None,
-            "index_source": index_dataset.source if index_dataset else None,
-        })
-        # 记录数据集选择：报告详情「带入回测」据此恢复主/分钟/指数数据集。
-        report["config"].update({
-            "dataset_id": request.dataset_id,
-            "intraday_dataset_id": request.intraday_dataset_id,
-            "index_dataset_id": request.index_dataset_id,
-        })
-        storage.save_backtest(report)
-        return report
-
     @application.post("/api/backtests/funnel")
     def create_funnel_backtest(request: FunnelBacktestRequest):
         """选股漏斗轮动回测：每次清仓后重跑 L0→L4 取当时第一名换票（不联网）。"""
@@ -1633,9 +1575,7 @@ def create_app() -> FastAPI:
     @application.post("/api/backtests/jobs", status_code=202)
     def create_backtest_job(request: BacktestJobRequest):
         """提交后台回测任务，立即返回 job_id；串行不排队，忙时返回 409。"""
-        if request.mode == "single" and not request.dataset_id:
-            raise HTTPException(status_code=400, detail="单标的模式必须选择主数据集。")
-        if request.mode == "funnel" and not (request.screener or {}).get("boards"):
+        if not (request.screener or {}).get("boards"):
             raise HTTPException(status_code=400, detail="漏斗轮动模式必须至少选择一个板块。")
         params = request.model_dump()
         try:

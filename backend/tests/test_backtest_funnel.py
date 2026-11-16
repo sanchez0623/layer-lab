@@ -218,6 +218,58 @@ def test_funnel_backtest_completes_with_round_and_screen(tmp_path):
     assert any("日线口径" in item for item in report["warnings"])
 
 
+def test_funnel_resume_equivalence_matches_full_run(tmp_path):
+    """分段跑（第 K 天边界打断 + 续传）与一次性跑完逐字段一致（断点续传核心保证）。
+
+    续传口径与 BacktestJobManager 一致：account/strategy 状态由外部还原，
+    引擎只接收 resume_state（cursor / equity_curve / trail / rounds / events ...）。
+    """
+    import copy
+
+    store = _build_store(tmp_path / "u.db")
+    options = {
+        "screener_config": ScreenerConfig(boards=[BOARD_GEM], enable_fundamental_veto=False),
+        "initial_cash": 4_000_000.0, "config": StrategyConfig(),
+        "start_date": "2025-08-20", "end_date": "2025-12-31",
+    }
+    k = 3
+    captured: dict = {}
+
+    def on_progress(done, total, cursor_date, engine_state):
+        if done == k:
+            captured["engine_state"] = copy.deepcopy(engine_state)
+
+    def should_cancel():
+        return "engine_state" in captured
+
+    segment1 = FunnelRotationBacktest(
+        store=store, market=_DummyMarket(), name="段1",
+        **{**options, "hooks": {"on_progress": on_progress, "should_cancel": should_cancel}},
+    )
+    cancelled = segment1.run()
+    assert cancelled["status"] == "CANCELLED"
+    engine_state = captured["engine_state"]
+    assert engine_state["cursor_index"] == k - 1
+
+    account_state = copy.deepcopy(segment1.account.snapshot_state())
+    strategy_state = copy.deepcopy(segment1.strategy.state_dict())
+
+    segment2 = FunnelRotationBacktest(store=store, market=_DummyMarket(), name="段2", **options)
+    segment2.account.restore_state(account_state)
+    segment2.strategy.load_state(strategy_state)
+    resumed = segment2.run(resume_state=engine_state)
+
+    full = FunnelRotationBacktest(store=store, market=_DummyMarket(), name="全量", **options).run()
+
+    assert resumed["status"] == "COMPLETED" and full["status"] == "COMPLETED"
+    # 核心保证：净值曲线 / 轮次 / 成交 / 指标 / 轨迹逐字段完全一致
+    assert resumed["equity_curve"] == full["equity_curve"]
+    assert resumed["rounds"] == full["rounds"]
+    assert resumed["trades"] == full["trades"]
+    assert resumed["metrics"] == full["metrics"]
+    assert resumed["data_info"]["rotation_trail"] == full["data_info"]["rotation_trail"]
+
+
 def test_funnel_daily_fills_have_open_timestamp_not_midnight(tmp_path):
     """日线口径成交的时间戳必须是开盘时刻 09:30，不能是 0 点（界面显示 bug 回归）。
 

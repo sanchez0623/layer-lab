@@ -205,25 +205,19 @@ export default function ScreenerPage() {
     }
   };
 
-  const bringIn = async (target: 'backtest' | 'paper', candidate: ScreenerCandidate) => {
+  // 带入模拟盘（开启轮动：每次清仓后重新选股）；旧的「带入回测」服务单标的回测，已随其下线。
+  const bringIn = async (target: 'paper', candidate: ScreenerCandidate) => {
     if (!run) { setError('请先运行或回看一次选股结果。'); return; }
     setPreparing(`${target}:${candidate.code}`);
     setError('');
     try {
       const prepared = await api.prepareScreenerRun(run.id, {
-        target, candidate_code: candidate.code, rotation: target === 'paper',
+        target, candidate_code: candidate.code, rotation: true,
       });
-      if (target === 'backtest') {
-        sessionStorage.setItem('layerlab.pendingDatasets', JSON.stringify({
-          runId: run.id, candidate: prepared.candidate, datasets: prepared.datasets,
-        }));
-        window.location.hash = '#/backtest';
-      } else {
-        sessionStorage.setItem('layerlab.pendingPaper', JSON.stringify({
-          runId: run.id, candidate: prepared.candidate, accountId: prepared.account?.id ?? null,
-        }));
-        window.location.hash = '#/paper';
-      }
+      sessionStorage.setItem('layerlab.pendingPaper', JSON.stringify({
+        runId: run.id, candidate: prepared.candidate, accountId: prepared.account?.id ?? null,
+      }));
+      window.location.hash = '#/paper';
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '一键带入失败。');
       setPreparing(null);
@@ -399,7 +393,7 @@ export default function ScreenerPage() {
 
       {runLoading ? <Panel><Loading label="正在读取选股结果" /></Panel> : !run ? (
         <Panel className="mb-3">
-          <EmptyState icon={<Filter className="size-6" />} title="等待第一轮选股" description="先更新全市场日线，再点击「运行选股」。L0 大盘门关闭时本轮候选为空，页面会提示空仓等待。" action={<div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span className="rounded-md bg-muted px-2 py-1"><b className="mr-1 font-mono text-foreground">1</b>回补日线</span><span>→</span><span className="rounded-md bg-muted px-2 py-1"><b className="mr-1 font-mono text-foreground">2</b>运行选股</span><span>→</span><span className="rounded-md bg-muted px-2 py-1"><b className="mr-1 font-mono text-foreground">3</b>带入回测/模拟盘</span></div>} />
+          <EmptyState icon={<Filter className="size-6" />} title="等待第一轮选股" description="先更新全市场日线，再点击「运行选股」。L0 大盘门关闭时本轮候选为空，页面会提示空仓等待。" action={<div className="flex flex-wrap items-center gap-2 text-[11px] text-muted-foreground"><span className="rounded-md bg-muted px-2 py-1"><b className="mr-1 font-mono text-foreground">1</b>回补日线</span><span>→</span><span className="rounded-md bg-muted px-2 py-1"><b className="mr-1 font-mono text-foreground">2</b>运行选股</span><span>→</span><span className="rounded-md bg-muted px-2 py-1"><b className="mr-1 font-mono text-foreground">3</b>带入模拟盘</span></div>} />
         </Panel>
       ) : (
         <>
@@ -469,10 +463,7 @@ export default function ScreenerPage() {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" disabled={preparing !== null} onClick={() => void bringIn('backtest', first)}>
-                    {preparing === `backtest:${first.code}` ? <><Loader2 className="animate-spin" />带入中</> : <><Layers3 />带入回测</>}
-                  </Button>
-                  <Button size="sm" variant="outline" disabled={preparing !== null} title="带入模拟盘（开启轮动：每次清仓后重新选股）" aria-label="带入模拟盘（开启轮动：每次清仓后重新选股）" onClick={() => void bringIn('paper', first)}>
+                  <Button size="sm" disabled={preparing !== null} title="带入模拟盘（开启轮动：每次清仓后重新选股）" aria-label="带入模拟盘（开启轮动：每次清仓后重新选股）" onClick={() => void bringIn('paper', first)}>
                     {preparing === `paper:${first.code}` ? <><Loader2 className="animate-spin" />带入中</> : <><Play />带入模拟盘</>}
                   </Button>
                 </div>
@@ -509,10 +500,9 @@ export default function ScreenerPage() {
                     <TableCell>
                       {candidate.deep_checked && !candidate.vetoed_by ? (
                         <div className="flex items-center gap-1">
-                          <button className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent" disabled={preparing !== null} onClick={() => void bringIn('backtest', candidate)}>{preparing === `backtest:${candidate.code}` ? '带入中' : '回测'}</button>
                           <button className="rounded px-1.5 py-0.5 text-[11px] text-primary hover:bg-accent" disabled={preparing !== null} title="带入模拟盘（开启轮动：每次清仓后重新选股）" onClick={() => void bringIn('paper', candidate)}>{preparing === `paper:${candidate.code}` ? '带入中' : '模拟盘'}</button>
                         </div>
-                      ) : <span className="text-muted-foreground" title="仅 L4 深筛通过的可用候选可带入回测或模拟盘">—</span>}
+                      ) : <span className="text-muted-foreground" title="仅 L4 深筛通过的可用候选可带入模拟盘">—</span>}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -528,7 +518,7 @@ export default function ScreenerPage() {
               <span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-success" />可用 = 已通过 L4 财务深筛</span>
               <span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-destructive" />被否 = L4 财务深筛否决</span>
               <span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-warning" />深度未查 = 超出本轮深筛上限</span>
-              <span>仅「可用」行可一键带入回测/模拟盘</span>
+              <span>仅「可用」行可一键带入模拟盘</span>
             </div>
           </Panel>
         </>

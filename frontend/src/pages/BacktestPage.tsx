@@ -29,7 +29,7 @@ import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
-import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, Dataset, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade } from '../types';
+import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -57,8 +57,7 @@ const fallbackConfig: StrategyConfig = {
   etf_reentry_cooldown_days: 5,
 };
 
-/** 回测模式：funnel = 漏斗轮动（清仓后重新选股换票）；single = 传统单标的。 */
-type BacktestMode = 'funnel' | 'single';
+/** 回测仅保留漏斗轮动模式（清仓后重跑选股换票）；旧的单标的模式已下线。 */
 
 /** 工作台子视图：run = 运行回测（配置 / 进度），reports = 回测报告（列表 / 搜索 / 删除 / 详情）。 */
 type WorkspaceTab = 'run' | 'reports';
@@ -114,15 +113,6 @@ const mergeKnown = <T extends object>(base: T, saved?: Partial<T> | null): T => 
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}/;
 
-const roundValue = (round: Round, keys: string[]): unknown => {
-  for (const key of keys) if (round[key] !== undefined && round[key] !== null) return round[key];
-  return undefined;
-};
-const roundNumber = (round: Round, keys: string[]): number | undefined => {
-  const value = roundValue(round, keys);
-  return typeof value === 'number' ? value : value === undefined ? undefined : Number(value);
-};
-
 /** 月度最大回撤按「负号 + 百分比」展示；0 不加负号。 */
 const drawdownLabel = (value: number): string => (value > 0 ? `-${percent(value)}` : percent(0));
 
@@ -165,12 +155,8 @@ function UnitInput({
 }
 
 export default function BacktestPage() {
-  const [datasets, setDatasets] = useState<Dataset[]>([]);
   const [config, setConfig] = useState<StrategyConfig>(fallbackConfig);
   const [fees, setFees] = useState<FeeConfig>(defaultFeeConfig);
-  const [datasetId, setDatasetId] = useState('');
-  const [intradayId, setIntradayId] = useState('');
-  const [indexId, setIndexId] = useState('');
   const [name, setName] = useState('分层双账本策略回测');
   const [initialCash, setInitialCash] = useState(4000000);
   const [startDate, setStartDate] = useState('');
@@ -191,9 +177,8 @@ export default function BacktestPage() {
   const pollTimerRef = useRef<number | null>(null);
   // 本会话内已落地为终态的作业 id：重挂载时用它避免把刚「放弃」的已完成作业重新拉起。
   const settledJobIdsRef = useRef<Set<string>>(new Set());
-  const [tableTab, setTableTab] = useState<'rounds' | 'trades' | 'orders'>('rounds');
+  const [tableTab, setTableTab] = useState<'trades' | 'orders'>('trades');
   const [exporting, setExporting] = useState<'trades' | 'orders' | 'trail' | null>(null);
-  const [mode, setMode] = useState<BacktestMode>('funnel');
   const [screener, setScreener] = useState<ScreenerConfig>(fallbackScreener);
   // 换票轨迹后台分页状态：主报告已瘦身不含全量 trail，列表按页拉取；
   // 后端默认把连续同因空仓合并成区间并附带 summary 汇总块。
@@ -236,13 +221,11 @@ export default function BacktestPage() {
     setLoading(true);
     setError('');
     try {
-      const [datasetResult, defaults, draftResponse] = await Promise.all([
-        api.datasets(),
+      const [defaults, draftResponse] = await Promise.all([
         api.strategyDefaults(),
         // 草稿读取失败不阻塞页面：退回服务端默认配置。
         api.backtestConfigDraft().catch(() => ({ draft: null, updated_at: null })),
       ]);
-      setDatasets(datasetResult);
       // 重挂载时重新挂到仍在跑的后台作业（导航离开后服务端继续跑），避免丢失进度条。
       // 除 RUNNING 外还要重挂「可续跑但没在跑」的作业（刷新前进程重启/取消/失败）：
       // 这类作业不在轮询态，但必须把面板带回来，否则用户刷新后既看不到也续跑不了。
@@ -288,23 +271,14 @@ export default function BacktestPage() {
         typeof draft?.initial_cash === 'number' ? draft.initial_cash : (defaults.initial_cash ?? 4_000_000),
       );
       if (draft) {
-        if (draft.mode) setMode(draft.mode);
         if (draft.name !== undefined) setName(draft.name);
         if (draft.start_date && ISO_DATE.test(draft.start_date)) setStartDate(draft.start_date.slice(0, 10));
         if (draft.end_date && ISO_DATE.test(draft.end_date)) setEndDate(draft.end_date.slice(0, 10));
-        const available = (id?: string | null) => Boolean(id && datasetResult.some((item) => item.id === id));
-        if (available(draft.dataset_id)) setDatasetId(draft.dataset_id as string);
-        if (available(draft.intraday_dataset_id)) setIntradayId(draft.intraday_dataset_id as string);
-        if (available(draft.index_dataset_id)) setIndexId(draft.index_dataset_id as string);
       } else if (resetForm) {
-        // 「恢复默认」：表单字段一并回到出厂状态，再由下方数据集默认选择逻辑补齐。
-        setMode('funnel');
+        // 「恢复默认」：表单字段一并回到出厂状态。
         setName('分层双账本策略回测');
         setStartDate('');
         setEndDate('');
-        setDatasetId('');
-        setIntradayId('');
-        setIndexId('');
         setAdvanced(false);
       }
       // 漏斗轮动回测：用后端选股默认阈值打底（失败不阻塞，沿用本地 fallbackScreener）。
@@ -319,61 +293,8 @@ export default function BacktestPage() {
           }));
         }
       }).catch(() => undefined);
-      const daily = datasetResult.find((item) => item.timeframe === 'daily' && item.source === 'baostock')
-        || datasetResult.find((item) => item.timeframe === 'daily');
-      if (daily) {
-        setDatasetId((current) => current || daily.id);
-        setStartDate((current) => current || daily.start?.slice(0, 10));
-        setEndDate((current) => current || daily.end?.slice(0, 10));
-        const minute = datasetResult.find((item) => item.timeframe === '5m' && item.symbol === daily.symbol);
-        if (minute) setIntradayId((current) => current || minute.id);
-        const index = datasetResult.find((item) => item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
-        if (index) setIndexId((current) => current || index.id);
-      }
-      // 选股页「带入回测」写入的待应用数据集：预填三个选择器后立即清除，只消费一次。
-      const pendingRaw = sessionStorage.getItem('layerlab.pendingDatasets');
-      if (pendingRaw) {
-        sessionStorage.removeItem('layerlab.pendingDatasets');
-        try {
-          const pending = JSON.parse(pendingRaw) as {
-            runId?: string;
-            candidate?: { code?: string; name?: string };
-            datasets?: { daily?: Dataset; intraday?: Dataset | null; index?: Dataset | null };
-          };
-          const available = (id?: string) => Boolean(id && datasetResult.some((item) => item.id === id));
-          let missing = 0;
-          const pendingDaily = pending.datasets?.daily;
-          if (pendingDaily && available(pendingDaily.id)) {
-            setDatasetId(pendingDaily.id);
-            if (pendingDaily.start) setStartDate(pendingDaily.start.slice(0, 10));
-            if (pendingDaily.end) setEndDate(pendingDaily.end.slice(0, 10));
-          } else if (pendingDaily) {
-            missing += 1;
-          }
-          const pendingIntraday = pending.datasets?.intraday;
-          if (pendingIntraday) {
-            if (available(pendingIntraday.id)) setIntradayId(pendingIntraday.id);
-            else missing += 1;
-          } else {
-            setIntradayId('');
-          }
-          const pendingIndex = pending.datasets?.index;
-          if (pendingIndex) {
-            if (available(pendingIndex.id)) setIndexId(pendingIndex.id);
-            else missing += 1;
-          } else {
-            setIndexId('');
-          }
-          const code = pending.candidate?.code || pendingDaily?.symbol || '';
-          const name = pending.candidate?.name || pendingDaily?.name || '';
-          toast.success(
-            `已从选股结果带入：${[code, name].filter(Boolean).join(' ')}（运行 ${pending.runId || '—'}）`
-            + (missing > 0 ? `；${missing} 个数据集未在后端找到，已保留默认选择` : '，可直接运行回测'),
-          );
-        } catch {
-          // 忽略损坏的 sessionStorage 数据
-        }
-      }
+      // 旧的选股页「带入回测」是为单标的模式准备的，单标的已下线：消费并丢弃一次，避免残留提示。
+      sessionStorage.removeItem('layerlab.pendingDatasets');
       // 初始化完成前不自动保存，避免把默认值写回覆盖已有草稿。
       draftHydratedRef.current = true;
       // 报告列表按需在「回测报告」tab 加载，进入页面不再自动拉取最新报告（大 payload 只在打开详情时读取）。
@@ -392,14 +313,10 @@ export default function BacktestPage() {
     if (!draftHydratedRef.current) return;
     if (!Number.isFinite(initialCash) || initialCash <= 0) return;
     const payload: BacktestConfigDraft = {
-      mode,
       name: name.trim(),
       initial_cash: initialCash,
       start_date: startDate || null,
       end_date: endDate || null,
-      dataset_id: datasetId || null,
-      intraday_dataset_id: intradayId || null,
-      index_dataset_id: indexId || null,
       config: stripFeeFields(config),
       fees,
       screener,
@@ -414,11 +331,8 @@ export default function BacktestPage() {
       }).catch(() => setDraftStatus('error'));
     }, 700);
     return () => window.clearTimeout(timer);
-  }, [mode, name, initialCash, startDate, endDate, datasetId, intradayId, indexId, config, fees, screener]);
+  }, [name, initialCash, startDate, endDate, config, fees, screener]);
 
-  const selectedDataset = datasets.find((item) => item.id === datasetId);
-  const intradayOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === '5m');
-  const indexOptions = datasets.filter((item) => item.id !== datasetId && item.timeframe === 'daily' && ['sh.000688', 'sz.399006'].includes(item.symbol));
   // 在途作业：RUNNING/CANCELLING 或可续跑（CANCELLED/INTERRUPTED/FAILED）时禁止再起新回测，
   // 避免与服务端单作业互斥冲突；想另起必须先对旧作业做「继续」或「放弃」。
   const jobActive = running || submitting
@@ -444,7 +358,7 @@ export default function BacktestPage() {
         setReport(result);
         setViewingReport(true);
         setWorkspaceTab('reports');
-        setTableTab('rounds');
+        setTableTab('trades');
         // 新报告是最新一份：清空搜索并刷新列表，返回列表时立即可见。
         setReportSearch('');
         setReportQuery('');
@@ -457,19 +371,12 @@ export default function BacktestPage() {
   };
 
   /** 提交后台作业并开始轮询进度；409（已有回测在跑）向上抛出，由调用方 setError 呈现。 */
-  const startJob = async (mode: 'single' | 'funnel') => {
-    const payload = mode === 'funnel'
-      ? {
-        mode, name: name.trim() || '选股漏斗轮动回测',
-        initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
-        config: stripFeeFields(config), fees, screener,
-      }
-      : {
-        mode, name: name.trim() || '未命名回测', dataset_id: datasetId,
-        intraday_dataset_id: intradayId || undefined, index_dataset_id: indexId || undefined,
-        initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
-        config: stripFeeFields(config), fees,
-      };
+  const startJob = async () => {
+    const payload = {
+      mode: 'funnel' as const, name: name.trim() || '选股漏斗轮动回测',
+      initial_cash: initialCash, start_date: startDate || undefined, end_date: endDate || undefined,
+      config: stripFeeFields(config), fees, screener,
+    };
     const { job_id } = await api.runBacktestJob(payload);
     jobIdRef.current = job_id;
     setRunning(true);
@@ -486,14 +393,13 @@ export default function BacktestPage() {
   const run = async () => {
     if (startDate && endDate && startDate > endDate) { setError('开始日期不能晚于结束日期，请调整回测区间。'); return; }
     if (!Number.isFinite(initialCash) || initialCash <= 0) { setError('初始资金必须大于 0。'); return; }
-    // 单标的模式必须先选主数据集；漏斗轮动模式用本地 universe.db，无需数据集。
-    if (mode === 'single' && !datasetId) { setError('请选择主数据集后再运行回测。'); return; }
-    if (mode === 'funnel' && screener.boards.length === 0) { setError('请至少选择一个板块（创业板 / 科创板）。'); return; }
+    // 漏斗轮动模式用本地 universe.db，无需选择数据集。
+    if (screener.boards.length === 0) { setError('请至少选择一个板块（创业板 / 科创板）。'); return; }
     setSubmitting(true);
     setRunning(true);
     setError('');
     try {
-      await startJob(mode);
+      await startJob();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '回测运行失败，请稍后重试。');
       setRunning(false);
@@ -644,26 +550,18 @@ export default function BacktestPage() {
 
   const updateConfig = <K extends keyof StrategyConfig>(key: K, value: StrategyConfig[K]) => setConfig((current) => ({ ...current, [key]: value }));
 
-  /** 报告详情「带入回测」：把报告快照里的参数回填到运行表单（含日期/费率/选股阈值/数据集）。 */
+  /** 报告详情「带入回测」：把报告快照里的参数回填到运行表单（含日期/费率/选股阈值）。 */
   const applyReportToForm = () => {
     if (!report) return;
     const saved = report.config as ReportConfig;
     const reportFees = strategyToFeeConfig(saved);
-    const funnel = String(report.data_info?.mode) === 'funnel_rotation';
     setConfig({ ...mergeKnown(fallbackConfig, saved), ...feeConfigToStrategyPatch(reportFees) });
     setFees(reportFees);
     if (saved.screener) setScreener(mergeKnown(fallbackScreener, saved.screener));
-    setMode(funnel ? 'funnel' : 'single');
     setName(report.name || '回测');
     if (typeof saved.initial_cash === 'number') setInitialCash(saved.initial_cash);
     if (saved.start_date && ISO_DATE.test(saved.start_date)) setStartDate(saved.start_date.slice(0, 10));
     if (saved.end_date && ISO_DATE.test(saved.end_date)) setEndDate(saved.end_date.slice(0, 10));
-    if (!funnel) {
-      const available = (id?: string | null) => Boolean(id && datasets.some((item) => item.id === id));
-      if (saved.dataset_id && available(saved.dataset_id)) setDatasetId(saved.dataset_id);
-      setIntradayId(available(saved.intraday_dataset_id) ? (saved.intraday_dataset_id as string) : '');
-      setIndexId(available(saved.index_dataset_id) ? (saved.index_dataset_id as string) : '');
-    }
     setAdvanced(false);
     setWorkspaceTab('run');
     toast.success(`已把报告「${report.name}」的参数带入回测配置，可直接运行或微调。`);
@@ -675,7 +573,6 @@ export default function BacktestPage() {
     entry_date?: string | null; last_exit_date?: string | null; exit_reason?: string | null;
   } | undefined) ?? null;
   // 明细条数：主报告只带 *_total；旧缓存报告回退到本地数组长度。
-  const roundsTotal = report?.rounds_total ?? report?.rounds?.length ?? 0;
   const tradesTotal = report?.trades_total ?? report?.trades?.length ?? 0;
   const ordersTotal = report?.orders_total ?? report?.orders?.length ?? 0;
   // 漏斗轮动回测专属：每轮换票轨迹（选中日期/标的/入选依据/进出日期/盈亏）。
@@ -866,7 +763,7 @@ export default function BacktestPage() {
   // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片；成交明细筛选在本地同样生效）。
   const { recordItems, filteredTotal, recordFacets } = useMemo(() => {
     if (recordData) return { recordItems: recordData.items, filteredTotal: recordData.total, recordFacets: recordData.facets };
-    const local = tableTab === 'rounds' ? report?.rounds : tableTab === 'trades' ? report?.trades : report?.orders;
+    const local = tableTab === 'trades' ? report?.trades : report?.orders;
     let list: any[] = local ?? [];
     if (tableTab === 'trades' && tradeFilterOn) list = list.filter((item: Trade) => matchesTradeFilters(item, tradeFilter));
     const start = (recordPage - 1) * recordPageSize;
@@ -896,7 +793,7 @@ export default function BacktestPage() {
   }), [sideCounts, tradeFilter.side]);
 
   // 明细分页总数：筛选时跟随过滤后条数，否则用报告自带 *_total。
-  const recordsTotal = tableTab === 'rounds' ? roundsTotal : tableTab === 'trades' ? tradesTotal : ordersTotal;
+  const recordsTotal = tableTab === 'trades' ? tradesTotal : ordersTotal;
   const paginationTotal = tableTab === 'trades' && tradeFilterOn ? filteredTotal : recordsTotal;
   const paginationTotalPages = recordData?.total_pages ?? Math.max(1, Math.ceil(paginationTotal / recordPageSize));
 
@@ -922,11 +819,7 @@ export default function BacktestPage() {
               <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                 <div className="flex items-center gap-2.5">
                   <span className="grid size-7 place-items-center rounded-md bg-accent font-mono text-[11px] text-accent-foreground">01</span>
-                  <div><h2 className="text-[15px] font-semibold">实验配置</h2><p className="text-[12px] text-muted-foreground">定义数据边界与交易摩擦，再启动本地回测。</p></div>
-                </div>
-                <div className="flex gap-1 rounded-lg bg-muted p-0.5">
-                  <button type="button" className={cn('inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] transition-colors', mode === 'funnel' ? 'bg-card text-primary shadow-xs' : 'text-muted-foreground')} onClick={() => setMode('funnel')}><Layers3 className="size-3.5" />漏斗轮动回测</button>
-                  <button type="button" className={cn('inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] transition-colors', mode === 'single' ? 'bg-card text-primary shadow-xs' : 'text-muted-foreground')} onClick={() => setMode('single')}><BarChart3 className="size-3.5" />单标的回测</button>
+                  <div><h2 className="text-[15px] font-semibold">实验配置</h2><p className="text-[12px] text-muted-foreground">漏斗轮动回测：清仓后重跑选股漏斗换票；定义数据边界与交易摩擦，再启动本地回测。</p></div>
                 </div>
               </div>
 
@@ -952,8 +845,7 @@ export default function BacktestPage() {
                   </Field>
                 </FormGrid>
 
-                {mode === 'funnel' && (
-                  <div className="rounded-xl border bg-muted/25 p-3">
+                <div className="rounded-xl border bg-muted/25 p-3">
                     <SwitchRow label="指数 beta 腿（创业板 ETF）" description="个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列" checked={Boolean(config.etf_beta_enabled)} onCheckedChange={(checked) => updateConfig('etf_beta_enabled', checked)} />
                     {config.etf_beta_enabled && (
                       <FormGrid className="mt-2">
@@ -975,61 +867,28 @@ export default function BacktestPage() {
                       </FormGrid>
                     )}
                   </div>
-                )}
 
-                {mode === 'funnel' && (
-                  <div className="flex items-start gap-2 rounded-lg border border-primary/15 bg-accent/40 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
-                    <Layers3 className="mt-0.5 size-3.5 shrink-0 text-primary" />
-                    <span>漏斗轮动回测：<strong className="text-foreground">不再锁定单一标的</strong>，每次清仓后按下方选股漏斗（L0→L4）重跑、取当时第一名换票；行情取自本地 universe.db 缓存（双创日线），为日线口径。</span>
-                  </div>
-                )}
+                <div className="flex items-start gap-2 rounded-lg border border-primary/15 bg-accent/40 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
+                  <Layers3 className="mt-0.5 size-3.5 shrink-0 text-primary" />
+                  <span>漏斗轮动回测：<strong className="text-foreground">不再锁定单一标的</strong>，每次清仓后按下方选股漏斗（L0→L4）重跑、取当时第一名换票；行情取自本地 universe.db 缓存（双创日线），为日线口径。</span>
+                </div>
 
                 <FormGrid>
                   <Field label="实验名称" wide>
                     <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="输入回测名称" />
                   </Field>
-                  {mode === 'single' && (
-                    <Field label="主数据集" hint="quan_parquet / baostock 日线" wide>
-                      <SelectField
-                        value={datasetId}
-                        onValueChange={(value) => {
-                          const next = datasets.find((item) => item.id === value);
-                          setDatasetId(value);
-                          if (next) {
-                            setStartDate(next.start?.slice(0, 10) || '');
-                            setEndDate(next.end?.slice(0, 10) || '');
-                            const minute = datasets.find((item) => item.timeframe === '5m' && item.symbol === next.symbol);
-                            if (minute) setIntradayId(minute.id);
-                          }
-                        }}
-                        options={datasets.filter((item) => item.timeframe === 'daily').map((item) => ({ value: item.id, label: `${item.name} · ${displaySymbol(item.symbol)} · ${item.source}` }))}
-                        placeholder="请选择数据集"
-                        ariaLabel="主数据集"
-                      />
-                    </Field>
-                  )}
                   <Field label="开始日期">
-                    <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={startDate} min={mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined} max={endDate || (mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined)} onChange={(event) => setStartDate(event.target.value)} className="pl-8" /></div>
+                    <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={startDate} max={endDate || undefined} onChange={(event) => setStartDate(event.target.value)} className="pl-8" /></div>
                   </Field>
                   <Field label="结束日期">
-                    <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={endDate} min={startDate || (mode === 'single' ? selectedDataset?.start?.slice(0, 10) : undefined)} max={mode === 'single' ? selectedDataset?.end?.slice(0, 10) : undefined} onChange={(event) => setEndDate(event.target.value)} className="pl-8" /></div>
+                    <div className="relative"><CalendarDays className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" /><Input type="date" value={endDate} min={startDate || undefined} onChange={(event) => setEndDate(event.target.value)} className="pl-8" /></div>
                   </Field>
                   <Field label="初始资金">
                     <UnitInput unit="CNY" min={1} step={10000} value={initialCash} onChange={(value) => { const parsed = Number(value); setInitialCash(Number.isFinite(parsed) ? parsed : 0); }} />
                   </Field>
-                  {mode === 'single' && (
-                    <>
-                      <Field label="5 分钟数据集" hint="腾讯 / quan_parquet 5 分钟">
-                        <SelectField value={intradayId || '__none__'} onValueChange={(value) => setIntradayId(value === '__none__' ? '' : value)} options={[{ value: '__none__', label: '不使用（日线降级）' }, ...intradayOptions.map((item) => ({ value: item.id, label: `${item.name} · ${item.timeframe} · ${item.source}` }))]} ariaLabel="5 分钟数据集" />
-                      </Field>
-                      <Field label="指数数据集" hint="大盘门（日线）">
-                        <SelectField value={indexId || '__none__'} onValueChange={(value) => setIndexId(value === '__none__' ? '' : value)} options={[{ value: '__none__', label: '不使用' }, ...indexOptions.map((item) => ({ value: item.id, label: `${item.name} · ${displaySymbol(item.symbol)}` }))]} ariaLabel="指数数据集" />
-                      </Field>
-                    </>
-                  )}
                 </FormGrid>
 
-                {mode === 'funnel' && <ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff />}
+                <ScreenerConfigPanel value={screener} onChange={setScreener} fundamentalLockedOff />
 
                 <button type="button" className="flex items-center justify-between rounded-lg border bg-card px-3 py-2 text-left text-[12px] font-medium text-foreground/80 hover:bg-muted/40" onClick={() => setAdvanced(!advanced)} aria-expanded={advanced}>
                   <span className="inline-flex items-center gap-2"><Gauge className="size-3.5" />交易摩擦与撮合参数</span>{advanced ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
@@ -1047,11 +906,7 @@ export default function BacktestPage() {
 
               <div className="mt-3 flex flex-col gap-2 border-t pt-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-muted-foreground">
-                  {mode === 'funnel' ? (
-                    <span>漏斗轮动 · {screener.boards.join(' / ')} · 每次清仓后重跑 L0→L4 取第一名换票（日线口径）</span>
-                  ) : selectedDataset ? (
-                    <><span>{selectedDataset.rows.toLocaleString('zh-CN')} 行</span><i className="size-1 rounded-full bg-border" /><span>{selectedDataset.timeframe} 粒度</span><i className="size-1 rounded-full bg-border" /><span>{shortDate(selectedDataset.start)} — {shortDate(selectedDataset.end)}</span>{selectedDataset.is_synthetic && <SyntheticNotice compact />}</>
-                  ) : <span>请选择主数据集以查看数据边界</span>}
+                  <span>漏斗轮动 · {screener.boards.join(' / ')} · 每次清仓后重跑 L0→L4 取第一名换票（日线口径）</span>
                   {draftStatus !== 'idle' && (
                     <>
                       <i className="size-1 rounded-full bg-border" />
@@ -1068,7 +923,7 @@ export default function BacktestPage() {
                   <Button variant="outline" size="sm" className="h-8" type="button" onClick={() => void applyToPaper()} disabled={applying || jobActive}>
                     {applying ? <><Loader2 className="animate-spin" />正在应用</> : <><ArrowDownToLine />应用到模拟盘</>}
                   </Button>
-                  <Button size="sm" className="h-8" type="submit" disabled={jobActive || (mode === 'single' && !datasetId)}>
+                  <Button size="sm" className="h-8" type="submit" disabled={jobActive}>
                     {jobActive ? <><Loader2 className="animate-spin" />正在运行回测</> : <><Play />运行回测</>}
                   </Button>
                 </div>
@@ -1362,9 +1217,8 @@ export default function BacktestPage() {
 
                 <Panel className="mb-3" flush>
                   <div id="backtest-records" className="flex flex-col gap-2 border-b px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
-                    <Tabs value={tableTab} onValueChange={(value) => setTableTab(value as 'rounds' | 'trades' | 'orders')}>
+                    <Tabs value={tableTab} onValueChange={(value) => setTableTab(value as 'trades' | 'orders')}>
                       <TabsList>
-                        <TabsTrigger value="rounds">已结束轮次<span className="ml-1 font-mono text-[10px] text-muted-foreground">{roundsTotal}</span></TabsTrigger>
                         <TabsTrigger value="trades">成交明细<span className="ml-1 font-mono text-[10px] text-muted-foreground">{tradesTotal}</span></TabsTrigger>
                         <TabsTrigger value="orders">委托记录<span className="ml-1 font-mono text-[10px] text-muted-foreground">{ordersTotal}</span></TabsTrigger>
                       </TabsList>
@@ -1385,14 +1239,6 @@ export default function BacktestPage() {
                       </div>
                     </div>
                   )}
-                  {tableTab === 'rounds' && <Table><TableHeader><TableRow><TableHead>轮次</TableHead><TableHead>开始时间</TableHead><TableHead>结束时间</TableHead><TableHead className="text-right">最大投入</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead className="text-right">收益率</TableHead><TableHead className="text-right">成交数</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
-                    {roundsTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有轮次记录" /> : recordItems.map((round, index) => {
-                      const pnl = roundNumber(round, ['net_profit', 'pnl', 'realized_pnl']);
-                      const returns = roundNumber(round, ['return_rate', 'total_return', 'return']);
-                      const seq = (recordPage - 1) * recordPageSize + index + 1;
-                      return <TableRow key={String(round.id ?? index)}><TableCell><strong className="font-mono text-[11px] text-primary">#{String(roundValue(round, ['round', 'index']) ?? seq).padStart(2, '0')}</strong></TableCell><TableCell>{shortDate(String(roundValue(round, ['start_date', 'start', 'opened_at']) || ''))}</TableCell><TableCell>{shortDate(String(roundValue(round, ['end_date', 'end', 'closed_at']) || ''))}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(roundNumber(round, ['max_invested', 'invested']))}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', pnl !== undefined && (pnl >= 0 ? 'text-destructive' : 'text-success'))}>{signedMoney(pnl)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', returns !== undefined && (returns >= 0 ? 'text-destructive' : 'text-success'))}>{signedPercent(returns)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(roundNumber(round, ['trade_count', 'trades_count', 'total_trades']))}</TableCell><TableCell><Badge tone={lower(round.status) === 'closed' ? 'green' : 'neutral'}>{statusLabel(round.status || 'closed')}</Badge></TableCell></TableRow>;
-                    })}
-                  </TableBody></Table>}
                   {tableTab === 'trades' && <Table><TableHeader><TableRow><TableHead>成交时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>用途</TableHead><TableHead className="text-right">价格</TableHead><TableHead className="text-right">数量</TableHead><TableHead className="text-right">成交额</TableHead><TableHead className="text-right">费用</TableHead><TableHead className="text-right">已实现盈亏</TableHead></TableRow></TableHeader><TableBody>
                     {tradesTotal === 0 ? <TableEmpty colSpan={9} message="本次回测没有成交记录" /> : tradeFilterOn && recordItems.length === 0 && !recordLoading ? <TableEmpty colSpan={9} message="没有符合条件的成交记录" action={<Button variant="outline" size="sm" type="button" onClick={clearTradeFilters}>清空筛选</Button>} /> : recordItems.map((trade, index) => <TableRow key={String(trade.id ?? `${trade.timestamp}-${index}`)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
                   </TableBody></Table>}
