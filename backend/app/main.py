@@ -43,7 +43,7 @@ from .rotation_trail import (
 )
 from .screener import ScreenerConfig, ScreenerService, ScreeningResult
 from .storage import SQLiteStorage
-from .strategy import LayeredTStrategy
+from .strategy import LayeredTStrategy, ensure_round_state
 from .trading_rules import NOT_MODELED, all_board_rules, board_of, price_cage_bounds, rules_for
 
 
@@ -466,7 +466,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.2.0",
+        version="2.2.1",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -714,6 +714,10 @@ def create_app() -> FastAPI:
         if account.auto_strategy:
             strategy = LayeredTStrategy(account.config)
             strategy.load_state(account.strategy_state)
+            repair_note = ensure_round_state(strategy, account, daily_history or [])
+            if repair_note:
+                # 提示/告警打到应用日志（docker logs 可见）；已修复版本 tick 内 save_paper 持久化。
+                print(f"[strategy-state] {account.id[:8]}: {repair_note}")
             if is_new_day:
                 strategy.start_day(bar.timeframe != "daily")
 
@@ -1844,7 +1848,10 @@ def create_app() -> FastAPI:
         account = get_paper(account_id)
         account.auto_strategy = request.enabled
         if not request.enabled:
-            account.strategy_state = {}
+            # 关闭=暂停调度，不是「结束本轮」：strategy_state 是「本轮进行到哪一步」
+            # 的事实记录，清空会让有持仓的账户重开后永远无法加仓/触发 A3/超期降阈
+            # 止盈（64f692bb 卡死事故，回归测试 test_auto_strategy_toggle_keeps_round_state）。
+            # 要重新开一轮：平仓归零后自动 reset_round，或 POST /reset 整账户重置。
             account.armed_state = "OFF"
         return save_paper(account)
 

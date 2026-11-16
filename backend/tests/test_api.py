@@ -14,6 +14,7 @@ from app.main import (
     trading_intraday_bars_elapsed,
     trading_minutes_elapsed,
 )
+from app.storage import SQLiteStorage
 
 
 def test_full_api_workflow(tmp_path, monkeypatch):
@@ -510,3 +511,51 @@ def test_backtest_job_flow_submit_progress_complete(tmp_path, monkeypatch):
 
     # 不存在的任务 → 404
     assert client.get("/api/backtests/jobs/nope").status_code == 404
+
+
+def test_auto_strategy_toggle_keeps_round_state(tmp_path, monkeypatch):
+    """关闭自动策略=暂停调度：strategy_state 必须保留（64f692bb 加仓卡死事故回归）。
+
+    旧实现关闭时清空 strategy_state，导致有持仓的账户重开后永远无法加仓、
+    A3 超跌信号无法触发、超期降阈止盈失效（有持仓但 last_add_price=null 的
+    「半重置」状态）。新语义：重开按原状态继续推进；重新开始一轮走平仓自动
+    reset_round，或 POST /reset 整账户重置。
+    """
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    client = TestClient(create_app())
+    created = client.post("/api/paper/accounts", json={
+        "name": "开关状态回归", "initial_cash": 100_000,
+    })
+    assert created.status_code == 200
+    account_id = created.json()["id"]
+
+    # 直接构造「本轮进行中」状态：序列已建到第 2 笔、带加仓记忆与建仓日期
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    state = storage.get_paper(account_id)
+    state["sequence_index"] = 1
+    state["strategy_state"] = {
+        "last_add_price": 145.9046, "last_add_session": 241,
+        "round_entry_date": "2026-11-13", "armed": False,
+    }
+    storage.save_paper(state)
+
+    off = client.post(f"/api/paper/accounts/{account_id}/auto-strategy", json={"enabled": False})
+    assert off.status_code == 200
+    body = off.json()
+    assert body["auto_strategy"] is False
+    assert body["armed_state"] == "OFF"
+    assert body["sequence_index"] == 1
+    # strategy_state 是内部字段，公开响应里没有；从落库状态断言保留
+    persisted = storage.get_paper(account_id)
+    assert persisted["strategy_state"]["last_add_price"] == 145.9046
+    assert persisted["strategy_state"]["round_entry_date"] == "2026-11-13"
+
+    on = client.post(f"/api/paper/accounts/{account_id}/auto-strategy", json={"enabled": True})
+    assert on.status_code == 200
+    resumed = on.json()
+    assert resumed["auto_strategy"] is True
+    assert resumed["sequence_index"] == 1
+    persisted = storage.get_paper(account_id)
+    assert persisted["strategy_state"]["last_add_price"] == 145.9046
+    assert persisted["strategy_state"]["last_add_session"] == 241
