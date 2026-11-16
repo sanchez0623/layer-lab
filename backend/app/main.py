@@ -467,7 +467,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.1.5",
+        version="2.1.6",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1904,7 +1904,10 @@ def create_app() -> FastAPI:
         account = get_paper(account_id)
         account.auto_strategy = request.enabled
         if not request.enabled:
-            account.strategy_state = {}
+            # 关闭=暂停调度，不是「结束本轮」：strategy_state 是「本轮进行到哪一步」
+            # 的事实记录，清空会让有持仓的账户重开后永远无法加仓/触发 A3/超期降阈
+            # 止盈（64f692bb 卡死事故，回归测试 test_auto_strategy_toggle_keeps_round_state）。
+            # 要重新开一轮：平仓归零后自动 reset_round，或 POST /reset 整账户重置。
             account.armed_state = "OFF"
         return save_paper(account)
 
