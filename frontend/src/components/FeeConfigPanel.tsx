@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 import { api } from '../lib/api';
 import { FEE_FIELDS } from '../lib/feeConfig';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
+import { NumberInput } from '@/components/ui/number-input';
 import type { AccountState, FeeConfig } from '../types';
 
 type Busy = 'save' | 'reset' | 'apply' | null;
@@ -21,6 +21,7 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
   const [error, setError] = useState('');
 
   const update = (key: keyof FeeConfig, raw: string) => {
+    if (raw.trim() === '') return;
     const parsed = Number(raw);
     onChange({ ...value, [key]: Number.isFinite(parsed) && parsed >= 0 ? parsed : 0 });
   };
@@ -60,19 +61,16 @@ export default function FeeConfigPanel({ value, onChange, accountId, onAccountUp
           {FEE_FIELDS.map((field) => (
             <label className="flex min-w-0 max-w-full flex-col gap-1 sm:max-w-[180px]" key={field.key}>
               <span className="truncate text-[12px] font-medium text-foreground/80" title={field.label}>{field.label}</span>
-              <div className="relative">
-                <Input
-                  type="number"
-                  min="0"
-                  max={field.max}
-                  step={field.step}
-                  value={value[field.key]}
-                  onChange={(event) => update(field.key, event.target.value)}
-                  aria-label={field.label}
-                  className="h-8 pr-9"
-                />
-                <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{field.unit === '万分之' ? '‱' : field.unit}</span>
-              </div>
+              <NumberInput
+                min={0}
+                max={field.max}
+                step={field.step}
+                unit={field.unit === '万分之' ? '‱' : field.unit}
+                value={value[field.key]}
+                onChange={(raw) => update(field.key, raw)}
+                aria-label={field.label}
+                className="h-8"
+              />
               <small className="truncate text-[10px] leading-4 text-muted-foreground" title={field.note}>{field.note}</small>
             </label>
           ))}

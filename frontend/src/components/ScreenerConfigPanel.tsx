@@ -1,7 +1,7 @@
 import type { ReactNode } from 'react';
 import { Filter, SlidersHorizontal } from 'lucide-react';
 import { Badge } from './Ui';
-import { Input } from '@/components/ui/input';
+import { NumberInput } from '@/components/ui/number-input';
 import { Switch } from '@/components/ui/switch';
 import { cn } from '@/lib/utils';
 import type { ScreenerConfig } from '../types';
@@ -24,15 +24,6 @@ function Param({ label, hint, children }: { label: string; hint: string; childre
       <div className="max-w-full [&_[data-slot=input]]:h-8 sm:max-w-[170px]">{children}</div>
       <small className="truncate text-[10px] leading-4 text-muted-foreground" title={hint}>{hint}</small>
     </label>
-  );
-}
-
-function UnitInput({ children, unit }: { children: ReactNode; unit: string }) {
-  return (
-    <div className="relative">
-      {children}
-      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">{unit}</span>
-    </div>
   );
 }
 
@@ -68,10 +59,10 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
       body: (
         <>
           <Param label="A1 20日跌幅阈值" hint="20 日涨跌幅低于阈值">
-            <UnitInput unit="%"><Input type="number" step="1" value={percentValue(value.chg20_max)} onChange={(event) => setRatio('chg20_max', event.target.value)} className="pr-7" /></UnitInput>
+            <NumberInput unit="%" step={1} value={percentValue(value.chg20_max)} onChange={(raw) => setRatio('chg20_max', raw)} />
           </Param>
           <Param label="距52周高回撤" hint="收盘价低于 250 日高点回撤线">
-            <UnitInput unit="%"><Input type="number" min="0" step="1" value={percentValue(value.week52_drawdown)} onChange={(event) => setRatio('week52_drawdown', event.target.value)} className="pr-7" /></UnitInput>
+            <NumberInput unit="%" min={0} step={1} value={percentValue(value.week52_drawdown)} onChange={(raw) => setRatio('week52_drawdown', raw)} />
           </Param>
         </>
       ),
@@ -81,10 +72,10 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
       body: (
         <>
           <Param label="当日涨幅上限" hint="当日涨幅超过即否决">
-            <UnitInput unit="%"><Input type="number" step="1" value={percentValue(value.day_change_max)} onChange={(event) => setRatio('day_change_max', event.target.value)} className="pr-7" /></UnitInput>
+            <NumberInput unit="%" step={1} value={percentValue(value.day_change_max)} onChange={(raw) => setRatio('day_change_max', raw)} />
           </Param>
           <Param label="上市最少交易日" hint="上市不足则否决">
-            <UnitInput unit="日"><Input type="number" min="1" step="1" value={value.min_listing_sessions} onChange={(event) => patch({ min_listing_sessions: Math.max(1, Number(event.target.value) || 1) })} className="pr-7" /></UnitInput>
+            <NumberInput unit="日" min={1} step={1} precision={0} value={value.min_listing_sessions} onChange={(raw) => patch({ min_listing_sessions: Math.max(1, Number(raw) || 1) })} />
           </Param>
           <label className="flex items-center justify-between gap-3 rounded-lg border bg-muted/35 px-2.5 py-2" title={fundamentalLockedOff ? '回测为避免未来数据与联网财务，固定关闭财务深筛' : undefined}>
             <span><strong className="block text-[12px] font-medium">财务深筛</strong><small className="block text-[10px] text-muted-foreground">{fundamentalLockedOff ? '回测固定关闭（避免未来数据）' : '亏损且营收<1亿 / 净资产为负'}</small></span>
@@ -98,10 +89,10 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
       body: (
         <>
           <Param label="当日成交额门槛" hint="当日成交额不低于门槛">
-            <UnitInput unit="亿"><Input type="number" min="0" step="0.5" value={Number((value.min_amount / 1e8).toFixed(2))} onChange={(event) => setYi('min_amount', event.target.value)} className="pr-7" /></UnitInput>
+            <NumberInput unit="亿" min={0} step={0.5} value={Number((value.min_amount / 1e8).toFixed(2))} onChange={(raw) => setYi('min_amount', raw)} />
           </Param>
           <Param label="20日均额门槛" hint="20 日均成交额不低于门槛">
-            <UnitInput unit="亿"><Input type="number" min="0" step="0.5" value={Number((value.min_avg_amount_20d / 1e8).toFixed(2))} onChange={(event) => setYi('min_avg_amount_20d', event.target.value)} className="pr-7" /></UnitInput>
+            <NumberInput unit="亿" min={0} step={0.5} value={Number((value.min_avg_amount_20d / 1e8).toFixed(2))} onChange={(raw) => setYi('min_avg_amount_20d', raw)} />
           </Param>
         </>
       ),
@@ -110,7 +101,7 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
       tag: 'L4', title: '财务深筛', note: '控制基本面核验次数',
       body: (
         <Param label="深筛上限" hint="最多逐只做财务深筛的数量">
-          <UnitInput unit="只"><Input type="number" min="0" step="1" value={value.max_deep_checks} onChange={(event) => patch({ max_deep_checks: Math.max(0, Number(event.target.value) || 0) })} className="pr-7" /></UnitInput>
+          <NumberInput unit="只" min={0} step={1} precision={0} value={value.max_deep_checks} onChange={(raw) => patch({ max_deep_checks: Math.max(0, Number(raw) || 0) })} />
         </Param>
       ),
     },
