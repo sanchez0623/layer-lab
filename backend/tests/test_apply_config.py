@@ -139,3 +139,43 @@ def test_apply_config_invalid_field_rejected(client, account_id):
     assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
         "config": {"nonexistent_field": 1},
     }).status_code == 400
+
+
+def test_apply_config_withdrawal_fields_roundtrip(client, account_id):
+    """盈利提现字段整套应用后反映到账户 config，持久化往返一致。"""
+    resp = client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {
+            "withdraw_mode": "monthly",
+            "withdraw_method": "fixed",
+            "withdraw_ratio": 0.25,
+            "withdraw_fixed_amount": 8_000,
+            "withdraw_skip_when_no_profit": False,
+        },
+    })
+    assert resp.status_code == 200, resp.text
+    config = resp.json()["config"]
+    assert config["withdraw_mode"] == "monthly"
+    assert config["withdraw_method"] == "fixed"
+    assert config["withdraw_ratio"] == 0.25
+    assert config["withdraw_fixed_amount"] == 8_000
+    assert config["withdraw_skip_when_no_profit"] is False
+
+    reloaded = client.get(f"/api/paper/accounts/{account_id}").json()["config"]
+    assert reloaded["withdraw_mode"] == "monthly"
+    assert reloaded["withdraw_fixed_amount"] == 8_000
+
+
+def test_apply_config_withdrawal_invalid_rejected(client, account_id):
+    """非法提现配置 → 400（模式/方式枚举越界、比例越界、金额为负）。"""
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"withdraw_mode": "invalid"},
+    }).status_code == 400
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"withdraw_method": "invalid"},
+    }).status_code == 400
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"withdraw_ratio": 1.5},
+    }).status_code == 400
+    assert client.post(f"/api/paper/accounts/{account_id}/apply-config", json={
+        "config": {"withdraw_fixed_amount": -1},
+    }).status_code == 400

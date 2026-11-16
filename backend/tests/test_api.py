@@ -411,6 +411,45 @@ def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeyp
     assert base is not None
 
 
+def test_paper_account_config_withdrawal_fields(tmp_path, monkeypatch):
+    """盈利提现字段走 /config 局部更新：改完立即反映到账户 config，下一根K线起生效。"""
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    client = TestClient(create_app())
+    demo = client.post("/api/datasets/demo").json()
+    account = client.post("/api/paper/accounts", json={
+        "name": "提现配置", "initial_cash": 4_000_000,
+        "dataset_id": demo["intraday"]["id"],
+    }).json()
+    # 默认关闭
+    assert account["config"]["withdraw_mode"] == "none"
+
+    updated = client.post(f"/api/paper/accounts/{account['id']}/config", json={
+        "withdraw_mode": "per_trade", "withdraw_method": "fixed",
+        "withdraw_fixed_amount": 12_000,
+    })
+    assert updated.status_code == 200, updated.text
+    cfg = updated.json()["config"]
+    assert cfg["withdraw_mode"] == "per_trade"
+    assert cfg["withdraw_method"] == "fixed"
+    assert cfg["withdraw_fixed_amount"] == 12_000
+
+    # 重读（持久化往返）仍是新值
+    reloaded = client.get(f"/api/paper/accounts/{account['id']}").json()["config"]
+    assert reloaded["withdraw_mode"] == "per_trade"
+    assert reloaded["withdraw_fixed_amount"] == 12_000
+
+    # 非法值 → 422（Pydantic 校验：模式/方式枚举、比例 (0,1]、金额 >=0）
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"withdraw_mode": "invalid"}).status_code == 422
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"withdraw_method": "invalid"}).status_code == 422
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"withdraw_ratio": 1.5}).status_code == 422
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"withdraw_fixed_amount": -1}).status_code == 422
+
+
 def test_backtest_job_flow_submit_progress_complete(tmp_path, monkeypatch):
     """后台回测任务端到端（HTTP 契约）：提交→轮询进度→COMPLETED→取报告；忙时 409。
 

@@ -78,6 +78,16 @@ export interface StrategyConfig {
   etf_entry_max_deviation?: number;
   /** 清仓后冷却：至少 N 个交易日内不再建仓；0 表示关闭 */
   etf_reentry_cooldown_days?: number;
+  /** 盈利提现模式：none=关闭 / monthly=每月提现 / per_trade=每笔提现 */
+  withdraw_mode?: 'none' | 'monthly' | 'per_trade';
+  /** 盈利提现提取方式：ratio=按盈利比例 / fixed=按固定金额 */
+  withdraw_method?: 'ratio' | 'fixed';
+  /** 按盈利比例提取的比例（小数，0.2 = 20%） */
+  withdraw_ratio?: number;
+  /** 按固定金额提取的金额（元，>=0） */
+  withdraw_fixed_amount?: number;
+  /** 每月提现开关：当月不盈利（已实现盈亏 <= 0）则不提取；仅 monthly 模式生效 */
+  withdraw_skip_when_no_profit?: boolean;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {
@@ -351,6 +361,9 @@ export interface ReportMetrics {
   exposure: number;
   max_float_loss: number;
   buy_hold_return: number;
+  /** 盈利提现：累计已提现金额（真实离开账户的资金）与提现笔数。 */
+  total_withdrawn?: number;
+  withdrawn_count?: number;
   /** 每月盈亏。旧报告由后端读取时按权益曲线补算；极端情况下缺失则前端隐藏该面板。 */
   monthly?: MonthlyPnl[];
 }
@@ -452,6 +465,9 @@ export interface Report {
   rounds_total?: number;
   events?: BacktestEvent[];
   events_total?: number;
+  /** 盈利提现明细（后台分页下发，主报告只带 withdrawals_total）。 */
+  withdrawals?: Withdrawal[];
+  withdrawals_total?: number;
   warnings: string[];
   data_info: Record<string, unknown>;
 }
@@ -487,6 +503,25 @@ export interface PositionQuote {
   last_price: number;
 }
 
+/** 一笔盈利提现记录：从账户现金中取出已实现盈利（真实资金离场）。 */
+export interface Withdrawal {
+  id: string;
+  /** 扣款所在交易日（YYYY-MM-DD）。 */
+  date: string;
+  /** 实际提取金额（已按可提现金封顶，永不为负）。 */
+  amount: number;
+  /** monthly / per_trade。 */
+  mode: 'monthly' | 'per_trade' | string;
+  /** ratio / fixed。 */
+  method: 'ratio' | 'fixed' | string;
+  /** 当期已实现盈亏基准（提取比例的基数）。 */
+  period_profit: number;
+  /** per_trade=来源成交 id；monthly=基准月份（如 2026-01）。 */
+  trigger: string;
+  /** 提现后账户现金余额。 */
+  cash_after: number;
+}
+
 export interface AccountState {
   id: string;
   name: string;
@@ -497,6 +532,10 @@ export interface AccountState {
   market_value: number;
   realized_pnl: number;
   total_fees: number;
+  /** 盈利提现：累计已提现金额（真实离开账户的资金）。 */
+  total_withdrawn: number;
+  /** 盈利提现明细（日期/金额/方式/触发来源）。 */
+  withdrawals: Withdrawal[];
   positions: Position[];
   /** 后端行情缓存（含未持仓标的的最新价）；旧后端未返回该字段时前端回退到 positions。 */
   quotes?: PositionQuote[];

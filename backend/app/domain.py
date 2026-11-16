@@ -193,6 +193,19 @@ class StrategyConfig:
     # 再入场冷却：ETF 清仓后至少 N 个交易日内不再建仓（0 表示关闭）。
     # 目的：抑制指数在均线附近来回摆动导致的连续「买-卖-买」磨损。
     etf_reentry_cooldown_days: int = 0
+    # ---- 盈利提现 ----------------------------------------------------------
+    # 把已落袋盈利从账户现金中取出（模拟真实提现，减少可买资金与权益）。
+    # 模拟盘与回测共用同一套逻辑（BrokerAccount 统一执行），配置随账户快照。
+    # 模式：none=关闭 / monthly=每月提现 / per_trade=每笔提现。
+    withdraw_mode: str = "none"
+    # 提取方式：ratio=按当期盈利比例提取 / fixed=按固定金额提取。
+    withdraw_method: str = "ratio"
+    # 按盈利比例提取时的比例（0~1 小数，0.20 = 提取当期盈利的 20%）。
+    withdraw_ratio: float = 0.20
+    # 按固定金额提取时的金额（元，>=0；当期盈利不足该金额时仍提取该金额，仅以现金余额封顶）。
+    withdraw_fixed_amount: float = 5000.0
+    # 每月提现开关：当月不盈利（已实现盈亏 <= 0）则不提取。仅 monthly 模式生效。
+    withdraw_skip_when_no_profit: bool = True
 
     def __post_init__(self) -> None:
         if len(self.installment_amounts) != 16:
@@ -244,6 +257,17 @@ class StrategyConfig:
             if not 2 <= value <= 250:
                 raise ValueError(f"{name} 必须在 2~250 个交易日之间")
             setattr(self, name, value)
+        # ---- 盈利提现校验 ----------------------------------------------------
+        if self.withdraw_mode not in {"none", "monthly", "per_trade"}:
+            raise ValueError("withdraw_mode 必须是 none/monthly/per_trade 之一")
+        if self.withdraw_method not in {"ratio", "fixed"}:
+            raise ValueError("withdraw_method 必须是 ratio/fixed 之一")
+        if not 0 < float(self.withdraw_ratio) <= 1:
+            raise ValueError("withdraw_ratio 必须在 (0,1] 内（提取当期盈利的比例）")
+        if float(self.withdraw_fixed_amount) < 0:
+            raise ValueError("withdraw_fixed_amount 不能为负")
+        self.withdraw_ratio = float(self.withdraw_ratio)
+        self.withdraw_fixed_amount = float(self.withdraw_fixed_amount)
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "StrategyConfig":
@@ -348,6 +372,28 @@ class Fill:
     # 新增分项放在末尾并带默认值，兼容旧账户/旧报告里的成交记录反序列化。
     handling_fee: float = 0.0
     regulatory_fee: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class Withdrawal:
+    """一笔盈利提现记录：从账户现金中取出已实现盈利，模拟真实资金离场。
+
+    提现会真实扣减 ``cash``（进而降低 ``equity`` 与可买资金），并单独记账，
+    不改动 ``realized_pnl``（仍为毛口径已实现盈亏）。``amount`` 已按
+    ``min(原始金额, 当时可提现金)`` 封顶，永不为负。
+    """
+
+    id: str
+    date: str                          # 扣款所在交易日（YYYY-MM-DD）
+    amount: float                      # 实际提取金额（已封顶）
+    mode: str                          # monthly / per_trade
+    method: str                        # ratio / fixed
+    period_profit: float               # 当期已实现盈亏基准（提取比例的基数）
+    trigger: str                       # per_trade=来源成交 id；monthly=基准月份如 2026-10
+    cash_after: float = 0.0            # 提现后账户现金余额
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
