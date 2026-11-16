@@ -432,7 +432,7 @@ class LayeredTStrategy(Strategy):
             or self.last_add_session is None or account.sequence_index >= 16
         ):
             return []
-        if session_index - self.last_add_session < self.config.min_add_gap_days:
+        if self._add_gap_blocked(history, bar, account, session_index):
             return []
         # 同日尾盘已发加仓、或已有未结束的永久仓买入委托时，日终不再重复申报。
         if self.add_submitted_date == bar.date or self._has_pending_entry(account, bar.symbol):
@@ -501,6 +501,42 @@ class LayeredTStrategy(Strategy):
             and order.status in {"PENDING", "PARTIALLY_FILLED"}
             for order in account.orders
         )
+
+    @staticmethod
+    def _last_add_date(account: BrokerAccount) -> str | None:
+        """最近一笔永久仓买入的成交日（YYYY-MM-DD）；无成交记录返回 None。
+
+        以成交记录为单一真相源（手动买入同样刷新间隔时钟），数据集刷新导致的
+        行数变化不会影响本值——2026-11-16 联特科技「间隔门槛误拦」事故的根因修复。
+        """
+        buys = [
+            fill for fill in (account.trades or [])
+            if fill.side == "BUY" and fill.purpose == "PERMANENT"
+        ]
+        return str(buys[-1].timestamp)[:10] if buys else None
+
+    def _add_gap_blocked(
+        self, history: list[Bar], bar: Bar, account: BrokerAccount,
+        session_index: int | None,
+    ) -> bool:
+        """加仓间隔是否未到：距最近一笔永久仓成交的交易日数 < min_add_gap_days。
+
+        交易日数 = history ∪ {bar} 中 (成交日, bar.date] 的交易日数，按成交日期
+        动态换算，天然免疫数据集刷新导致的行数漂移；无成交记录的老账户回退
+        旧行序号口径（last_add_session）。
+        """
+        last_date = self._last_add_date(account)
+        if last_date is not None:
+            dates = {
+                item.date for item in (history or [])
+                if last_date < item.date <= bar.date
+            }
+            if bar.date > last_date:
+                dates.add(bar.date)
+            return len(dates) < self.config.min_add_gap_days
+        if session_index is None or self.last_add_session is None:
+            return False
+        return session_index - self.last_add_session < self.config.min_add_gap_days
 
     @staticmethod
     def _index_gate_open(index_history: list[Bar] | None, bar: Bar) -> bool:
@@ -587,7 +623,7 @@ class LayeredTStrategy(Strategy):
             or self.last_add_session is None or account.sequence_index >= 16
         ):
             return []
-        if session_index - self.last_add_session < self.config.min_add_gap_days:
+        if self._add_gap_blocked(history, bar, account, session_index):
             return []
         if self.add_submitted_date == bar.date or self._has_pending_entry(account, bar.symbol):
             return []

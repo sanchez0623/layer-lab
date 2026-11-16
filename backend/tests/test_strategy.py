@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.broker import BrokerAccount
-from app.domain import Bar, OrderRequest, StrategyConfig
+from app.domain import Bar, Fill, OrderRequest, StrategyConfig
 from app.strategy import LayeredTStrategy
 
 
@@ -293,6 +293,53 @@ def test_tiered_a3_spec_progression():
         )
 
 
+def test_add_gap_uses_fill_date_immune_to_dataset_drift():
+    """加仓间隔按成交日动态换算，免疫数据集行数漂移（2026-11-16 联特误拦事故哨兵）。
+
+    周五（01-09）买入；周一的 dataset 仍只有至周五的 bar 且行数变少（5→3，去重/补数漂移）——
+    旧行序号口径：session_index(3) - last_add_session(4) = -1 误拦；
+    日期口径：gap = 1 个交易日 → 放行，周一即可加仓。
+    """
+    acct = funded_account()
+    acct.sequence_index = 1
+    acct.trades = [
+        Fill(
+            id="F1", order_id="O1", symbol="TEST", side="BUY", quantity=1000,
+            price=10.0, amount=10000.0, commission=1.0, stamp_tax=0.0,
+            transfer_fee=0.3, total_fee=1.3, slippage=0.0,
+            timestamp="2025-01-09T14:35:00", purpose="PERMANENT", cash_flow=-10001.3,
+        )
+    ]
+    strat = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    strat.last_add_price = 10.0
+    strat.last_add_session = 4  # 买入时按旧数据集（5 根）算的序号
+    history = [daily(6, 10.0), daily(7, 10.0), daily(8, 10.0)]  # 01-07/08/09
+    # 周一（01-10）：日期口径 gap=1 → 放行（旧行序号口径会因漂移误拦）
+    assert strat._add_gap_blocked(history, daily(9, 9.8), acct, session_index=3) is False
+    # 成交同日：gap=0 → 拦（当日不加仓）
+    assert strat._add_gap_blocked(history, daily(8, 9.9), acct, session_index=3) is True
+    # min_add_gap_days=2：周一（01-10）gap=1 仍拦；补上 01-10 的 bar 后次日（01-11）gap=2 放行
+    strat.config.min_add_gap_days = 2
+    assert strat._add_gap_blocked(history, daily(9, 9.8), acct, session_index=3) is True
+    history2 = history + [daily(9, 10.1)]
+    assert strat._add_gap_blocked(history2, daily(10, 9.8), acct, session_index=3) is False
+
+
+def test_add_gap_fallback_to_session_index_without_fills():
+    """无成交记录的老账户：回退旧行序号口径（兼容）。"""
+    acct = funded_account()
+    acct.trades = []
+    acct.sequence_index = 1
+    strat = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    strat.last_add_price = 10.0
+    strat.last_add_session = 4
+    history = [daily(6, 10.0), daily(7, 10.0), daily(8, 10.0)]
+    # session_index=3 → 3-4 = -1 < 1 → 拦（旧行为不变）
+    assert strat._add_gap_blocked(history, daily(9, 10.0), acct, session_index=3) is True
+    # session_index=5 → 1 → 放行
+    assert strat._add_gap_blocked(history, daily(10, 10.0), acct, session_index=5) is False
+
+
 def test_same_intraday_bar_is_only_evaluated_once():
     """live-tick 在同一根已收盘 5 分钟 K 线上重复轮询时，不能重复累加确认计数。"""
     account = funded_account()
@@ -512,7 +559,11 @@ def test_tail_add_buys_between_1430_and_1450():
 
 
 def test_tail_add_requires_one_session_gap():
+    """尾盘加仓需距最近一笔永久仓成交 ≥1 个交易日（按成交日期口径）。"""
     account = held_account()
+    # 把成交日挪到与尾盘 bar 同日（01-07）：gap = 0 → 拦
+    for fill in account.trades:
+        fill.timestamp = "2025-01-07T09:35:00"
     strategy = make_add_strategy(account)
     bar = tail_add_bar()
     assert strategy.on_intraday(
