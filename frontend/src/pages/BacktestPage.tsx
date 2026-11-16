@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -30,7 +30,7 @@ import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
-import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade } from '../types';
+import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -60,6 +60,12 @@ const fallbackConfig: StrategyConfig = {
   // 入场保护（回测默认开启，可置 0 关闭）：不追高 8% + 清仓后冷却 5 个交易日。
   etf_entry_max_deviation: 0.08,
   etf_reentry_cooldown_days: 5,
+  // 盈利提现：把已落袋盈利从账户现金中取出（真实资金离场）。默认关闭。
+  withdraw_mode: 'none',
+  withdraw_method: 'ratio',
+  withdraw_ratio: 0.2,
+  withdraw_fixed_amount: 5000,
+  withdraw_skip_when_no_profit: true,
 };
 
 /** 回测仅保留漏斗轮动模式（清仓后重跑选股换票）；旧的单标的模式已下线。 */
@@ -163,7 +169,7 @@ export default function BacktestPage() {
   const pollTimerRef = useRef<number | null>(null);
   // 本会话内已落地为终态的作业 id：重挂载时用它避免把刚「放弃」的已完成作业重新拉起。
   const settledJobIdsRef = useRef<Set<string>>(new Set());
-  const [tableTab, setTableTab] = useState<'trades' | 'orders'>('trades');
+  const [tableTab, setTableTab] = useState<'trades' | 'orders' | 'withdrawals'>('trades');
   const [exporting, setExporting] = useState<'trades' | 'orders' | 'trail' | null>(null);
   const [screener, setScreener] = useState<ScreenerConfig>(fallbackScreener);
   // 换票轨迹后台分页状态：主报告已瘦身不含全量 trail，列表按页拉取；
@@ -173,7 +179,7 @@ export default function BacktestPage() {
   const [trailPageSize, setTrailPageSize] = useState(20);
   const [trailLoading, setTrailLoading] = useState(false);
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
-  const [recordData, setRecordData] = useState<RecordsPage<Trade | Order | Round> | null>(null);
+  const [recordData, setRecordData] = useState<RecordsPage<Trade | Order | Round | Withdrawal> | null>(null);
   const [recordPage, setRecordPage] = useState(1);
   const [recordPageSize, setRecordPageSize] = useState(20);
   const [recordLoading, setRecordLoading] = useState(false);
@@ -561,6 +567,7 @@ export default function BacktestPage() {
   // 明细条数：主报告只带 *_total；旧缓存报告回退到本地数组长度。
   const tradesTotal = report?.trades_total ?? report?.trades?.length ?? 0;
   const ordersTotal = report?.orders_total ?? report?.orders?.length ?? 0;
+  const withdrawalsTotal = report?.withdrawals_total ?? report?.withdrawals?.length ?? 0;
   // 漏斗轮动回测专属：每轮换票轨迹（选中日期/标的/入选依据/进出日期/盈亏）。
   // 主报告已瘦身不含全量 trail，改走 GET /backtests/{id}/rotation-trail 后台分页。
   const isFunnel = String(report?.data_info?.mode) === 'funnel_rotation';
@@ -749,7 +756,7 @@ export default function BacktestPage() {
   // 当前 tab 的一页明细（旧缓存报告若仍带全量数组则回退用本地切片；成交明细筛选在本地同样生效）。
   const { recordItems, filteredTotal, recordFacets } = useMemo(() => {
     if (recordData) return { recordItems: recordData.items, filteredTotal: recordData.total, recordFacets: recordData.facets };
-    const local = tableTab === 'trades' ? report?.trades : report?.orders;
+    const local = tableTab === 'trades' ? report?.trades : tableTab === 'orders' ? report?.orders : report?.withdrawals;
     let list: any[] = local ?? [];
     if (tableTab === 'trades' && tradeFilterOn) list = list.filter((item: Trade) => matchesTradeFilters(item, tradeFilter));
     const start = (recordPage - 1) * recordPageSize;
@@ -779,7 +786,7 @@ export default function BacktestPage() {
   }), [sideCounts, tradeFilter.side]);
 
   // 明细分页总数：筛选时跟随过滤后条数，否则用报告自带 *_total。
-  const recordsTotal = tableTab === 'trades' ? tradesTotal : ordersTotal;
+  const recordsTotal = tableTab === 'trades' ? tradesTotal : tableTab === 'orders' ? ordersTotal : withdrawalsTotal;
   const paginationTotal = tableTab === 'trades' && tradeFilterOn ? filteredTotal : recordsTotal;
   const paginationTotalPages = recordData?.total_pages ?? Math.max(1, Math.ceil(paginationTotal / recordPageSize));
 
@@ -857,6 +864,42 @@ export default function BacktestPage() {
                       </FormGrid>
                     )}
                   </div>
+
+                <div className="rounded-xl border bg-muted/25 p-3">
+                  <FormGrid>
+                    <Field label="盈利提现模式" hint="把已落袋盈利从账户现金中取出（真实资金离场，降低可买资金与权益）；仅按已实现盈亏计算">
+                      <SelectField value={config.withdraw_mode ?? 'none'} onValueChange={(value) => updateConfig('withdraw_mode', value as StrategyConfig['withdraw_mode'])} options={[
+                        { value: 'none', label: '关闭' },
+                        { value: 'monthly', label: '每月提现（跨月按上一自然月已实现盈亏）' },
+                        { value: 'per_trade', label: '每笔提现（每笔盈利卖出后）' },
+                      ]} />
+                    </Field>
+                    {(config.withdraw_mode ?? 'none') !== 'none' && (
+                      <>
+                        <Field label="提取方式" hint={config.withdraw_method === 'fixed' ? '当期盈利不足固定金额仍提取该金额，仅以现金余额封顶' : '提取当期已实现盈亏的该比例'}>
+                          <SelectField value={config.withdraw_method ?? 'ratio'} onValueChange={(value) => updateConfig('withdraw_method', value as StrategyConfig['withdraw_method'])} options={[
+                            { value: 'ratio', label: '按盈利比例' },
+                            { value: 'fixed', label: '按固定金额' },
+                          ]} />
+                        </Field>
+                        {(config.withdraw_method ?? 'ratio') === 'ratio' ? (
+                          <Field label="提取比例（%）" hint="提取当期已实现盈亏的该比例（0~100）">
+                            <NumberInput unit="%" min={0.1} max={100} step={1} value={Number(((config.withdraw_ratio ?? 0.2) * 100).toFixed(1))} onChange={(value) => updateConfig('withdraw_ratio', Number(value) / 100)} />
+                          </Field>
+                        ) : (
+                          <Field label="固定金额（元）" hint="当期盈利不足该金额时仍提取该金额（仅以现金余额封顶）">
+                            <NumberInput unit="CNY" min={0} step={1000} precision={2} value={config.withdraw_fixed_amount ?? 5000} onChange={(value) => updateConfig('withdraw_fixed_amount', Number(value))} />
+                          </Field>
+                        )}
+                        {config.withdraw_mode === 'monthly' && (
+                          <Field label="当月不盈利则不提取" hint="已实现盈亏 <= 0 的月份不触发提现">
+                            <SwitchRow label="当月不盈利则不提取" description={config.withdraw_skip_when_no_profit ? '无盈利月份跳过' : '无盈利月份仍按固定金额提取'} checked={Boolean(config.withdraw_skip_when_no_profit)} onCheckedChange={(checked) => updateConfig('withdraw_skip_when_no_profit', checked)} className="w-full" />
+                          </Field>
+                        )}
+                      </>
+                    )}
+                  </FormGrid>
+                </div>
 
                 <div className="flex items-start gap-2 rounded-lg border border-primary/15 bg-accent/40 px-3 py-2 text-[11px] leading-5 text-muted-foreground">
                   <Layers3 className="mt-0.5 size-3.5 shrink-0 text-primary" />
@@ -1001,6 +1044,7 @@ export default function BacktestPage() {
                         { icon: RotateCcw, label: '做 T 净贡献', value: signedMoney(metrics.t_net_profit), note: `${integer(metrics.t_trade_count)} 笔`, tone: metrics.t_net_profit >= 0 ? 'text-destructive' : 'text-success' },
                         ...(betaInfo?.enabled ? [{ icon: Layers3, label: 'ETF beta 净贡献', value: signedMoney(Number(betaInfo.pnl ?? 0)), note: `${integer(Number(betaInfo.trade_count ?? 0))} 笔 · ${betaInfo.exit_reason || '持仓中'}`, tone: Number(betaInfo.pnl ?? 0) >= 0 ? 'text-destructive' : 'text-success' }] : []),
                         { icon: CircleDollarSign, label: '累计交易费用', value: money(metrics.total_fees), note: '五項分项相加，滑点另计' },
+                        ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔 · 已真实离场` : '未提取', tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
                         { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
                       ].map(({ icon: Icon, label, value, note, tone }) => (
                         <div key={label} className="flex items-center gap-2 rounded-lg border bg-card px-2.5 py-2">
@@ -1207,10 +1251,11 @@ export default function BacktestPage() {
 
                 <Panel className="mb-3" flush>
                   <div id="backtest-records" className="flex flex-col gap-2 border-b px-4 py-2.5 sm:flex-row sm:items-center sm:justify-between">
-                    <Tabs value={tableTab} onValueChange={(value) => setTableTab(value as 'trades' | 'orders')}>
+                    <Tabs value={tableTab} onValueChange={(value) => setTableTab(value as 'trades' | 'orders' | 'withdrawals')}>
                       <TabsList>
                         <TabsTrigger value="trades">成交明细<span className="ml-1 font-mono text-[10px] text-muted-foreground">{tradesTotal}</span></TabsTrigger>
                         <TabsTrigger value="orders">委托记录<span className="ml-1 font-mono text-[10px] text-muted-foreground">{ordersTotal}</span></TabsTrigger>
+                        {withdrawalsTotal > 0 && <TabsTrigger value="withdrawals">提现记录<span className="ml-1 font-mono text-[10px] text-muted-foreground">{withdrawalsTotal}</span></TabsTrigger>}
                       </TabsList>
                     </Tabs>
                     <span className="inline-flex items-center gap-1 text-[10px] text-muted-foreground"><Clock3 className="size-3" />按时间顺序记录</span>
@@ -1234,6 +1279,9 @@ export default function BacktestPage() {
                   </TableBody></Table>}
                   {tableTab === 'orders' && <Table><TableHeader><TableRow><TableHead>委托时间</TableHead><TableHead>标的</TableHead><TableHead>方向</TableHead><TableHead>类型</TableHead><TableHead className="text-right">限价</TableHead><TableHead className="text-right">委托数量</TableHead><TableHead className="text-right">已成交</TableHead><TableHead>状态</TableHead></TableRow></TableHeader><TableBody>
                     {ordersTotal === 0 ? <TableEmpty colSpan={8} message="本次回测没有委托记录" /> : recordItems.map((order) => <TableRow key={order.id}><TableCell>{dateTime(order.created_at || order.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={order.symbol}>{displaySymbol(order.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(order.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(order.side)}</span></TableCell><TableCell>{orderTypeLabel(order.order_type || order.type)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(order.limit_price ?? order.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(order.filled_quantity ?? order.filled_qty)}</TableCell><TableCell><Badge>{statusLabel(order.status)}</Badge></TableCell></TableRow>)}
+                  </TableBody></Table>}
+                  {tableTab === 'withdrawals' && <Table><TableHeader><TableRow><TableHead>日期</TableHead><TableHead className="text-right">提取金额</TableHead><TableHead>模式</TableHead><TableHead>方式</TableHead><TableHead className="text-right">当期盈利基准</TableHead><TableHead>触发来源</TableHead><TableHead className="text-right">提现后现金</TableHead></TableRow></TableHeader><TableBody>
+                    {withdrawalsTotal === 0 ? <TableEmpty colSpan={7} message="本次回测没有提现记录" /> : recordItems.map((withdrawal) => <TableRow key={withdrawal.id}><TableCell>{shortDate(withdrawal.date)}</TableCell><TableCell className="text-right font-mono text-[12px] text-destructive">{money(withdrawal.amount)}</TableCell><TableCell>{withdrawal.mode === 'monthly' ? '每月提现' : '每笔提现'}</TableCell><TableCell>{withdrawal.method === 'ratio' ? '按盈利比例' : '按固定金额'}</TableCell><TableCell className="text-right font-mono text-[12px]">{signedMoney(withdrawal.period_profit)}</TableCell><TableCell className="font-mono text-[11px] text-muted-foreground">{withdrawal.trigger}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(withdrawal.cash_after)}</TableCell></TableRow>)}
                   </TableBody></Table>}
                   <div className="px-4 pb-4">
                     <PaginationBar page={recordData?.page ?? recordPage} pageSize={recordData?.page_size ?? recordPageSize} total={paginationTotal} totalPages={paginationTotalPages} onPageChange={setRecordPage} onPageSizeChange={(size) => { setRecordPageSize(size); setRecordPage(1); }} disabled={recordLoading} />

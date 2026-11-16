@@ -718,6 +718,69 @@ export default function PaperPage() {
     }
   };
 
+  // 盈利提现：把已落袋盈利从账户现金中取出（真实资金离场，减少可买资金与权益）。
+  const [wdModeInput, setWdModeInput] = useState('');
+  const [wdMethodInput, setWdMethodInput] = useState('');
+  const [wdRatioInput, setWdRatioInput] = useState('');
+  const [wdFixedInput, setWdFixedInput] = useState('');
+  const [savingWithdraw, setSavingWithdraw] = useState(false);
+  const wdMode = account?.config?.withdraw_mode ?? 'none';
+  const wdMethod = account?.config?.withdraw_method ?? 'ratio';
+  const wdRatio = account?.config?.withdraw_ratio ?? 0.2;
+  const wdFixed = account?.config?.withdraw_fixed_amount ?? 5000;
+  const wdSkipNoProfit = account?.config?.withdraw_skip_when_no_profit ?? true;
+
+  const saveWithdrawConfig = async () => {
+    if (!account) return;
+    const patch: Record<string, unknown> = {};
+    if (wdModeInput) {
+      if (!['none', 'monthly', 'per_trade'].includes(wdModeInput)) { setError('提现模式不合法。'); return; }
+      patch.withdraw_mode = wdModeInput;
+    }
+    if (wdMethodInput) {
+      if (!['ratio', 'fixed'].includes(wdMethodInput)) { setError('提现方式不合法。'); return; }
+      patch.withdraw_method = wdMethodInput;
+    }
+    if (wdRatioInput !== '') {
+      const pct = Number(wdRatioInput);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) { setError('提取比例需为 0–100 之间的百分数。'); return; }
+      patch.withdraw_ratio = pct / 100;
+    }
+    if (wdFixedInput !== '') {
+      const value = Number(wdFixedInput);
+      if (!Number.isFinite(value) || value < 0) { setError('固定提取金额不能为负。'); return; }
+      patch.withdraw_fixed_amount = value;
+    }
+    if (!Object.keys(patch).length) { setError('没有要更新的提现配置字段。'); return; }
+    setSavingWithdraw(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, patch);
+      setAccount(next);
+      setWdModeInput(''); setWdMethodInput(''); setWdRatioInput(''); setWdFixedInput('');
+      toast.success('盈利提现配置已更新，下一根 K 线起生效。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '盈利提现配置更新失败。');
+    } finally {
+      setSavingWithdraw(false);
+    }
+  };
+
+  const toggleWithdrawSkip = async (checked: boolean) => {
+    if (!account) return;
+    setSavingWithdraw(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { withdraw_skip_when_no_profit: checked });
+      setAccount(next);
+      toast.success(checked
+        ? '当月不盈利则不提取已开启：无盈利月份不触发提现。'
+        : '当月不盈利则不提取已关闭：无盈利月份仍按固定金额提取（仅以现金余额封顶）。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '提现开关更新失败。');
+    } finally {
+      setSavingWithdraw(false);
+    }
+  };
+
   const toggleRotation = async () => {
     if (!account) return;
     setTogglingRotation(true);
@@ -818,6 +881,7 @@ export default function PaperPage() {
             <Metric label="可用资金" value={money(account.available_cash)} sub={`账面现金 ${money(account.cash)}`} />
             <Metric label="持仓市值" value={money(account.market_value)} sub={`敞口 ${account.equity ? number(account.market_value / account.equity * 100, 1) : '0.0'}%`} />
             <Metric label="已实现盈亏" value={signedMoney(account.realized_pnl)} tone={account.realized_pnl >= 0 ? 'positive' : 'negative'} sub={`做 T 净贡献 ${signedMoney(account.t_net_profit)}`} />
+            <Metric label="累计提现" value={money(account.total_withdrawn)} tone={account.total_withdrawn > 0 ? 'positive' : undefined} sub={account.total_withdrawn > 0 ? `${account.withdrawals?.length ?? 0} 笔已取出` : '盈利提现关闭'} />
           </MetricGrid>
 
           {account.auto_strategy && (
@@ -891,6 +955,32 @@ export default function PaperPage() {
               </div>
             </Panel>
           )}
+
+          <Panel className="mb-3" title="盈利提现" description="把已落袋盈利从账户现金中取出（真实资金离场，降低可买资金与权益）；仅按已实现盈亏计算，持仓浮盈不计。两种模式：每月提现（跨月按上一自然月已实现盈亏提取一次）/ 每笔提现（每笔盈利卖出后立即提取）。" action={<span className="text-[10px] text-muted-foreground">{wdMode === 'none' ? '提现关闭' : wdMode === 'monthly' ? '每月提现' : '每笔提现'}</span>}>
+            <div className="mb-2 flex items-center gap-2 text-[11px]">
+              <span className="text-muted-foreground">提现模式</span>
+              <Segmented value={wdModeInput || wdMode} onChange={setWdModeInput} options={[{ value: 'none', label: '关闭' }, { value: 'monthly', label: '每月提现' }, { value: 'per_trade', label: '每笔提现' }]} />
+            </div>
+            <FormGrid>
+              <Field label="提取方式" hint={wdMethod === 'ratio' ? `当前 ${number(wdRatio * 100, 1)}%` : `当前 ${money(wdFixed)}`}>
+                <SelectField value={wdMethodInput || wdMethod} onValueChange={setWdMethodInput} options={[{ value: 'ratio', label: '按盈利比例' }, { value: 'fixed', label: '按固定金额' }]} ariaLabel="提现提取方式" />
+              </Field>
+              {(wdMethodInput || wdMethod) === 'ratio' ? (
+                <Field label="提取比例（%）" hint="提取当期已实现盈亏的该比例"><NumberInput unit="%" min={0.1} max={100} step={1} allowEmpty placeholder={number(wdRatio * 100, 1)} value={wdRatioInput} onChange={setWdRatioInput} disabled={savingWithdraw} /></Field>
+              ) : (
+                <Field label="固定金额（元）" hint="当期盈利不足该金额时仍提取该金额，仅以现金余额封顶"><NumberInput unit="CNY" min={0} step={1000} precision={2} allowEmpty placeholder={money(wdFixed)} value={wdFixedInput} onChange={setWdFixedInput} disabled={savingWithdraw} /></Field>
+              )}
+              {wdModeInput === 'monthly' || wdMode === 'monthly' ? (
+                <Field label="当月不盈利则不提取" hint="已实现盈亏 <= 0 的月份不触发提现" wide>
+                  <SwitchRow label="当月不盈利则不提取" description={wdSkipNoProfit ? '无盈利月份跳过' : '无盈利月份仍按固定金额提取'} checked={wdSkipNoProfit} onCheckedChange={(checked) => void toggleWithdrawSkip(checked)} className="w-full" />
+                </Field>
+              ) : null}
+            </FormGrid>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <Button size="sm" className="h-8" onClick={() => void saveWithdrawConfig()} disabled={savingWithdraw}>{savingWithdraw ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingWithdraw ? '正在保存' : '保存提现配置'}</Button>
+              <p className="text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值；提现会真实扣减账户现金，累计提现额见下方「累计提现」指标与「提现记录」。</p>
+            </div>
+          </Panel>
 
           <Panel className="mb-3" title="池内轮动 · 每次清仓后重新选股" description="清仓后自动重新运行五层选股；L0 大盘门关闭则空仓等待，不降格选票" action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{rotation?.enabled ? '清仓后重新选股' : '开启后按新语义轮动'}</span><Switch checked={Boolean(rotation?.enabled)} onCheckedChange={() => void toggleRotation()} disabled={togglingRotation} /></div>}>
             {togglingRotation ? <Loading label="正在同步轮动状态" /> : !rotation || rotationCandidates.length === 0 ? (
@@ -1017,6 +1107,27 @@ export default function PaperPage() {
               {account.trades.length === 0 ? <TableEmpty colSpan={9} message="暂无成交记录" /> : account.trades.map((trade, index) => <TableRow key={String(trade.id ?? index)}><TableCell>{dateTime(trade.timestamp)}</TableCell><TableCell><strong className="font-mono text-[12px]" title={trade.symbol}>{displaySymbol(trade.symbol)}</strong></TableCell><TableCell><span className={cn('rounded px-1.5 py-0.5 text-[10px]', lower(trade.side) === 'buy' ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success')}>{sideLabel(trade.side)}</span></TableCell><TableCell>{purposeLabel(trade.purpose)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.price)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(trade.quantity)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(trade.amount ?? trade.notional)}</TableCell><TableCell className="text-right font-mono text-[12px]" title={feeBreakdownTitle(trade)}>{money(trade.total_fee ?? trade.fee)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', (trade.realized_pnl || 0) >= 0 ? 'text-destructive' : 'text-success')}>{trade.realized_pnl === undefined ? '—' : signedMoney(trade.realized_pnl)}</TableCell></TableRow>)}
             </TableBody></Table>}
           </Panel>
+
+          {(account.withdrawals?.length ?? 0) > 0 && (
+            <Panel className="mb-3" flush title="提现记录" description={`累计提现 ${money(account.total_withdrawn)} · ${account.withdrawals.length} 笔，均为从账户现金中真实取出（降低可买资金与权益）`} action={<CircleDollarSign className="size-4" />}>
+              <Table>
+                <TableHeader><TableRow><TableHead>日期</TableHead><TableHead className="text-right">提取金额</TableHead><TableHead>模式</TableHead><TableHead>方式</TableHead><TableHead className="text-right">当期盈利基准</TableHead><TableHead>触发来源</TableHead><TableHead className="text-right">提现后现金</TableHead></TableRow></TableHeader>
+                <TableBody>
+                  {account.withdrawals.map((withdrawal) => (
+                    <TableRow key={withdrawal.id}>
+                      <TableCell>{shortDate(withdrawal.date)}</TableCell>
+                      <TableCell className="text-right font-mono text-[12px] text-destructive">{money(withdrawal.amount)}</TableCell>
+                      <TableCell>{withdrawal.mode === 'monthly' ? '每月提现' : '每笔提现'}</TableCell>
+                      <TableCell>{withdrawal.method === 'ratio' ? '按盈利比例' : '按固定金额'}</TableCell>
+                      <TableCell className="text-right font-mono text-[12px]">{signedMoney(withdrawal.period_profit)}</TableCell>
+                      <TableCell className="font-mono text-[11px] text-muted-foreground">{withdrawal.trigger}</TableCell>
+                      <TableCell className="text-right font-mono text-[12px]">{money(withdrawal.cash_after)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </Panel>
+          )}
 
           <div className="mb-3 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground"><CircleDollarSign className="mt-0.5 size-3.5 shrink-0" /><span>账户权益与盈亏均由本地后端仿真状态计算。模拟结果不代表实盘表现，也不构成收益承诺。</span></div>
 

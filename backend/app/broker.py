@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Iterable
 
 from .domain import (
-    Bar, FeeBreakdown, Fill, Order, OrderRequest, Position, StrategyConfig, money, price, utc_now,
+    Bar, FeeBreakdown, Fill, Order, OrderRequest, Position, StrategyConfig, Withdrawal, money, price, utc_now,
 )
 from .trading_rules import (
     BoardRules, is_etf_code, rules_for, split_quantity, validate_order_amount,
@@ -124,6 +124,11 @@ class BrokerAccount:
         self.rotation_pending_advance: bool = False
         self._next_order_number = 1
         self._next_fill_number = 1
+        # 盈利提现：已提取金额累计、明细记录、序号、上次已评估的月份（防跨月重复评估）。
+        self.total_withdrawn = 0.0
+        self.withdrawals: list[Withdrawal] = []
+        self._next_withdrawal_number = 1
+        self._last_month_eval: str | None = None
 
     # -- 快照 / 恢复（供回测断点续传使用） --------------------------------
     #
@@ -145,6 +150,8 @@ class BrokerAccount:
                 out[key] = [asdict(item) for item in value]
             elif key == "trades" and isinstance(value, list):
                 out[key] = [asdict(item) for item in value]
+            elif key == "withdrawals" and isinstance(value, list):
+                out[key] = [asdict(item) for item in value]
             else:
                 out[key] = value
         return out
@@ -161,6 +168,8 @@ class BrokerAccount:
                 self.orders = [Order(**item) for item in value]
             elif key == "trades" and isinstance(value, list):
                 self.trades = [Fill(**item) for item in value]
+            elif key == "withdrawals" and isinstance(value, list):
+                self.withdrawals = [Withdrawal(**item) for item in value]
             else:
                 setattr(self, key, value)
         self.config = current_config
@@ -218,6 +227,7 @@ class BrokerAccount:
 
     def new_day(self, date: str, cancel_previous: bool = True) -> None:
         is_new_date = self.current_date != date
+        previous_date = self.current_date
         if cancel_previous and self.current_date and is_new_date:
             self.cancel_open_orders("DAY_END")
         self.current_date = date
@@ -229,6 +239,78 @@ class BrokerAccount:
                 position.today_permanent_buy_qty = 0
                 position.today_t_buy_qty = 0
                 position.today_beta_buy_qty = 0
+            # 盈利提现（每月模式）：跨月时评估「上一完整自然月」的已实现盈亏，
+            # 在跨月首个交易日扣款。previous_date 为 None（账户首根 bar）时不评估。
+            if previous_date is not None and previous_date[:7] != date[:7]:
+                self._evaluate_monthly_withdrawal(previous_date[:7], date)
+
+    # -- 盈利提现 ------------------------------------------------------------
+    # 把已落袋盈利从账户现金中取出（真实资金离场）。两种模式：
+    #   monthly  —— 每月跨月时按「上一自然月已实现盈亏」提取一次；
+    #   per_trade—— 每笔盈利 SELL 成交后按该笔已实现盈亏提取。
+    # 两种提取方式：
+    #   ratio —— 提取当期盈利的 withdraw_ratio 比例；
+    #   fixed —— 提取固定金额（当期盈利不足该金额时仍提取该金额，仅以现金余额封顶）。
+    # 提现只扣 cash（进而降 equity 与可买资金），不改 realized_pnl（仍为毛口径）。
+
+    def _withdrawal_raw_amount(self, period_profit: float) -> float:
+        """按配置计算当期提现原始金额（未封顶）；不适用时返回 0。
+
+        - ratio：当期盈利 × withdraw_ratio（负/零盈利 → 0）。
+        - fixed：固定金额（若当月不盈利开关开启且无盈利 → 0；否则取固定金额）。
+        """
+        profit = money(period_profit)
+        if self.config.withdraw_method == "ratio":
+            if profit <= 0:
+                return 0.0
+            return money(profit * float(self.config.withdraw_ratio))
+        # fixed 方式
+        if self.config.withdraw_skip_when_no_profit and profit <= 0:
+            return 0.0
+        return money(float(self.config.withdraw_fixed_amount))
+
+    def _execute_withdrawal(
+        self, amount: float, mode: str, period_profit: float, trigger: str, date: str,
+    ) -> Withdrawal | None:
+        """封顶到可提现金并扣款记账；金额非正或无可提现金时跳过。"""
+        cap = self.available_cash
+        actual = money(min(amount, cap))
+        if actual <= 0:
+            return None
+        self.cash = money(self.cash - actual)
+        self.total_withdrawn = money(self.total_withdrawn + actual)
+        record = Withdrawal(
+            id=f"W{self._next_withdrawal_number:08d}",
+            date=date, amount=actual, mode=mode,
+            method=self.config.withdraw_method,
+            period_profit=money(period_profit), trigger=trigger,
+            cash_after=self.cash,
+        )
+        self._next_withdrawal_number += 1
+        self.withdrawals.append(record)
+        return record
+
+    def _evaluate_monthly_withdrawal(self, prev_month: str, date: str) -> None:
+        """跨月时评估上一完整自然月的每月提现（只执行一次，防重复/断点续传）。"""
+        if self.config.withdraw_mode != "monthly":
+            return
+        if self._last_month_eval == prev_month:
+            return
+        self._last_month_eval = prev_month
+        period_profit = sum(
+            float(f.realized_pnl) for f in self.trades if str(f.timestamp)[:7] == prev_month
+        )
+        amount = self._withdrawal_raw_amount(period_profit)
+        self._execute_withdrawal(amount, "monthly", period_profit, prev_month, date)
+
+    def _evaluate_per_trade_withdrawal(self, fill: Fill) -> None:
+        """每笔盈利 SELL 成交后的每笔提现。"""
+        if self.config.withdraw_mode != "per_trade":
+            return
+        if fill.side != "SELL" or fill.realized_pnl <= 0:
+            return
+        amount = self._withdrawal_raw_amount(fill.realized_pnl)
+        self._execute_withdrawal(amount, "per_trade", fill.realized_pnl, fill.id, fill.timestamp[:10])
 
     def board_rules(self, symbol: str) -> BoardRules:
         """标的对应板块的交易规则；合成标的回退旧口径。"""
@@ -454,6 +536,8 @@ class BrokerAccount:
             self._next_fill_number += 1
             self.trades.append(fill)
             filled.append(fill)
+            # 盈利提现（每笔模式）：盈利卖出落袋后立即评估。
+            self._evaluate_per_trade_withdrawal(fill)
             old_filled = order.filled_quantity
             order.filled_quantity += quantity
             order.remaining -= quantity
@@ -563,6 +647,8 @@ class BrokerAccount:
             "cash": self.cash, "available_cash": self.available_cash,
             "equity": self.equity, "market_value": self.market_value,
             "realized_pnl": self.realized_pnl, "total_fees": self.total_fees,
+            "total_withdrawn": self.total_withdrawn,
+            "withdrawals": [w.to_dict() for w in self.withdrawals],
             "positions": [position.public_dict() for position in positions],
             "quotes": quotes,
             "orders": [order.to_dict() for order in self.orders],
@@ -578,6 +664,8 @@ class BrokerAccount:
                 "_positions_internal": {key: asdict(value) for key, value in self.positions.items()},
                 "_next_order_number": self._next_order_number,
                 "_next_fill_number": self._next_fill_number,
+                "_next_withdrawal_number": self._next_withdrawal_number,
+                "_last_month_eval": self._last_month_eval,
                 "current_date": self.current_date,
                 "strategy_state": self.strategy_state,
                 "last_daily_signal_date": self.last_daily_signal_date,
@@ -595,7 +683,7 @@ class BrokerAccount:
             initial_cash=data["initial_cash"], config=StrategyConfig.from_dict(data.get("config")),
             name=data["name"], account_id=data["id"], dataset_id=data.get("dataset_id"),
         )
-        for field in ("cash", "cursor", "status", "armed_state", "sequence_index", "realized_pnl", "total_fees", "t_net_profit", "current_date", "auto_strategy", "last_daily_signal_date"):
+        for field in ("cash", "cursor", "status", "armed_state", "sequence_index", "realized_pnl", "total_fees", "t_net_profit", "current_date", "auto_strategy", "last_daily_signal_date", "total_withdrawn", "_last_month_eval"):
             if field in data:
                 setattr(account, field, data[field])
         account.strategy_state = dict(data.get("strategy_state", {}))
@@ -623,6 +711,10 @@ class BrokerAccount:
         }
         account.orders = [Order(**item) for item in data.get("orders", [])]
         account.trades = [Fill(**item) for item in data.get("trades", [])]
+        account.withdrawals = [Withdrawal(**item) for item in data.get("withdrawals", [])]
+        account._next_withdrawal_number = data.get(
+            "_next_withdrawal_number", len(account.withdrawals) + 1,
+        )
         # 兼容旧账户：_positions_internal 里没有 permanent_fee/t_fee 时按成交重放补齐。
         raw_positions = data.get("_positions_internal", {})
         for symbol, raw in raw_positions.items():

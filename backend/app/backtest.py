@@ -150,6 +150,7 @@ def performance_metrics(
     rounds: list[dict[str, Any]], trades: list[dict[str, Any]],
     total_fees: float, t_net_profit: float, max_invested: float,
     max_float_loss: float, buy_hold_return: float,
+    total_withdrawn: float = 0.0, withdrawn_count: int = 0,
 ) -> dict[str, Any]:
     if not equity_curve:
         raise ValueError("净值曲线为空")
@@ -192,6 +193,7 @@ def performance_metrics(
         "closed_rounds": len(closed), "total_trades": len(trades),
         "total_fees": money(total_fees), "t_net_profit": money(t_net_profit),
         "t_trade_count": sum(1 for item in trades if item["purpose"] == "T"),
+        "total_withdrawn": money(total_withdrawn), "withdrawn_count": withdrawn_count,
         "max_invested": money(max_invested), "exposure": exposure,
         "max_float_loss": money(max_float_loss), "buy_hold_return": buy_hold_return,
         "monthly": monthly_breakdown(equity_curve, initial_cash),
@@ -1065,6 +1067,8 @@ class FunnelRotationBacktest:
             [item.to_dict() for item in self.account.trades], self.account.total_fees,
             self.account.t_net_profit, self.max_invested, self.max_float_loss,
             buy_hold_return,
+            total_withdrawn=self.account.total_withdrawn,
+            withdrawn_count=len(self.account.withdrawals),
         )
         screening_count = len(self._trail)
         beta = self._beta_summary()
@@ -1096,6 +1100,7 @@ class FunnelRotationBacktest:
             "metrics": metrics, "equity_curve": equity_curve,
             "trades": [item.to_dict() for item in self.account.trades],
             "orders": [item.to_dict() for item in self.account.orders],
+            "withdrawals": [item.to_dict() for item in self.account.withdrawals],
             "rounds": self.rounds, "events": self.events,
             "warnings": list(dict.fromkeys(self.warnings)), "data_info": data_info,
         }

@@ -239,6 +239,14 @@ class AccountConfigRequest(BaseModel):
     # 入场保护：不追高（相对入场均线偏离上限，0 关闭）+ 清仓后冷却（交易日，0 关闭）。
     etf_entry_max_deviation: float | None = Field(default=None, ge=0, lt=1)
     etf_reentry_cooldown_days: int | None = Field(default=None, ge=0, le=60)
+    # 盈利提现：把已落袋盈利从账户现金中取出（模拟真实提现，减少可买资金与权益）。
+    # mode: none=关闭 / monthly=每月提现 / per_trade=每笔提现；method: ratio=按盈利比例 / fixed=按固定金额。
+    withdraw_mode: Literal["none", "monthly", "per_trade"] | None = None
+    withdraw_method: Literal["ratio", "fixed"] | None = None
+    withdraw_ratio: float | None = Field(default=None, gt=0, le=1)
+    withdraw_fixed_amount: float | None = Field(default=None, ge=0)
+    # 每月提现开关：当月不盈利（已实现盈亏 <= 0）则不提取。仅 monthly 模式生效。
+    withdraw_skip_when_no_profit: bool | None = None
 
 
 class ApplyConfigRequest(BaseModel):
@@ -348,6 +356,7 @@ _RECORD_FIELDS = {
     "orders": "orders_total",
     "rounds": "rounds_total",
     "events": "events_total",
+    "withdrawals": "withdrawals_total",
 }
 
 
@@ -1679,7 +1688,7 @@ def create_app() -> FastAPI:
     @application.get("/api/backtests/{backtest_id}/records/{kind}")
     def backtest_records(
         backtest_id: str,
-        kind: Literal["trades", "orders", "rounds", "events"],
+        kind: Literal["trades", "orders", "rounds", "events", "withdrawals"],
         params: tuple[int, int] = Depends(page_params),
         symbol: str | None = Query(None, description="按标的过滤：子串匹配，如 688200 / sh.688200"),
         purpose: str | None = Query(None, description="按用途过滤：枚举（PERMANENT/T/BETA）或中文标签（永久仓/T仓/ETF对冲），全等匹配"),

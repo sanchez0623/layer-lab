@@ -39,6 +39,7 @@ import type {
   StrategyDefaults,
   Timeframe,
   Trade,
+  Withdrawal,
   TradingRulesAllResponse,
   TradingRulesResponse,
   TradingSession,
@@ -167,7 +168,7 @@ export const api = {
   // 成交明细 / 委托记录 / 已结束轮次 后台分页：主报告只带 *_total，明细按页拉取。
   // filters 可选：symbol（子串）/ purpose（枚举或中文标签）/ side（BUY|SELL）组合过滤；
   // 仅 trades 返回 facets（各枚举条数，供筛选下拉展示与禁用 0 条选项）。
-  backtestRecords: <K extends 'trades' | 'orders' | 'rounds'>(
+  backtestRecords: <K extends 'trades' | 'orders' | 'rounds' | 'withdrawals'>(
     id: string, kind: K, page = 1, pageSize = 20,
     filters?: { symbol?: string; purpose?: string; side?: string },
   ) => {
@@ -175,7 +176,7 @@ export const api = {
     if (filters?.symbol) params.symbol = filters.symbol;
     if (filters?.purpose) params.purpose = filters.purpose;
     if (filters?.side) params.side = filters.side;
-    return request<RecordsPage<{ trades: Trade; orders: Order; rounds: Round }[K]>>(
+    return request<RecordsPage<{ trades: Trade; orders: Order; rounds: Round; withdrawals: Withdrawal }[K]>>(
       `/backtests/${encodeURIComponent(id)}/records/${kind}${query(params)}`,
     );
   },
@@ -188,7 +189,7 @@ export const api = {
   setAutoStrategy: (id: string, enabled: boolean) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/auto-strategy`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   /** 局部更新模拟账户策略配置（非费率）；下一根K线起的新操作立刻生效。 */
-  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_net_spread' | 't_exit_cutoff' | 'max_holding_days' | 'holding_tp_override' | 'add_tier_strict' | 't_deep_drop_pct' | 'etf_beta_enabled' | 'etf_symbol' | 'etf_position_pct' | 'etf_entry_ma_days' | 'etf_exit_ma_days' | 'etf_hard_stop_pct' | 'etf_entry_max_deviation' | 'etf_reentry_cooldown_days'>>) =>
+  updateAccountConfig: (id: string, patch: Partial<Pick<StrategyConfig, 'enable_t' | 't_target_net_spread' | 't_exit_cutoff' | 'max_holding_days' | 'holding_tp_override' | 'add_tier_strict' | 't_deep_drop_pct' | 'etf_beta_enabled' | 'etf_symbol' | 'etf_position_pct' | 'etf_entry_ma_days' | 'etf_exit_ma_days' | 'etf_hard_stop_pct' | 'etf_entry_max_deviation' | 'etf_reentry_cooldown_days' | 'withdraw_mode' | 'withdraw_method' | 'withdraw_ratio' | 'withdraw_fixed_amount' | 'withdraw_skip_when_no_profit'>>) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/config`, { method: 'POST', body: JSON.stringify(patch) }),
   /** 把回测配置整套应用到模拟账户（策略字段 config 已 strip 费率 + 费率 fees 万分之）；下一根K线起生效。 */
   applyAccountConfig: (id: string, payload: { config: Partial<StrategyConfig>; fees?: FeeConfig }) =>

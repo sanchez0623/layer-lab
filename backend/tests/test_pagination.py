@@ -155,7 +155,7 @@ def test_main_report_is_slimmed_no_full_trail(api):
 # ------------------------------------------------- 成交/委托/轮次 明细分页 ----
 
 def _report_with_records(report_id: str, n: int) -> dict:
-    """造一份单标的回测报告，trades / orders / rounds / events 各含 n 条。"""
+    """造一份单标的回测报告，trades / orders / rounds / events / withdrawals 各含 n 条。"""
     trades = [{"id": f"t{i}", "symbol": "sz.000001", "side": "buy",
                "timestamp": f"2026-01-{(i % 28) + 1:02d}", "price": 10.0,
                "quantity": 100, "amount": 1000.0, "total_fee": 1.0} for i in range(n)]
@@ -165,11 +165,15 @@ def _report_with_records(report_id: str, n: int) -> dict:
     rounds = [{"id": f"r{i}", "start_date": "2026-01-01", "end_date": "2026-02-01",
                "net_profit": float(i), "status": "closed"} for i in range(n)]
     events = [{"id": f"e{i}", "date": "2026-01-02", "type": "buy", "message": "m"} for i in range(n)]
+    withdrawals = [{"id": f"w{i}", "date": "2026-02-01", "amount": 100.0,
+                    "mode": "monthly", "method": "ratio", "period_profit": 500.0,
+                    "trigger": "2026-01", "cash_after": 90_000.0} for i in range(n)]
     return {
         "id": report_id, "name": "明细分页测试", "status": "COMPLETED",
         "created_at": "2026-11-13T00:00:00", "config": {}, "metrics": {},
         "equity_curve": [], "trades": trades, "orders": orders, "rounds": rounds,
-        "events": events, "warnings": [], "data_info": {"mode": "single"},
+        "events": events, "withdrawals": withdrawals, "warnings": [],
+        "data_info": {"mode": "single"},
     }
 
 
@@ -177,14 +181,14 @@ def test_records_paginate_slices_all_kinds(api):
     application, client = api
     application.state.storage.save_backtest(_report_with_records("bt_10", 45))
 
-    for kind in ("trades", "orders", "rounds", "events"):
+    for kind in ("trades", "orders", "rounds", "events", "withdrawals"):
         first = client.get(f"/api/backtests/bt_10/records/{kind}?page=1&page_size=20")
         assert first.status_code == 200, first.text
         body = first.json()
         assert body["total"] == 45, kind
         assert body["total_pages"] == 3
         assert len(body["items"]) == 20
-        assert body["items"][0]["id"].startswith(kind[0])  # t/o/r/e
+        assert body["items"][0]["id"].startswith(kind[0])  # t/o/r/e/w
         assert body["has_next"] is True
 
         last = client.get(f"/api/backtests/bt_10/records/{kind}?page=3&page_size=20").json()
@@ -225,9 +229,12 @@ def test_main_report_is_slimmed_no_full_records(api):
     assert body["orders"] == [] and body["orders_total"] == 45
     assert body["rounds"] == [] and body["rounds_total"] == 45
     assert body["events"] == [] and body["events_total"] == 45
+    assert body["withdrawals"] == [] and body["withdrawals_total"] == 45
     # 分页端点仍能读到全量（落库未瘦身）
     paged = client.get("/api/backtests/bt_12/records/trades?page=1&page_size=45").json()
     assert paged["total"] == 45 and len(paged["items"]) == 45
+    wd = client.get("/api/backtests/bt_12/records/withdrawals?page=1&page_size=45").json()
+    assert wd["total"] == 45 and len(wd["items"]) == 45
 
 
 # --------------------------------------- 成交明细 symbol/purpose/side 过滤 --
