@@ -152,6 +152,18 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
   最近 sequence_index 笔永久仓买入自愈并打 `[strategy-state]` 日志；无法自愈（无成交记录）时告警。
   2026-11-16 的 64f692bb 卡死事故（有持仓但 last_add_price=null，加仓永远不发）就是缺这道防线的教训；
   另：关闭自动策略只暂停调度、不清状态（`/reset` 才是重开一轮）。
+- **加仓按档位「先松后紧」（add_tier_strict，默认开）**：A3 浮亏加仓信号按 `sequence_index // 4` 分 4 档
+  逐级叠加条件——档1 最松（浮亏+缩量<5日均量）→ 档2 +收盘站回前3日低点 → 档3 +此前破过新低
+  → 档4 最严（缩量须 < 5日均量×0.5，= 原始 A3）；浮盈右侧回撤 5% 加仓不受档位影响。
+  关闭（add_tier_strict=false）= 全档统一原始 A3（向后兼容）。⚠️ 注意：从 reflog 恢复的原始实现
+  （3d91e4a）把 ×0.5 提前到了档2、档3/档4 无差别——已按用户截图规范改为档4 才收紧，
+  `test_tiered_a3_spec_progression` 是这个分歧的哨兵。
+- **深跌幅当日做T（t_deep_drop_pct，默认 0.10）**：当日盘中跌幅（相对前收）≥ 10% 时绕过底仓笔数门槛
+  （sequence_index≥4）允许做T（20cm 板极端恐慌日抢反弹，退出仍走净利止盈 + T+1 尾盘强平）。
+  None/0 = 关闭；__post_init__ 校验开启时必须 ≥0.10。模拟盘做T面板与回测页均可视化编辑。
+- ⚠️ **幽灵配置键**：服务器历史回测报告（如 P5-base 00e01918）的 config 里可能含
+  `add_tier_strict`/`t_deep_drop_pct` 键——2026-11-16 起它们已是合法字段；更早的报告若还带
+  其他未知键，`StrategyConfig.from_dict` 会拒绝（400），导入前需剥离。
 - **baostock 禁止并发**：baostock 数据源**不能并发访问**，并发会被服务端拉黑（封 IP/账号）。任何调用 baostock 的路径必须串行化：
   - `universe.py` 已做对：单 login 复用全部查询 + `threading.RLock` 串行 + 后台单线程回补（`_relogin` 定时轮换）。
   - **`market.py` 是隐患**：`fetch_baostock_daily` / 两处 `fetch_*_index` 各自独立 `bs.login()`（约 317/378/431 行），**没有全局锁**；若调度线程（paper-scheduler）与用户触发请求并发打 baostock，会撞车。新增任何 baostock 调用前，先确认已被全局锁串行化，或复用 `universe.py` 的会话，别再各开 login。
