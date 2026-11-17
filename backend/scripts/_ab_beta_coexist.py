@@ -15,11 +15,19 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+_HERE = Path(__file__).resolve()
+# 找到含 app 包的后端根目录：本地是 backend/，容器内工作目录是 /app（代码在 /app/backend）。
+for _cand in (Path.cwd(), *_HERE.parents):
+    if (_cand / "app" / "backtest.py").exists():
+        sys.path.insert(0, str(_cand))
+        break
+else:  # pragma: no cover - 路径异常时直接报错
+    raise SystemExit("找不到 backend 根目录（含 app/backtest.py）")
 
 from app.backtest import run_funnel_backtest  # noqa: E402
 from app.domain import StrategyConfig  # noqa: E402
@@ -27,21 +35,35 @@ from app.market import MarketDataService  # noqa: E402
 from app.quan_data import QuanStore, quan_data_dir  # noqa: E402
 from app.screener import ScreenerConfig  # noqa: E402
 
-HERE = Path(__file__).resolve().parents[1]
-ROOT = HERE.parent
-# 路径可用环境变量覆盖（服务器容器内 reports/ 不存在，走 AB_* 指定）。
-DATA_DIR = Path(os.environ.get("AB_DATA_DIR", HERE / "data"))
-CONFIG_PATH = Path(os.environ.get("AB_CONFIG", ROOT / "reports" / "ab_beta_0b0cb477_config.json"))
-REPORTS = Path(os.environ.get("AB_OUT", ROOT / "reports"))
+BACKEND_ROOT = Path(sys.modules["app"].__file__).resolve().parents[1]   # .../backend（或 /app/backend）
+PROJECT_ROOT = BACKEND_ROOT.parent
+# 输出/缓存目录：优先环境变量 → 项目内默认位置 → 临时目录（容器内 /app 只读时兜底）。
+def _resolve(env_name: str, default: Path) -> Path:
+    env = os.environ.get(env_name)
+    if env:
+        path = Path(env)
+    else:
+        path = default
+        if not path.parent.exists():
+            path = Path(tempfile.gettempdir()) / default.name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
-# 服务器旧报告里的字段：t_target_spread 已废弃（保留字段兼容），新字段 etf_beta_coexist 需显式补。
-LEGACY_KEYS = {"t_target_spread"}
+
+DATA_DIR = _resolve("AB_DATA_DIR", BACKEND_ROOT / "data")
+CONFIG_PATH = Path(os.environ.get("AB_CONFIG", PROJECT_ROOT / "reports" / "ab_beta_0b0cb477_config.json"))
+REPORTS = _resolve("AB_OUT", PROJECT_ROOT / "reports")
+
+# 服务器旧报告里的字段：t_target_spread 已废弃（保留字段兼容）；start_date/end_date/
+# initial_cash 是回测运行参数（传给 run_funnel_backtest），不属于 StrategyConfig，
+# from_dict 会当「未知策略配置」拒绝。新字段 etf_beta_coexist 需显式补。
+STRIP_KEYS = {"t_target_spread", "start_date", "end_date", "initial_cash"}
 ARMS = ("mutual", "coexist")
 
 
 def load_base_config() -> dict:
     raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    cfg = {k: v for k, v in raw["config"].items() if k not in LEGACY_KEYS}
+    cfg = {k: v for k, v in raw["config"].items() if k not in STRIP_KEYS}
     cfg["etf_beta_coexist"] = False
     return raw, cfg
 
