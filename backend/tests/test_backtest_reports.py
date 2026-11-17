@@ -181,3 +181,79 @@ def test_delete_backtest_rejects_running_job(api):
     response = client.delete(f"/api/backtests/{job_id}")
     assert response.status_code == 409
     assert storage.get_job(job_id) is not None
+
+
+# ---------------------------------------------------------------------------
+# 年化收益率「买入持有」三基准（compute_buy_hold_benchmarks 纯函数）
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta  # noqa: E402
+
+from app.backtest import compute_buy_hold_benchmarks  # noqa: E402
+from app.domain import Bar  # noqa: E402
+
+
+def _index_bars(code: str, closes: list[float], base: str = "2025-01-02") -> list[Bar]:
+    base_dt = datetime.fromisoformat(base).date()
+    return [
+        Bar(
+            timestamp=datetime.combine(base_dt + timedelta(days=index), datetime.min.time()),
+            symbol=code, open=close, high=close, low=close, close=close,
+            volume=1.0, amount=1.0, timeframe="daily",
+        )
+        for index, close in enumerate(closes)
+    ]
+
+
+def test_buy_hold_benchmarks_three_baselines():
+    """三基准：沪深300 / 中证500 / 半仓创业板+半仓科创板。"""
+    timeline = ["2025-01-02", "2025-01-03", "2025-01-06"]
+    bars = {
+        "sh.000300": _index_bars("sh.000300", [100.0, 110.0, 121.0]),
+        "sh.000905": _index_bars("sh.000905", [200.0, 205.0, 210.0]),
+        "sz.399006": _index_bars("sz.399006", [3000.0, 3150.0, 3300.0]),
+        "sh.000688": _index_bars("sh.000688", [1000.0, 1050.0, 1100.0]),
+    }
+    result = compute_buy_hold_benchmarks(bars, timeline)
+    assert [item["symbol"] for item in result] == ["sh.000300", "sh.000905", "组合"]
+    assert result[0]["return"] == pytest.approx(121 / 100 - 1)
+    assert result[1]["return"] == pytest.approx(210 / 200 - 1)
+    assert result[2]["label"] == "半仓创业板+半仓科创板"
+    assert result[2]["return"] == pytest.approx(
+        0.5 * (3300 / 3000 - 1) + 0.5 * (1100 / 1000 - 1)
+    )
+
+
+def test_buy_hold_benchmarks_missing_index_degrades_to_zero():
+    """缺失指数数据（如 QuanStore 无该指数）→ 对应基准降级 0.0，不抛错。"""
+    timeline = ["2025-01-02", "2025-01-03", "2025-01-06"]
+    bars = {
+        "sh.000300": _index_bars("sh.000300", [100.0, 110.0, 121.0]),
+        # sh.000905 缺失
+        "sz.399006": _index_bars("sz.399006", [3000.0, 3300.0]),
+        # sh.000688 缺失 → 组合只按创业板半仓算
+    }
+    result = compute_buy_hold_benchmarks(bars, timeline)
+    assert result[0]["return"] == pytest.approx(0.21)
+    assert result[1]["return"] == 0.0
+    assert result[2]["return"] == pytest.approx(0.5 * (3300 / 3000 - 1))
+
+
+def test_buy_hold_benchmarks_filters_bars_outside_interval():
+    """区间外的缓冲段 bar 不计入基准（避免把 lookback 段算进收益）。"""
+    timeline = ["2025-01-03", "2025-01-06"]
+    bars = {
+        "sh.000300": _index_bars("sh.000300", [50.0, 80.0, 100.0, 121.0], base="2025-01-01"),
+    }
+    result = compute_buy_hold_benchmarks(bars, timeline)
+    assert result[0]["return"] == pytest.approx(121 / 100 - 1)
+
+
+def test_buy_hold_benchmarks_empty_timeline_and_insufficient_bars():
+    assert compute_buy_hold_benchmarks({}, []) == []
+    # 区间内不足两根 bar → 0.0 占位
+    result = compute_buy_hold_benchmarks(
+        {"sh.000300": _index_bars("sh.000300", [100.0])},
+        ["2025-01-02"],
+    )
+    assert result[0]["return"] == 0.0

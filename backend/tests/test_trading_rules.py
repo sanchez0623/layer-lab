@@ -261,11 +261,16 @@ def test_etf_board_rules_and_detection():
 
 
 def test_etf_order_quantity_and_amount_caps():
+    """ETF 单笔申报上限 100 万份（限价/市价同口径），与股票不同。"""
     assert validate_quantity("sz.159915", 100, "BUY") == ""
     assert "整数倍" in validate_quantity("sz.159915", 150, "BUY")
     assert "最小申报" in validate_quantity("sz.159915", 50, "BUY")
-    assert validate_order_amount("sz.159915", 50_000, "MARKET") == ""
-    assert "上限" in validate_order_amount("sz.159915", 60_000, "MARKET")
+    # 市价单笔上限 100 万份：100 万 OK，100 万零 1 份拒绝。
+    assert validate_order_amount("sz.159915", 1_000_000, "MARKET") == ""
+    assert "上限" in validate_order_amount("sz.159915", 1_000_001, "MARKET")
+    # 限价单笔上限同样 100 万份。
+    assert validate_order_amount("sz.159915", 1_000_000, "LIMIT") == ""
+    assert "上限" in validate_order_amount("sz.159915", 1_000_001, "LIMIT")
 
 
 def test_trading_rules_api_for_star_symbol(tmp_path, monkeypatch):
@@ -327,6 +332,9 @@ def test_order_share_cap_per_board_and_order_type():
     assert order_share_cap("sz.300045", "LIMIT") == 100_000
     assert order_share_cap("sh.688200", "MARKET") == 50_000
     assert order_share_cap("sh.600519", "MARKET") == 100_000
+    # ETF 单笔申报上限 100 万份（限价/市价同口径）。
+    assert order_share_cap("sz.159915", "MARKET") == 1_000_000
+    assert order_share_cap("sz.159915", "LIMIT") == 1_000_000
     assert order_share_cap("TEST", "MARKET") == 0
 
 
@@ -346,6 +354,16 @@ def test_split_quantity_main_board_and_synthetic():
     assert split_quantity("sh.600519", 120_000, "MARKET") == [100_000, 20_000]
     # 合成标的未建模上限：原样一笔，不改变旧回测/旧测试行为。
     assert split_quantity("TEST", 500_000, "MARKET") == [500_000]
+
+
+def test_split_quantity_etf_large_liquidation():
+    """ETF 单笔申报上限 100 万份：250 万份大额卖出拆成 3 笔（100 万 + 100 万 + 50 万）。"""
+    chunks = split_quantity("sz.159915", 2_500_000, "MARKET")
+    assert chunks == [1_000_000, 1_000_000, 500_000]
+    assert all(0 < qty <= 1_000_000 and qty % 100 == 0 for qty in chunks)
+    assert sum(chunks) == 2_500_000
+    # 限价同口径。
+    assert split_quantity("sz.159915", 2_500_000, "LIMIT") == [1_000_000, 1_000_000, 500_000]
 
 
 def test_split_quantity_star_remainder_borrows_to_min_qty():

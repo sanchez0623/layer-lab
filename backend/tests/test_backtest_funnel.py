@@ -209,7 +209,7 @@ def test_funnel_backtest_completes_with_round_and_screen(tmp_path):
     assert all(item["holding_days"] >= 1 for item in closed if item.get("holding_days") is not None)
     summary = aggregate_trail(enriched, len(trading_dates))
     assert summary["screens"] == len(trail)
-    assert summary["waiting_days"] + summary["rounds"] == summary["screens"]
+    assert summary["waiting_days"] + summary["rounds"] + summary["beta_holding_days"] == summary["screens"]
     assert summary["holding_days"] <= len(trading_dates)
     # JSON 安全
     import json
@@ -339,7 +339,7 @@ def test_funnel_no_same_day_reentry_after_close(tmp_path):
             f"{following['id']} 开始在 {following['start_date']}"
         )
     # 若确实发生「清仓当日」场景，引擎应记下延后建仓事件（次日重筛）
-    assert all(item["type"] in {"ROUND_START", "ROUND_CLOSED", "FILL", "SIGNAL", "SCREEN", "SELECT", "WAIT", "ENTRY_DEFERRED", "ENTRY_ABANDON", "INVESTED_2_4M", "FLOAT_LOSS_OVER_6_23PCT"} for item in report["events"])
+    assert all(item["type"] in {"ROUND_START", "ROUND_CLOSED", "FILL", "SIGNAL", "SCREEN", "SELECT", "WAIT", "ENTRY_DEFERRED", "ENTRY_ABANDON", "INVESTED_2_4M", "FLOAT_LOSS_OVER_6_23PCT", "BETA_HOLD"} for item in report["events"])
 
 
 def test_funnel_gate_closed_waits_flat(tmp_path):
@@ -348,7 +348,12 @@ def test_funnel_gate_closed_waits_flat(tmp_path):
 
     assert report["metrics"]["total_rounds"] == 0
     trail = report["data_info"]["rotation_trail"]
-    assert trail and all(item["status"] == "WAITING" and item["symbol"] is None for item in trail)
+    assert trail
+    # ETF beta 腿默认启用：L0 全程关门期间 beta 可能承接 → 轨迹记 BETA（不算空仓）；
+    # 无 beta 持仓的日子仍记 WAITING。个股始终空仓（symbol 恒 None）。
+    assert all(item["symbol"] is None for item in trail)
+    assert all(item["status"] in {"WAITING", "BETA"} for item in trail)
+    assert any(item["status"] == "WAITING" for item in trail)
     assert any(item["gate_open"] is False for item in trail)
     # 逐轮决策日志（大盘门关闭/空仓等待）挂在对应轮次的轨迹项上，不再平铺进全局 warnings。
     assert any(
@@ -384,6 +389,46 @@ def test_funnel_etf_beta_sleeve_holds_when_stock_gate_closed(tmp_path, monkeypat
     # ETF 日线从回测起点之前就有 → 不算部分覆盖，也不该有覆盖告警
     assert beta["partial_coverage"] is False
     assert not any("部分覆盖" in warning for warning in report["warnings"])
+
+
+def test_funnel_beta_holding_days_not_counted_as_waiting(tmp_path, monkeypatch):
+    """L0 全程关门 + ETF beta 持有：轨迹记 BETA（不算空仓），aggregate 口径同步。
+
+    覆盖「换票轨迹中 ETF 持仓期间不算空仓」：beta 持仓日既不进 waiting_days，
+    也不进 waiting_ratio；covered_days = 个股持仓 + beta 持仓。
+    """
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db", gate_up=True)
+    etf_bars = _bars("sz.159915", [3.0 + index * 0.01 for index in range(N_BARS)])
+    save_etf_bars(cache_path(tmp_path / "data", "sz.159915"), etf_bars)
+
+    report = _run(
+        store,
+        config=StrategyConfig(
+            etf_beta_enabled=True, etf_position_pct=0.20,
+            etf_entry_ma_days=5, etf_exit_ma_days=5,
+        ),
+        initial_cash=1_000_000.0,
+    )
+
+    trail = report["data_info"]["rotation_trail"]
+    trading_dates = [point["date"] for point in report["equity_curve"]]
+    enriched = enrich_trail(trail, report.get("rounds") or [], trading_dates)
+
+    beta_items = [item for item in enriched if item["kind"] == "BETA"]
+    assert beta_items, "L0 关门 + ETF 上涨期间应出现 BETA 轨迹项"
+    assert all(item["status"] == "BETA" for item in beta_items)
+    assert all(item.get("beta_symbol") == "sz.159915" for item in beta_items)
+
+    summary = aggregate_trail(enriched, len(trading_dates), beta=report["data_info"].get("beta"))
+    assert summary["beta_holding_days"] == len(beta_items) > 0
+    # 个股空仓（无轮次），等待 + beta + 轮次 = 筛选总数。
+    assert summary["rounds"] == 0
+    assert summary["waiting_days"] + summary["beta_holding_days"] == summary["screens"]
+    assert summary["covered_days"] == summary["holding_days"] + summary["beta_holding_days"]
+    assert summary["covered_ratio"] == pytest.approx(summary["covered_days"] / len(trading_dates))
+    # beta 摘要的已实现盈亏透传到 aggregate（本次持有未平仓 → 0.0，非 None）。
+    assert summary["beta_pnl"] is not None
 
 
 def test_funnel_etf_partial_coverage_warns(tmp_path, monkeypatch):

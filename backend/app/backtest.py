@@ -52,6 +52,56 @@ def _is_transient_reject(message: str | None) -> bool:
     return any(marker in text for marker in _TRANSIENT_REJECT_MARKERS)
 
 
+# 年化收益率「买入持有」三基准的指数代码：
+# 1. 全仓沪深300；2. 全仓中证500；3. 半仓创业板指 + 半仓科创50（399006/000688）。
+_BENCHMARK_INDEX_CODES = ("sh.000300", "sh.000905", "sz.399006", "sh.000688")
+
+
+def _index_interval_return(bars: list[Bar], start: str, end: str) -> float | None:
+    """区间 [start, end] 内指数收益：末根收盘 / 首根收盘 - 1；不足两根返回 None。
+
+    只统计落在区间内的 bar（``start <= bar.date <= end``），避免把区间外的
+    缓冲段（start 前推的 lookback 数据）算进收益基准。
+    """
+    window = [item for item in bars if start <= item.date <= end]
+    if len(window) < 2 or window[0].close <= 0:
+        return None
+    return window[-1].close / window[0].close - 1
+
+
+def compute_buy_hold_benchmarks(
+    bars_by_code: dict[str, list[Bar]], timeline: list[str],
+) -> list[dict[str, Any]]:
+    """计算「买入持有」三基准收益，供年化收益率对比。
+
+    1. 全仓沪深300（sh.000300）；
+    2. 全仓中证500（sh.000905）；
+    3. 半仓创业板指 + 半仓科创50 = 0.5×sz.399006 + 0.5×sh.000688。
+
+    缺失指数数据（不足两根或首根收盘 <= 0）时对应基准降级为 ``0.0`` 占位，
+    不抛错（旧报告 / 数据源缺该指数时优雅降级）。组合基准：一条腿缺失时该
+    半仓按 0 收益（现金）处理，两条腿都缺失则 0.0。
+    """
+    if not timeline:
+        return []
+    start, end = timeline[0], timeline[-1]
+    hs300 = _index_interval_return(bars_by_code.get("sh.000300", []), start, end)
+    zz500 = _index_interval_return(bars_by_code.get("sh.000905", []), start, end)
+    gem = _index_interval_return(bars_by_code.get("sz.399006", []), start, end)
+    star = _index_interval_return(bars_by_code.get("sh.000688", []), start, end)
+    composite = None
+    if gem is not None or star is not None:
+        composite = 0.5 * (gem or 0.0) + 0.5 * (star or 0.0)
+    return [
+        {"label": "沪深300", "symbol": "sh.000300",
+         "return": hs300 if hs300 is not None else 0.0},
+        {"label": "中证500", "symbol": "sh.000905",
+         "return": zz500 if zz500 is not None else 0.0},
+        {"label": "半仓创业板+半仓科创板", "symbol": "组合",
+         "return": composite if composite is not None else 0.0},
+    ]
+
+
 def submit_split_requests(
     account: BrokerAccount, requests, timestamp: datetime,
     events: list[dict[str, Any]], warnings: list[str],
@@ -165,6 +215,7 @@ def performance_metrics(
     max_float_loss: float, buy_hold_return: float,
     total_withdrawn: float = 0.0, withdrawn_count: int = 0,
     withdrawals: list[dict[str, Any]] | None = None,
+    buy_hold_benchmarks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not equity_curve:
         raise ValueError("净值曲线为空")
@@ -226,6 +277,7 @@ def performance_metrics(
         "profit_withdrawn": money(profit_withdrawn),
         "max_invested": money(max_invested), "exposure": exposure,
         "max_float_loss": money(max_float_loss), "buy_hold_return": buy_hold_return,
+        "buy_hold_benchmarks": buy_hold_benchmarks or [],
         "monthly": monthly_breakdown(equity_curve, initial_cash, withdrawals),
     }
 
@@ -597,11 +649,39 @@ class FunnelRotationBacktest:
                 index_code, max_rows=4000,
                 start=index_start, end=index_end,
             )
+        # 年化收益率「买入持有」三基准指数日线：000300/000905 不一定在 universe.db，
+        # 缺失时回退 market.fetch_index_daily_by_code（内部先试 quan 缓存→baostock→tencent）。
+        # 窗口与板块指数一致（start 前推 _INDEX_LOOKBACK_BUFFER_DAYS，end=timeline[-1]）。
+        self._benchmark_bars: dict[str, list[Bar]] = {}
+        for code in _BENCHMARK_INDEX_CODES:
+            self._benchmark_bars[code] = self._load_index_series(code, index_start, index_end)
         # 持仓标的日线惰性缓存：任意时刻最多驻留一只标的的历史。
         self._held_code: str | None = None
         self._held_bars: list[Bar] = []
         # 日线换手率缓存 {code: {date: turn}}，来自 turnover_daily.parquet（做 T 准入）。
         self._turnover_cache: dict[str, dict[str, float]] | None = None
+
+    def _load_index_series(self, code: str, index_start: str, index_end: str) -> list[Bar]:
+        """加载指定指数日线：优先 store（universe.db / quan parquet），空时回退 market。
+
+        若 ``self.store.load_index`` 返回空且 ``self.market`` 具备
+        ``fetch_index_daily_by_code``（内部先试 quan 缓存→baostock→tencent），
+        用其兜底；任何异常都降级为空列表（三基准缺数据时占位 0.0，不抛错）。
+        """
+        bars = self.store.load_index(code, max_rows=4000, start=index_start, end=index_end)
+        if not bars and self.market is not None and hasattr(self.market, "fetch_index_daily_by_code"):
+            try:
+                fetched, _ = self.market.fetch_index_daily_by_code(code, index_start, index_end)
+                bars = list(fetched or [])
+            except Exception:
+                bars = []
+        return bars
+
+    def _compute_buy_hold_benchmarks(self) -> list[dict[str, Any]]:
+        """三基准买入持有收益（供年化收益率对比）；空时间线返回空列表。"""
+        return compute_buy_hold_benchmarks(
+            getattr(self, "_benchmark_bars", {}), self.timeline,
+        )
 
     def _load_bars(self, code: str) -> list[Bar]:
         """单标的日线：覆盖「回测区间 + 起点前推缓冲」的窗口（按需单只加载）。
@@ -993,6 +1073,9 @@ class FunnelRotationBacktest:
             else:
                 flat_wait_days = 0
             if flat and current_symbol is None:
+                # ETF beta 腿持仓期间不算空仓：个股空仓但 beta 被持有 → 轨迹记
+                # BETA（「ETF持仓」覆盖），不记 WAITING。筛选照跑（选到个股仍记 ROUND）。
+                beta_held = self.etf_enabled and self._beta_qty() > 0
                 snapshot = self._screen(date_str)
                 first_code = snapshot["first_code"]
                 # 复用本次选股结果里 first 的 Chg20D（与漏斗口径一致）
@@ -1013,6 +1096,8 @@ class FunnelRotationBacktest:
                     # 各板块 ret20 / 开门状态，解释「为什么空仓」；空仓日同样保留。
                     "gate": snapshot["gate"],
                 }
+                if beta_held:
+                    trail_item["beta_symbol"] = self.etf_symbol
                 if first_code:
                     # 候选前三（按 Chg20D 升序）只在真正选中标的时记录，空仓日不存。
                     trail_item["candidates"] = snapshot["candidates"]
@@ -1028,6 +1113,13 @@ class FunnelRotationBacktest:
                     self.events.append({
                         "date": date_str, "type": "SELECT", "symbol": first_code,
                         "note": "选中标的，次一交易日开盘建仓",
+                    })
+                elif beta_held:
+                    # 个股空仓但 ETF beta 腿被持有：覆盖日，不算空仓。
+                    self._trail[-1]["status"] = "BETA"
+                    self.events.append({
+                        "date": date_str, "type": "BETA_HOLD",
+                        "reason": "个股空仓、ETF beta 腿持有（不算空仓）",
                     })
                 else:
                     self.events.append({
@@ -1144,6 +1236,7 @@ class FunnelRotationBacktest:
             total_withdrawn=self.account.total_withdrawn,
             withdrawn_count=len(self.account.withdrawals),
             withdrawals=[item.to_dict() for item in self.account.withdrawals],
+            buy_hold_benchmarks=self._compute_buy_hold_benchmarks(),
         )
         screening_count = len(self._trail)
         beta = self._beta_summary()

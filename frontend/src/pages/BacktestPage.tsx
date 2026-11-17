@@ -1104,7 +1104,7 @@ export default function BacktestPage() {
 
                 <MetricGrid columns={6}>
                   <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={`期末权益 ${money(metrics.final_equity)}`} />
-                  <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={`买入持有 ${signedPercent(metrics.buy_hold_return)}`} />
+                  <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={metrics.buy_hold_benchmarks?.length ? <span className="whitespace-normal break-words">买入持有: {metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}</span> : `买入持有 ${signedPercent(metrics.buy_hold_return)}`} />
                   <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}`} />
                   <Metric label="夏普比率" value={number(metrics.sharpe_ratio)} sub={`波动率 ${percent(metrics.volatility)}`} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
@@ -1234,7 +1234,8 @@ export default function BacktestPage() {
                           <span>筛选 <strong className="font-mono text-foreground">{integer(trailSummary.screens)}</strong> 次</span>
                           <span>换票 <strong className="font-mono text-foreground">{integer(trailSummary.rounds)}</strong> 轮（已结束 {integer(trailSummary.closed_rounds)}）</span>
                           <span>空仓 <strong className="font-mono text-foreground">{integer(trailSummary.waiting_days)}</strong> 天 · {percent(trailSummary.waiting_ratio)}</span>
-                          <span>持仓利用率 <strong className="font-mono text-foreground">{percent(trailSummary.holding_ratio)}</strong></span>
+                          {(trailSummary.beta_holding_days ?? 0) > 0 && <span>ETF持仓 <strong className="font-mono text-foreground">{integer(trailSummary.beta_holding_days ?? 0)}</strong> 天{trailSummary.beta_pnl != null ? ` · ${signedMoney(trailSummary.beta_pnl)}` : ''}</span>}
+                          <span>持仓利用率 <strong className="font-mono text-foreground">{percent(trailSummary.holding_ratio)}</strong>{trailSummary.covered_ratio != null ? <span className="text-muted-foreground"> · 覆盖 {percent(trailSummary.covered_ratio)}</span> : null}</span>
                           <span>轮次胜率 <strong className="font-mono text-foreground">{percent(trailSummary.win_rate)}</strong></span>
                           <span>平均单轮 <strong className={cn('font-mono', (trailSummary.avg_return ?? 0) >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(trailSummary.avg_return)}</strong></span>
                           {trailSummary.avg_entry_delay_days != null && <span>平均建仓延迟 <strong className="font-mono text-foreground">{number(trailSummary.avg_entry_delay_days, 1)}</strong> 天</span>}
@@ -1265,7 +1266,9 @@ export default function BacktestPage() {
                       </TableRow></TableHeader>
                       <TableBody>
                         {rotationTrail.map((item, index) => {
-                          const isSpan = item.kind === 'WAITING_SPAN';
+                          const isBeta = item.kind === 'BETA';
+                          const isBetaSpan = item.kind === 'BETA_SPAN';
+                          const isSpan = item.kind === 'WAITING_SPAN' || isBetaSpan;
                           const trailKey = isSpan
                             ? `span-${item.start_date}-${index}`
                             : item.round || `row-${item.select_date}-${index}`;
@@ -1277,9 +1280,9 @@ export default function BacktestPage() {
                             <Fragment key={trailKey}>
                               <TableRow className={isSpan ? 'bg-muted/25' : ''}>
                                 <TableCell><button className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>{expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</button></TableCell>
-                                <TableCell>{isSpan ? <Badge tone="amber">空仓</Badge> : item.round ? <strong className="font-mono text-[11px] text-primary">{item.round}</strong> : <span className="text-[11px] text-muted-foreground">待建仓</span>}</TableCell>
+                                <TableCell>{isBeta || isBetaSpan ? <Badge tone="indigo">ETF持仓</Badge> : isSpan ? <Badge tone="amber">空仓</Badge> : item.round ? <strong className="font-mono text-[11px] text-primary">{item.round}</strong> : <span className="text-[11px] text-muted-foreground">待建仓</span>}</TableCell>
                                 <TableCell>{isSpan ? <span className="font-mono text-[11px]">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}<small className="ml-1 text-muted-foreground">（{integer(item.days)} 个交易日）</small></span> : shortDate(item.select_date)}</TableCell>
-                                <TableCell>{isSpan ? <div><span className="text-muted-foreground">空仓等待</span><small className="block text-[10px] text-muted-foreground">{trailWaitReason(item)}</small></div> : item.symbol ? <div><strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong><small className="ml-1 text-[11px] text-muted-foreground">{item.name || '—'}</small></div> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
+                                <TableCell>{isBeta || isBetaSpan ? <div><span className="text-muted-foreground">ETF持仓覆盖</span><small className="block text-[10px] text-muted-foreground">{item.beta_symbol ? displaySymbol(item.beta_symbol) : 'beta 腿'}</small></div> : isSpan ? <div><span className="text-muted-foreground">空仓等待</span><small className="block text-[10px] text-muted-foreground">{trailWaitReason(item)}</small></div> : item.symbol ? <div><strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong><small className="ml-1 text-[11px] text-muted-foreground">{item.name || '—'}</small></div> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
                                 <TableCell>{isSpan ? '—' : item.board || '—'}</TableCell>
                                 <TableCell className={cn('text-right font-mono text-[12px]', item.chg20d_at_select != null && (item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</TableCell>
                                 <TableCell><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></TableCell>
@@ -1287,7 +1290,7 @@ export default function BacktestPage() {
                                 <TableCell className="text-right font-mono text-[12px]">{isSpan ? '—' : item.holding_days ?? '—'}</TableCell>
                                 <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.return_rate != null ? signedPercent(item.return_rate) : '—'}</TableCell>
                                 <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
-                                <TableCell>{isSpan ? <span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span> : <div><Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>{item.close_reason && <small className="ml-1 text-[10px] text-muted-foreground">{item.close_reason}</small>}</div>}</TableCell>
+                                <TableCell>{isBeta || isBetaSpan ? <div><Badge tone="indigo">ETF持仓</Badge><small className="ml-1 text-[10px] text-muted-foreground">个股空仓期间覆盖</small></div> : isSpan ? <span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span> : <div><Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>{item.close_reason && <small className="ml-1 text-[10px] text-muted-foreground">{item.close_reason}</small>}</div>}</TableCell>
                               </TableRow>
                               {expanded && (
                                 <TableRow className="bg-muted/20">
@@ -1328,7 +1331,7 @@ export default function BacktestPage() {
                                           {item.t_net_profit != null && <span>做 T 净贡献 <b className="font-mono text-foreground">{signedMoney(item.t_net_profit)}</b></span>}
                                         </div>
                                       )}
-                                      {item.screen_warnings && item.screen_warnings.length > 0 ? <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-muted-foreground">{item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}</ul> : <p className="mt-1.5 text-[10px] text-muted-foreground">{isSpan ? '该空仓区间无额外决策提示。' : '本轮选股无逐轮决策提示。'}</p>}
+                                      {item.screen_warnings && item.screen_warnings.length > 0 ? <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-muted-foreground">{item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}</ul> : <p className="mt-1.5 text-[10px] text-muted-foreground">{isBeta || isBetaSpan ? '该 ETF 持仓区间无额外决策提示。' : isSpan ? '该空仓区间无额外决策提示。' : '本轮选股无逐轮决策提示。'}</p>}
                                       {!isSpan && item.symbol && (
                                         <Button variant="outline" size="sm" className="mt-1.5 h-7" type="button" onClick={() => focusRoundTrades(String(item.symbol))}>
                                           <ArrowDownToLine className="rotate-180" />在成交明细中查看

@@ -14,13 +14,16 @@ from __future__ import annotations
 
 from typing import Any
 
-#: 轨迹项类型：轮次 / 空仓（原始逐日）。
+#: 轨迹项类型：轮次 / 空仓（原始逐日）/ ETF beta 腿持仓（原始逐日）。
 KIND_ROUND = "ROUND"
 KIND_WAITING = "WAITING"
-#: 合并后的空仓区间。
+KIND_BETA = "BETA"
+#: 合并后的空仓区间 / ETF 持仓区间。
 KIND_WAITING_SPAN = "WAITING_SPAN"
+KIND_BETA_SPAN = "BETA_SPAN"
 
 _WAITING_STATUS = "WAITING"
+_BETA_STATUS = "BETA"
 
 #: CSV 导出固定列（顺序即表头顺序）。数值为空时写空串，便于 Excel 透视。
 TRAIL_CSV_FIELDS = [
@@ -29,6 +32,7 @@ TRAIL_CSV_FIELDS = [
     "after_l0", "after_l1", "after_l2", "after_l3", "eligible",
     "pnl", "return_rate", "holding_days", "entry_delay_days",
     "max_invested", "t_net_profit", "close_reason",
+    "beta_symbol",
 ]
 
 
@@ -100,10 +104,10 @@ def enrich_trail(
 ) -> list[dict[str, Any]]:
     """把原始轨迹项补齐成可复盘的轮次行。
 
-    - ``kind``：WAITING 之外一律 ROUND（含「选中但未建仓」的 OPEN）；
+    - ``kind``：WAITING / BETA 之外一律 ROUND（含「选中但未建仓」的 OPEN）；
     - 轮次成果从 ``rounds``（按 round id 关联）补齐：``close_reason`` /
       ``max_invested`` / ``t_net_profit`` / ``return_rate``；
-    - ``holding_days``：建仓 → 出场之间的交易日数（含首尾）；
+    - ``holding_days``：建仓 → 出场之间的交易日数（含首尾）；BETA 逐日项为 1；
     - ``entry_delay_days``：选股 → 建仓之间的交易日数；
     - WAITING 行补 ``reason``（gate_closed / no_candidate）与 ``bottleneck``。
 
@@ -117,7 +121,12 @@ def enrich_trail(
     for item in items or []:
         entry = dict(item)
         status = str(entry.get("status") or "").upper()
-        entry["kind"] = KIND_WAITING if status == _WAITING_STATUS else KIND_ROUND
+        if status == _WAITING_STATUS:
+            entry["kind"] = KIND_WAITING
+        elif status == _BETA_STATUS:
+            entry["kind"] = KIND_BETA
+        else:
+            entry["kind"] = KIND_ROUND
         round_row = rounds_by_id.get(str(entry.get("round"))) if entry.get("round") else None
         if round_row:
             if not entry.get("entry_date"):
@@ -136,6 +145,9 @@ def enrich_trail(
         entry["holding_days"] = _trading_span(
             index, entry.get("entry_date"), entry.get("exit_date"), inclusive=True,
         )
+        if entry["kind"] == KIND_BETA:
+            # ETF 持仓逐日项：单日覆盖；收益率依赖区间级 beta 账本，逐日不摊。
+            entry["holding_days"] = 1
         entry["entry_delay_days"] = _trading_span(
             index, entry.get("select_date"), entry.get("entry_date"), inclusive=False,
         )
@@ -157,57 +169,109 @@ def _waiting_signature(item: dict[str, Any]) -> tuple[bool, str, str | None]:
     return (gate_open, reason, item.get("bottleneck"))
 
 
+def _beta_signature(item: dict[str, Any]) -> tuple[str | None, bool]:
+    """连续 ETF 持仓合并的判定键：ETF 标的 + 是否开门（保留门状态展示）。"""
+    return (str(item.get("beta_symbol") or ""), bool(item.get("gate_open")))
+
+
 def collapse_waiting_spans(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     """把连续同因的空仓日合并成区间行（轮次行原样保留，不跨轮次合并）。
 
     区间行字段：``kind=WAITING_SPAN`` / ``start_date`` / ``end_date`` / ``days`` /
     ``gate_open`` / ``reason`` / ``bottleneck`` / ``funnel``（末日口径）/ ``gate``（末日）/
     ``screen_warnings``（去重）。``select_date`` 保留为区间起始日，兼容旧前端排序。
+
+    ETF beta 持仓项（``kind=BETA``）会打断空仓区间（像 ROUND 那样），并把连续
+    持仓日合并成 ``kind=BETA_SPAN`` 区间（``days`` / ``start_date`` / ``end_date`` /
+    ``beta_symbol`` / ``funnel`` / ``gate``），避免逐日刷屏。
     """
     result: list[dict[str, Any]] = []
-    current: dict[str, Any] | None = None
+    current_waiting: dict[str, Any] | None = None
+    current_beta: dict[str, Any] | None = None
 
-    def flush() -> None:
-        nonlocal current
-        if current is not None:
-            result.append(current)
-            current = None
+    def flush_waiting() -> None:
+        nonlocal current_waiting
+        if current_waiting is not None:
+            result.append(current_waiting)
+            current_waiting = None
+
+    def flush_beta() -> None:
+        nonlocal current_beta
+        if current_beta is not None:
+            result.append(current_beta)
+            current_beta = None
 
     for item in items or []:
-        if item.get("kind") != KIND_WAITING:
-            flush()
+        kind = item.get("kind")
+        if kind == KIND_WAITING:
+            flush_beta()
+            signature = _waiting_signature(item)
+            if current_waiting is not None and _waiting_signature(current_waiting) == signature:
+                current_waiting["end_date"] = item.get("select_date") or current_waiting["end_date"]
+                current_waiting["days"] += 1
+                current_waiting["funnel"] = dict(item.get("funnel") or {})
+                if item.get("gate") is not None:
+                    current_waiting["gate"] = item.get("gate")
+                for warning in item.get("screen_warnings") or []:
+                    if warning not in current_waiting["screen_warnings"]:
+                        current_waiting["screen_warnings"].append(warning)
+                continue
+            flush_waiting()
+            current_waiting = {
+                "kind": KIND_WAITING_SPAN,
+                "status": _WAITING_STATUS,
+                "round": None,
+                "symbol": None,
+                "name": "",
+                "select_date": item.get("select_date"),
+                "start_date": item.get("select_date"),
+                "end_date": item.get("select_date"),
+                "days": 1,
+                "gate_open": bool(item.get("gate_open")),
+                "reason": str(item.get("reason") or ("gate_closed" if not item.get("gate_open") else "no_candidate")),
+                "bottleneck": item.get("bottleneck"),
+                "funnel": dict(item.get("funnel") or {}),
+                "gate": item.get("gate"),
+                "screen_warnings": list(dict.fromkeys(item.get("screen_warnings") or [])),
+            }
+        elif kind == KIND_BETA:
+            flush_waiting()
+            signature = _beta_signature(item)
+            if current_beta is not None and _beta_signature(current_beta) == signature:
+                current_beta["end_date"] = item.get("select_date") or current_beta["end_date"]
+                current_beta["days"] += 1
+                current_beta["holding_days"] = current_beta.get("holding_days", 1) + 1
+                current_beta["funnel"] = dict(item.get("funnel") or {})
+                if item.get("gate") is not None:
+                    current_beta["gate"] = item.get("gate")
+                for warning in item.get("screen_warnings") or []:
+                    if warning not in current_beta["screen_warnings"]:
+                        current_beta["screen_warnings"].append(warning)
+                continue
+            flush_beta()
+            current_beta = {
+                "kind": KIND_BETA_SPAN,
+                "status": _BETA_STATUS,
+                "round": None,
+                "symbol": None,
+                "name": "",
+                "select_date": item.get("select_date"),
+                "start_date": item.get("select_date"),
+                "end_date": item.get("select_date"),
+                "days": 1,
+                "gate_open": bool(item.get("gate_open")),
+                "beta_symbol": item.get("beta_symbol"),
+                "holding_days": 1,
+                "funnel": dict(item.get("funnel") or {}),
+                "gate": item.get("gate"),
+                "screen_warnings": list(dict.fromkeys(item.get("screen_warnings") or [])),
+            }
+        else:
+            flush_waiting()
+            flush_beta()
             result.append(dict(item))
-            continue
-        signature = _waiting_signature(item)
-        if current is not None and _waiting_signature(current) == signature:
-            current["end_date"] = item.get("select_date") or current["end_date"]
-            current["days"] += 1
-            current["funnel"] = dict(item.get("funnel") or {})
-            if item.get("gate") is not None:
-                current["gate"] = item.get("gate")
-            for warning in item.get("screen_warnings") or []:
-                if warning not in current["screen_warnings"]:
-                    current["screen_warnings"].append(warning)
-            continue
-        flush()
-        current = {
-            "kind": KIND_WAITING_SPAN,
-            "status": _WAITING_STATUS,
-            "round": None,
-            "symbol": None,
-            "name": "",
-            "select_date": item.get("select_date"),
-            "start_date": item.get("select_date"),
-            "end_date": item.get("select_date"),
-            "days": 1,
-            "gate_open": bool(item.get("gate_open")),
-            "reason": str(item.get("reason") or ("gate_closed" if not item.get("gate_open") else "no_candidate")),
-            "bottleneck": item.get("bottleneck"),
-            "funnel": dict(item.get("funnel") or {}),
-            "gate": item.get("gate"),
-            "screen_warnings": list(dict.fromkeys(item.get("screen_warnings") or [])),
-        }
-    flush()
+    flush_waiting()
+    flush_beta()
     return result
 
 
@@ -240,18 +304,25 @@ def _longest_wait(items: list[dict[str, Any]]) -> dict[str, Any] | None:
     }
 
 
-def aggregate_trail(items: list[dict[str, Any]] | None, trading_days: int = 0) -> dict[str, Any]:
+def aggregate_trail(
+    items: list[dict[str, Any]] | None, trading_days: int = 0,
+    beta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """汇总指标：筛选/轮次/空仓构成/持仓利用率/胜率/收益/最长空仓/退出原因。
 
     ``items`` 为 :func:`enrich_trail` 的输出（未合并的逐日轨迹）。全部口径在此集中：
-    - ``waiting_ratio`` = 空仓筛选日 / 筛选总数；
+    - ``waiting_ratio`` = 空仓筛选日 / 筛选总数（ETF beta 持仓日**不算空仓**）；
     - ``holding_ratio`` = 已结束轮次持仓交易日之和 / 回测交易日数；
+    - ``covered_ratio`` = （轮次持仓 + ETF 持仓）交易日 / 回测交易日数；
+    - ``beta_holding_days`` / ``beta_pnl``：ETF beta 腿持仓天数与已实现盈亏
+      （``beta_pnl`` 优先取 ``beta`` 汇总的 pnl，缺失时回退逐日项的 ``beta_pnl``）；
     - 胜率/平均收益只统计 CLOSED 且有 pnl 的轮次。
     """
     rows = list(items or [])
     screens = len(rows)
     waiting = [item for item in rows if item.get("kind") == KIND_WAITING]
     rounds = [item for item in rows if item.get("kind") == KIND_ROUND]
+    beta_rows = [item for item in rows if item.get("kind") == KIND_BETA]
     closed = [
         item for item in rounds
         if str(item.get("status") or "").upper() == "CLOSED" and item.get("pnl") is not None
@@ -262,6 +333,17 @@ def aggregate_trail(items: list[dict[str, Any]] | None, trading_days: int = 0) -
         if item.get("return_rate") is not None
     ]
     holding_days = sum(int(item.get("holding_days") or 0) for item in closed)
+    beta_holding_days = len(beta_rows)
+    beta_pnl = None
+    if beta is not None and beta.get("pnl") is not None:
+        beta_pnl = float(beta.get("pnl"))
+    elif beta_rows:
+        item_pnls = [
+            float(item["beta_pnl"]) for item in beta_rows
+            if item.get("beta_pnl") is not None
+        ]
+        if item_pnls:
+            beta_pnl = sum(item_pnls)
     entry_delays = [
         int(item["entry_delay_days"]) for item in rounds
         if item.get("entry_delay_days") is not None
@@ -280,6 +362,7 @@ def aggregate_trail(items: list[dict[str, Any]] | None, trading_days: int = 0) -
     total_pnl = round(sum(float(item["pnl"]) for item in closed), 2) if closed else 0.0
     best = max(closed, key=lambda item: float(item["pnl"])) if closed else None
     worst = min(closed, key=lambda item: float(item["pnl"])) if closed else None
+    covered_days = holding_days + beta_holding_days
     return {
         "screens": screens,
         "rounds": len(rounds),
@@ -293,6 +376,10 @@ def aggregate_trail(items: list[dict[str, Any]] | None, trading_days: int = 0) -
         "trading_days": total_days,
         "holding_days": holding_days,
         "holding_ratio": holding_days / total_days if total_days else 0.0,
+        "beta_holding_days": beta_holding_days,
+        "beta_pnl": beta_pnl,
+        "covered_days": covered_days,
+        "covered_ratio": covered_days / total_days if total_days else 0.0,
         "win_rate": len(wins) / len(closed) if closed else 0.0,
         "avg_return": (sum(returns) / len(returns)) if returns else None,
         "avg_pnl": round(total_pnl / len(closed), 2) if closed else None,
@@ -336,5 +423,6 @@ def flatten_for_csv(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             "max_invested": "" if item.get("max_invested") is None else item["max_invested"],
             "t_net_profit": "" if item.get("t_net_profit") is None else item["t_net_profit"],
             "close_reason": item.get("close_reason") or "",
+            "beta_symbol": item.get("beta_symbol") or "",
         })
     return rows

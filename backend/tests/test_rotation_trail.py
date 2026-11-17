@@ -193,6 +193,92 @@ def test_aggregate_trail_on_empty_items():
     assert summary["best"] is None and summary["worst"] is None
 
 
+# ------------------------------------------------------------------ BETA ----
+
+def _beta(select_date: str, *, gate_open: bool = True, beta_symbol: str = "sz.159915") -> dict:
+    return {
+        "round": None, "symbol": None, "name": "", "board": "",
+        "select_date": select_date, "entry_date": None, "exit_date": None,
+        "pnl": None, "chg20d_at_select": None, "gate_open": gate_open,
+        "status": "BETA", "screen_warnings": [], "funnel": {},
+        "beta_symbol": beta_symbol,
+    }
+
+
+def test_enrich_trail_marks_beta_kind_and_holding_days():
+    trail = [_beta("2025-01-02")]
+    enriched = enrich_trail(trail, [], TRADING_DATES)
+    assert enriched[0]["kind"] == "BETA"
+    assert enriched[0]["holding_days"] == 1
+    assert enriched[0]["return_rate"] is None
+    assert trail[0]["status"] == "BETA"  # 不改入参
+
+
+def test_collapse_beta_breaks_waiting_and_merges_beta_spans():
+    trail = [
+        _waiting("2025-01-02", gate_open=False),
+        _beta("2025-01-03"),
+        _beta("2025-01-06"),
+        _waiting("2025-01-07", gate_open=False),
+        {"round": "R001", "symbol": "sz.300001", "name": "A", "board": "创业板",
+         "select_date": "2025-01-08", "status": "CLOSED", "gate_open": True},
+    ]
+    collapsed = collapse_waiting_spans(enrich_trail(trail, [], TRADING_DATES))
+    kinds = [item["kind"] for item in collapsed]
+    # beta 打断空仓；连续 beta 合并成区间；轮次独立。
+    assert kinds == ["WAITING_SPAN", "BETA_SPAN", "WAITING_SPAN", "ROUND"]
+    beta_span = collapsed[1]
+    assert beta_span["start_date"] == "2025-01-03" and beta_span["end_date"] == "2025-01-06"
+    assert beta_span["days"] == 2
+    assert beta_span["beta_symbol"] == "sz.159915"
+    assert beta_span["holding_days"] == 2
+    # 空仓区间不跨 beta 合并：01-02 与 01-07 各自独立。
+    assert collapsed[0]["days"] == 1 and collapsed[2]["days"] == 1
+    assert collapsed[3]["symbol"] == "sz.300001"
+
+
+def test_collapse_beta_span_splits_on_symbol_change():
+    trail = [
+        _beta("2025-01-02", beta_symbol="sz.159915"),
+        _beta("2025-01-03", beta_symbol="sh.510300"),
+        _beta("2025-01-06", beta_symbol="sh.510300"),
+    ]
+    collapsed = collapse_waiting_spans(enrich_trail(trail, [], TRADING_DATES))
+    assert [item["kind"] for item in collapsed] == ["BETA_SPAN", "BETA_SPAN"]
+    assert collapsed[0]["beta_symbol"] == "sz.159915" and collapsed[0]["days"] == 1
+    assert collapsed[1]["beta_symbol"] == "sh.510300" and collapsed[1]["days"] == 2
+
+
+def test_aggregate_trail_excludes_beta_from_waiting_and_counts_covered():
+    trail = [
+        _waiting("2025-01-02", gate_open=False),
+        _beta("2025-01-03"),
+        _beta("2025-01-06"),
+        _waiting("2025-01-07", gate_open=False),
+    ]
+    enriched = enrich_trail(trail, [], TRADING_DATES)
+    summary = aggregate_trail(enriched, trading_days=len(TRADING_DATES))
+
+    assert summary["screens"] == 4
+    assert summary["waiting_days"] == 2            # beta 日不算空仓
+    assert summary["beta_holding_days"] == 2
+    assert summary["waiting_ratio"] == pytest.approx(2 / 4)
+    assert summary["covered_days"] == 2            # 无轮次持仓 + 2 天 beta
+    assert summary["covered_ratio"] == pytest.approx(2 / 5)
+
+
+def test_aggregate_trail_beta_pnl_from_beta_param_and_items():
+    trail = [_beta("2025-01-02"), _beta("2025-01-03")]
+    enriched = enrich_trail(trail, [], TRADING_DATES)
+    from_beta = aggregate_trail(enriched, trading_days=5, beta={"pnl": 1234.5})
+    assert from_beta["beta_pnl"] == 1234.5
+    # 未传 beta 汇总时回退逐日项上的 beta_pnl。
+    enriched[0]["beta_pnl"] = 500.0
+    enriched[1]["beta_pnl"] = 300.0
+    from_items = aggregate_trail(enriched, trading_days=5)
+    assert from_items["beta_pnl"] == 800.0
+
+
 def test_flatten_for_csv_has_fixed_columns():
     trail = [_waiting("2025-01-02", gate_open=False, funnel={"after_l0": 0})]
     rows = flatten_for_csv(enrich_trail(trail, [], []))
@@ -328,3 +414,60 @@ def test_export_trades_still_works(api):
     application.state.storage.save_backtest(_report())
     response = client.get(f"/api/backtests/{REPORT_ID}/export?kind=trades")
     assert response.status_code == 200
+
+
+# ------------------------------------------------------------------ BETA API ----
+
+def _report_with_beta() -> dict:
+    trail = [
+        _waiting("2025-01-02", gate_open=False),
+        _beta("2025-01-03"),
+        _beta("2025-01-06"),
+        _waiting("2025-01-07", gate_open=False),
+    ]
+    return {
+        "id": "bt-trail-beta", "name": "换票轨迹 beta 测试", "status": "COMPLETED",
+        "created_at": "2026-11-13T00:00:00", "config": {}, "metrics": {},
+        "equity_curve": [{"date": day, "equity": 4_000_000.0} for day in TRADING_DATES_API],
+        "trades": [], "orders": [], "rounds": [], "events": [], "warnings": [],
+        "data_info": {
+            "mode": "funnel_rotation", "screening_count": len(trail),
+            "rotation_trail": trail,
+            "beta": {"enabled": True, "symbol": "sz.159915", "pnl": 888.0},
+        },
+    }
+
+
+def test_rotation_trail_beta_kind_flows_through_endpoint(api):
+    application, client = api
+    application.state.storage.save_backtest(_report_with_beta())
+
+    raw = client.get(f"/api/backtests/bt-trail-beta/rotation-trail?page=1&page_size=20").json()
+    assert raw["total"] == 4
+    assert [item["kind"] for item in raw["items"]] == ["WAITING", "BETA", "BETA", "WAITING"]
+    assert raw["items"][1]["beta_symbol"] == "sz.159915"
+
+    collapsed = client.get(
+        f"/api/backtests/bt-trail-beta/rotation-trail?page=1&page_size=20&collapse_waiting=true"
+    ).json()
+    assert [item["kind"] for item in collapsed["items"]] == ["WAITING_SPAN", "BETA_SPAN", "WAITING_SPAN"]
+    assert collapsed["items"][1]["days"] == 2
+
+    summary = collapsed["summary"]
+    assert summary["beta_holding_days"] == 2
+    assert summary["beta_pnl"] == 888.0
+    assert summary["waiting_days"] == 2
+    assert summary["covered_days"] == 2
+
+
+def test_export_trail_csv_includes_beta_kind(api):
+    application, client = api
+    application.state.storage.save_backtest(_report_with_beta())
+
+    response = client.get("/api/backtests/bt-trail-beta/export?kind=trail")
+    assert response.status_code == 200, response.text
+    text = response.content.decode("utf-8-sig")
+    lines = [line for line in text.splitlines() if line]
+    assert "BETA" in text
+    assert "beta_symbol" in lines[0]
+    assert "sz.159915" in text

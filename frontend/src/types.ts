@@ -221,14 +221,14 @@ export interface RotationTrailItem {
   pnl: number | null;
   chg20d_at_select: number | null;
   gate_open: boolean;
-  status: 'CLOSED' | 'OPEN' | 'WAITING' | string;
+  status: 'CLOSED' | 'OPEN' | 'WAITING' | 'BETA' | string;
   /** 本轮逐股决策日志（为什么开门/关门/空仓/深度超跌旁路几只），挂在对应选股日。 */
   screen_warnings?: string[];
   /** 本轮漏斗计数 universe→L0→L1→L2→L3→eligible。 */
   funnel?: Record<string, number>;
   /* ---------- 读取端点派生 / 新报告增强（旧报告可能缺省） ---------- */
-  /** ROUND = 轮次行；WAITING = 原始逐日空仓；WAITING_SPAN = 合并后的空仓区间。 */
-  kind?: 'ROUND' | 'WAITING' | 'WAITING_SPAN' | string;
+  /** ROUND = 轮次行；WAITING = 原始逐日空仓；WAITING_SPAN = 合并后的空仓区间；BETA = ETF beta 腿持仓日；BETA_SPAN = 合并后的 ETF 持仓区间。 */
+  kind?: 'ROUND' | 'WAITING' | 'WAITING_SPAN' | 'BETA' | 'BETA_SPAN' | string;
   /** 本轮收益率 = 净盈亏 / 峰值投入（资金效率口径）。 */
   return_rate?: number | null;
   /** 持仓交易日数（含首尾）。 */
@@ -249,6 +249,9 @@ export interface RotationTrailItem {
   reason?: 'gate_closed' | 'no_candidate' | string;
   /** 空仓时漏斗卡在哪一层：L1 / L2 / L3 / L4。 */
   bottleneck?: string | null;
+  /* ---------- ETF beta 腿持仓行（kind=BETA / BETA_SPAN） ---------- */
+  /** 持仓的 ETF 标的（如 sz.159915）；个股空仓期间 beta 腿持有不算空仓。 */
+  beta_symbol?: string | null;
 }
 
 /** 轮次摘要（汇总里的最佳/最差轮）。 */
@@ -278,6 +281,14 @@ export interface RotationTrailSummary {
   trading_days: number;
   holding_days: number;
   holding_ratio: number;
+  /** ETF beta 腿持仓天数（个股空仓期间 beta 持有，不算空仓）。 */
+  beta_holding_days?: number;
+  /** ETF beta 腿已实现盈亏。 */
+  beta_pnl?: number | null;
+  /** 被覆盖（个股或 ETF）总交易日。 */
+  covered_days?: number;
+  /** 被覆盖（个股或 ETF）交易日 / 回测交易日数。 */
+  covered_ratio?: number;
   win_rate: number;
   avg_return: number | null;
   avg_pnl: number | null;
@@ -379,6 +390,8 @@ export interface ReportMetrics {
   exposure: number;
   max_float_loss: number;
   buy_hold_return: number;
+  /** 年化收益率「买入持有」三基准对比（沪深300 / 中证500 / 半仓双创）；旧报告缺省时前端回退 buy_hold_return。 */
+  buy_hold_benchmarks?: { label: string; symbol: string; return: number }[];
   /** 盈利提现：累计已提现金额（真实离开账户的资金）与提现笔数。 */
   total_withdrawn?: number;
   withdrawn_count?: number;
