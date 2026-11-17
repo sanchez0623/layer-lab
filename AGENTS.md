@@ -132,6 +132,25 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
 - 已存在模拟账户会把创建时的费率/配置**快照**进自己的 `config`，改全局不会回填老账户。
 - 持仓「买入费用」列来自 `_positions_internal` 的 `permanent_fee`（已含在 `permanent_cost` 内），重算手续费时别漏改，也别重复扣成本。
 
+## HTTPS 证书依赖（dividend-alpha 共享，避免重复踩坑）
+
+- **本项目的 HTTPS 证书不归自己管**：`layer-lab-https`(3444) 只**只读挂载** dividend-alpha 的 IP 证书
+  （Let's Encrypt `shortlived` profile，约 6 天有效），**不签发、不续期**。续期入口在 dividend-alpha：
+  crontab `17 */12 * * *` 跑 `certbot renew`（docker run），日志在 `/root/dividend-alpha/logs/certbot_renew.log`。
+  证书加载靠两个 cron：certbot 续成后 reload `infra-web-1`；`23 */6 * * * /root/ll_https_reload.sh` 每 6 小时
+  reload `layer-lab-https`（兜底，手动续期后要立即 reload 两个容器，否则 6 小时内浏览器仍看旧证书）。
+- **续期静默失败的典型形态**：浏览器报证书失效、`archive/` 里始终只有 `cert1.pem`、
+  `certbot_renew.log` 反复报 `unauthorized / reader size limit exceeded`。
+- **2026-11-17 踩坑与修复**：infra-web 的 `infra/nginx.conf` 把 HTTP→HTTPS 的 `return 307` 写在
+  **server 级**（`if (-f https.conf)` 守卫）。nginx 的 server 级 `return` 在 **location 匹配之前**执行，
+  导致 `/.well-known/acme-challenge/` 也被 307 跳到 https，Boulder 跟随跳转发到 SPA `index.html`（大响应体）→
+  `reader size limit exceeded` → HTTP-01 挑战必然失败 → 续期从 11/13 起全挂，11/16 22:26 UTC 证书过期无新接上。
+  **修复**：把 `return 307`（含 `if (-f ...)` 守卫）从 server 级挪进 `location /`（catch-all），
+  让更具体的 `location ^~ /.well-known/acme-challenge/` 优先 serve token 文件；改完 `nginx -t` 再 reload。
+  已验证：改后 challenge 路径返回 200 + token 内容，`/` 仍 307 跳 https、`/da/v1/` 仍走 api 代理。
+- **改这一类共享配置要小心**：`infra/nginx.conf` 属 dividend-alpha，是同一 IP 上所有 IP 证书项目的续期入口，
+  改它会连带影响 dividend-alpha 自身的 HTTPS。动手前先备份（`nginx.conf.bak-<时间戳>`）+ `nginx -t`。
+
 ## 领域要点（避免重复踩坑）
 
 - **T+1 可卖**：`broker.new_day` 只在真正跨交易日时清零 `today_*_buy_qty`，撮合每根 K 线都调它，别无条件 reset。
@@ -158,6 +177,19 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
   关闭（add_tier_strict=false）= 全档统一原始 A3（向后兼容）。⚠️ 注意：从 reflog 恢复的原始实现
   （3d91e4a）把 ×0.5 提前到了档2、档3/档4 无差别——已按用户截图规范改为档4 才收紧，
   `test_tiered_a3_spec_progression` 是这个分歧的哨兵。
+- **做T准入的四阈值已可视化（2.5.0 起）**：`t_min_amplitude`(4%) / `t_min_turnover`(3%) / `t_max_turnover`(12%) /
+  `t_min_expected_net_spread`(3%) 之前只存在于 `domain.py` 默认值、前端与 `/config` 都不可见，
+  面板上「原来的做T逻辑」只剩净利止盈与 T+1 截止。现已进 `AccountConfigRequest`（可局部更新）+
+  回测页 FormGrid + 模拟盘「做 T 准入门槛」块，`StrategyConfig.__post_init__` 校验
+  `0 <= t_min_turnover <= t_max_turnover <= 1`、振幅/期望净利在 (0,1]（自相矛盾的值必须在源头
+  400，而不是让做T准入悄悄恒 False）。单测 `backend/tests/test_paper_t_live_wiring.py`。
+- ⚠️ **做T准入的换手率/盘口只有回测与模拟盘两条喂法，别再加第三条**：回测走 `quan_data.load_minute5`
+  的代理值（bid/ask = close±0.1%、换手取当日日线）+ `backtest.py` 显式传 `daily_amplitude`/
+  `daily_turnover_rate`；模拟盘 live-tick 靠 `main.apply_bar` 把**实时快照** bar 的
+  `turnover_rate`/`bid`/`ask` 经 `live_turnover`/`live_bid`/`live_ask` 传下去（腾讯只把快照挂在最后一根
+  未完成 5 分钟 bar 上，而那根会被 `recent_bars` 的 timestamp 过滤丢掉，所以**已收盘 bar 上恒无**这两个值）。
+  历史教训：`40f24d6` 加了这三个入参 + 单测却**没接 `apply_bar` 的调用点**，导致模拟盘做T准入恒 False、
+  一次都不触发，而回测照常触发（架构原则 1 的隐性违背）。改做T准入前务必确认「这条路径的值从哪来」。
 - **深跌幅当日做T（t_deep_drop_pct，默认 0.10）**：当日盘中跌幅（相对前收）≥ 10% 时绕过底仓笔数门槛
   （sequence_index≥4）允许做T（20cm 板极端恐慌日抢反弹，退出仍走净利止盈 + T+1 尾盘强平）。
   None/0 = 关闭；__post_init__ 校验开启时必须 ≥0.10。模拟盘做T面板与回测页均可视化编辑。

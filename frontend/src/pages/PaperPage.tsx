@@ -593,6 +593,40 @@ export default function PaperPage() {
     }
   };
 
+  // 做T准入四阈值（最小振幅 / 换手率区间 / 最小期望净利）：一次性 PATCH，四项一起保存。
+  const [tGate, setTGate] = useState({ amplitude: '', minTurnover: '', maxTurnover: '', netSpread: '' });
+  const [savingTGate, setSavingTGate] = useState(false);
+  const tMinAmplitude = account?.config?.t_min_amplitude ?? 0.04;
+  const tMinTurnover = account?.config?.t_min_turnover ?? 0.03;
+  const tMaxTurnover = account?.config?.t_max_turnover ?? 0.12;
+  const tMinNetSpread = account?.config?.t_min_expected_net_spread ?? 0.03;
+  const saveTGate = async () => {
+    if (!account) return;
+    const amplitude = Number(tGate.amplitude);
+    const minTurnover = Number(tGate.minTurnover);
+    const maxTurnover = Number(tGate.maxTurnover);
+    const netSpread = Number(tGate.netSpread);
+    if (!Number.isFinite(amplitude) || amplitude <= 0 || amplitude >= 100) { setError('最小振幅需为 0–100 之间的百分数。'); return; }
+    if (!Number.isFinite(minTurnover) || minTurnover < 0 || minTurnover > 100) { setError('换手率下限需为 0–100 之间的百分数。'); return; }
+    if (!Number.isFinite(maxTurnover) || maxTurnover <= 0 || maxTurnover > 100) { setError('换手率上限需为 0–100 之间的百分数。'); return; }
+    if (!Number.isFinite(netSpread) || netSpread <= 0 || netSpread >= 100) { setError('最小期望净利需为 0–100 之间的百分数。'); return; }
+    if (minTurnover > maxTurnover) { setError('换手率下限不能高于上限。'); return; }
+    setSavingTGate(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, {
+        t_min_amplitude: amplitude / 100, t_min_turnover: minTurnover / 100,
+        t_max_turnover: maxTurnover / 100, t_min_expected_net_spread: netSpread / 100,
+      });
+      setAccount(next);
+      setTGate({ amplitude: '', minTurnover: '', maxTurnover: '', netSpread: '' });
+      toast.success('做T准入门槛已更新，下一根K线起生效。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '做T准入门槛更新失败。');
+    } finally {
+      setSavingTGate(false);
+    }
+  };
+
   const saveTNetSpread = async () => {
     if (!account) return;
     const pct = Number(tSpreadInput);
@@ -910,6 +944,19 @@ export default function PaperPage() {
                     <Button size="sm" className="h-8" onClick={() => void saveDeepDrop(true)} disabled={savingDeepDrop || deepDropInput === ''}>{savingDeepDrop ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingDeepDrop ? '正在保存' : '保存阈值'}</Button>
                   </>
                 )}
+              </div>
+              <div className="mt-2 border-t pt-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong className="text-[12px]">做 T 准入门槛</strong>
+                  <span className="text-[10px] text-muted-foreground">当前：振幅 ≥ {number(tMinAmplitude * 100, 2)}% · 换手 {number(tMinTurnover * 100, 2)}–{number(tMaxTurnover * 100, 2)}% · 期望净利 ≥ {number(tMinNetSpread * 100, 2)}%</span>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-end gap-2">
+                  <Field label="最小振幅（%）" hint="近5根平均振幅下限" className="w-36"><NumberInput unit="%" min={0} max={100} step={0.5} allowEmpty placeholder={number(tMinAmplitude * 100, 2)} value={tGate.amplitude} onChange={(value) => setTGate((prev) => ({ ...prev, amplitude: value }))} disabled={savingTGate} /></Field>
+                  <Field label="换手下限（%）" hint="当日换手率下限" className="w-36"><NumberInput unit="%" min={0} max={100} step={0.5} allowEmpty placeholder={number(tMinTurnover * 100, 2)} value={tGate.minTurnover} onChange={(value) => setTGate((prev) => ({ ...prev, minTurnover: value }))} disabled={savingTGate} /></Field>
+                  <Field label="换手上限（%）" hint="当日换手率上限" className="w-36"><NumberInput unit="%" min={0} max={100} step={0.5} allowEmpty placeholder={number(tMaxTurnover * 100, 2)} value={tGate.maxTurnover} onChange={(value) => setTGate((prev) => ({ ...prev, maxTurnover: value }))} disabled={savingTGate} /></Field>
+                  <Field label="期望净利（%）" hint="振幅扣成本后仍需 ≥" className="w-36"><NumberInput unit="%" min={0} max={100} step={0.5} allowEmpty placeholder={number(tMinNetSpread * 100, 2)} value={tGate.netSpread} onChange={(value) => setTGate((prev) => ({ ...prev, netSpread: value }))} disabled={savingTGate} /></Field>
+                  <Button size="sm" className="h-8" onClick={() => void saveTGate()} disabled={savingTGate || !tGate.amplitude || !tGate.minTurnover || !tGate.maxTurnover || !tGate.netSpread}>{savingTGate ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTGate ? '正在保存' : '保存门槛'}</Button>
+                </div>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
             </Panel>

@@ -142,6 +142,9 @@ class StrategyConfig:
     atr_period: int = 14
     divergence_ticks: int = 3
     vwap_drawdown: float = 0.04
+    # 做T准入四阈值（可视化可调，见模拟盘「做 T 准入门槛」面板与回测页）：
+    # 近 5 根平均振幅下限（0.04 = 4%）、换手率区间 [0.03, 0.12]、
+    # 期望净利下限（振幅扣掉一次往返成本后仍需 ≥ 0.03）。
     t_min_amplitude: float = 0.04
     t_min_turnover: float = 0.03
     t_max_turnover: float = 0.12
@@ -235,6 +238,14 @@ class StrategyConfig:
                 self.t_deep_drop_pct = None
             elif float(self.t_deep_drop_pct) < 0.10:
                 raise ValueError("t_deep_drop_pct 必须 >= 10%（20cm 板极端恐慌线，保证做T成功率）")
+        # 做T准入四阈值：已可视化可调，须在源头拦下自相矛盾或无意义的值
+        # （如换手上限低于下限、振幅门槛为 0），避免改完阈值后做T准入悄悄恒 False。
+        if not 0 < float(self.t_min_amplitude) <= 1:
+            raise ValueError("t_min_amplitude 必须在 (0,1] 内（做T准入的最小平均振幅）")
+        if not 0 < float(self.t_min_expected_net_spread) <= 1:
+            raise ValueError("t_min_expected_net_spread 必须在 (0,1] 内（做T准入的最小期望净利）")
+        if not 0 <= float(self.t_min_turnover) <= float(self.t_max_turnover) <= 1:
+            raise ValueError("做T换手率门槛需满足 0 <= t_min_turnover <= t_max_turnover <= 1")
         self.installment_amounts = [float(x) for x in self.installment_amounts]
         # ---- ETF beta 腿校验 -------------------------------------------------
         symbol = str(self.etf_symbol or "").strip().lower()

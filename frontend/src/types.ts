@@ -63,6 +63,14 @@ export interface StrategyConfig {
   add_tier_strict?: boolean;
   /** 深跌幅当日做T：日内跌幅 ≥ 该值（小数，0.10 = 10%）绕过底仓笔数门槛；null/0 = 关闭 */
   t_deep_drop_pct?: number | null;
+  /** 做T准入：近5根平均振幅下限（小数，0.04 = 4%） */
+  t_min_amplitude?: number;
+  /** 做T准入：换手率下限（小数，0.03 = 3%） */
+  t_min_turnover?: number;
+  /** 做T准入：换手率上限（小数，0.12 = 12%） */
+  t_max_turnover?: number;
+  /** 做T准入：期望净利下限（振幅扣掉一次往返成本后仍需 ≥ 该值，小数，0.03 = 3%） */
+  t_min_expected_net_spread?: number;
   /** 指数 beta 腿：空仓期间持有创业板 ETF，选到个股后卖出换股 */
   etf_beta_enabled?: boolean;
   etf_symbol?: string;

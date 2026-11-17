@@ -229,6 +229,13 @@ class AccountConfigRequest(BaseModel):
     # 深跌幅当日做T：日内跌幅（相对前收）≥ 该值绕过底仓笔数门槛；传 0 = 关闭
     # （__post_init__ 归一化为 None），开启时必须 >= 0.10（20cm 板极端恐慌线）。
     t_deep_drop_pct: float | None = Field(default=None, ge=0, le=1)
+    # 做T准入四阈值（0~1 小数）：最小平均振幅 / 换手率上下限 / 期望净利（振幅扣掉
+    # 一次往返成本后仍需达到）。之前只在 domain.py 有默认值、前端与接口都不可见，
+    # 导致面板上「原来的做T逻辑」只剩净利止盈与截止时间。现在可局部更新。
+    t_min_amplitude: float | None = Field(default=None, gt=0, le=1)
+    t_min_turnover: float | None = Field(default=None, ge=0, le=1)
+    t_max_turnover: float | None = Field(default=None, gt=0, le=1)
+    t_min_expected_net_spread: float | None = Field(default=None, gt=0, le=1)
     # 指数 beta 腿（ETF）：空仓期间用创业板 ETF 承接 beta，选到个股后卖出换股。
     etf_beta_enabled: bool | None = None
     etf_symbol: str | None = Field(default=None, pattern=r"^(sh|sz)\.\d{6}$")
@@ -480,7 +487,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.4.1",
+        version="2.5.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -769,9 +776,16 @@ def create_app() -> FastAPI:
                 recent = list(recent_bars or [])
                 if not recent or recent[-1].timestamp != detection_bar.timestamp:
                     recent.append(detection_bar)
+                # 做T准入的当日换手率/盘口必须来自实时快照：``bar`` 是腾讯快照（带 turnover_rate/
+                # bid/ask），而 detection_bar 是已收盘 5 分钟 bar（腾讯只把快照挂在最后一根
+                # 未完成 bar 上，且那根会被 recent_bars 的 timestamp 过滤丢掉）。不传下去
+                # _t_eligible 的换手/盘口恒缺失 → 做T准入恒 False（40f24d6 加了 live_* 入参
+                # 但当时漏接了本调用点）。
                 intraday_requests = strategy.on_intraday(
                     previous_daily, recent, detection_bar, account,
                     index_history=index_history, session_index=session_index,
+                    live_turnover=bar.turnover_rate, live_bid=bar.bid,
+                    live_ask=bar.ask,
                 )
                 for request in intraday_requests:
                     if request.quantity > 0:

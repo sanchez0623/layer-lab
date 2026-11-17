@@ -50,6 +50,11 @@ const fallbackConfig: StrategyConfig = {
   add_tier_strict: true,
   // 深跌幅当日做T：日内跌幅 ≥ 10% 绕过底仓笔数门槛（0 = 关闭）。
   t_deep_drop_pct: 0.10,
+  // 做T准入四阈值：最小振幅 / 换手率区间 / 最小期望净利（振幅扣掉一次往返成本后）。
+  t_min_amplitude: 0.04,
+  t_min_turnover: 0.03,
+  t_max_turnover: 0.12,
+  t_min_expected_net_spread: 0.03,
   // 指数 beta 腿默认开启（需求：空仓期默认用创业板 ETF 承接 beta，可手动关闭）。
   etf_beta_enabled: true,
   etf_symbol: 'sz.159915',
@@ -831,6 +836,18 @@ export default function BacktestPage() {
                       </Field>
                       <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（≥10%，20cm 板极端恐慌线）；0 = 关闭">
                         <NumberInput unit="%" min={0} max={20} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
+                      </Field>
+                      <Field label="做 T 最小振幅（%）" hint="近5根平均振幅低于该值不做 T">
+                        <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_amplitude ?? 0.04) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_amplitude', Number(value) / 100)} />
+                      </Field>
+                      <Field label="做 T 换手率下限（%）" hint="当日换手低于该值不做 T">
+                        <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_turnover ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_turnover', Number(value) / 100)} />
+                      </Field>
+                      <Field label="做 T 换手率上限（%）" hint="当日换手高于该值不做 T（需 ≥ 下限）">
+                        <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_max_turnover ?? 0.12) * 100).toFixed(2))} onChange={(value) => updateConfig('t_max_turnover', Number(value) / 100)} />
+                      </Field>
+                      <Field label="做 T 最小期望净利（%）" hint="振幅扣掉一次往返成本后仍需 ≥ 该值">
+                        <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_expected_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_expected_net_spread', Number(value) / 100)} />
                       </Field>
                     </>
                   )}
