@@ -39,6 +39,29 @@
 - 部署后自检：`docker compose -f deploy/compose.server.yaml ps` + `docker logs layer-lab --tail 50`；访问 `https://47.119.50.139:3444`。
 - 完整手册（端口/证书/Basic 认证/排错）：`deploy/README.md`。
 
+### ⚠️ 远程命令引号转义（2026-11-17 第 N 次踩坑，写成硬规则）
+
+`python deploy/ecs_run.py run "..."` 的命令串里**不能再嵌单引号**（比如
+`grep 'x'`、`python -c '...'`）——PowerShell 会把内层单引号吃掉/错配，云端生成的
+`.sh` 直接报 `unexpected EOF while looking for matching` / `syntax error`，
+status Failed exit 2，白跑一轮。**可靠写法：用 PowerShell here-string 整段传参**，
+远程命令内部随便用单/双引号都不会被本机解析：
+
+```powershell
+$cmd = @'
+cd /root/layer-lab
+grep -n "__version__" backend/app/__init__.py
+bash deploy/deploy_aliyun.sh
+'@
+python deploy/ecs_run.py run $cmd
+```
+
+判断规律：外层 `run "..."` 是**双引号**定界，里面只要出现单引号就崩；改成
+`$cmd = @'...'@` 后内层随便写。凡涉及引号/管道/重定向/heredoc 的远程命令一律
+here-string，别拼字符串。同理，PowerShell 里 `git -c http.sslbackend=openssl ...`
+的 `-c` 必须放在 `git` 之后、子命令之前（`git fetch -c ...` 是错的，`-c` 不是
+fetch 的选项）。
+
 ### 提交 / 推送 / 版本号
 
 每次改完功能（本地验证通过后）：
