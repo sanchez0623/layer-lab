@@ -794,17 +794,17 @@ class QuanStore:
         """5 分钟 K 线（前复权，按 bar 当日因子折算）；文件缺失返回空列表。
 
         ``start``/``end`` 下推日期过滤（长期持仓只取持有期，避免全表扫描）。
-        ``daily_turnover``：{YYYY-MM-DD: 当日日线换手率}，用于给 5 分钟 bar 代理
-        填充 turnover_rate（分钟 parquet 无换手字段，做 T 准入需要）。
-        未传时自动从同目录 turnover_daily.parquet 加载（若存在）。
+        ``daily_turnover``：已废弃（保留参数兼容旧调用/测试替身签名）。此前用它给
+        5 分钟 bar 代理填充「当日日线全天换手率」，但那是未来数据（盘中逐根决策时点
+        看不到全天换手），会引入 look-ahead bias。盘中做 T 准入的换手改由 backtest.py
+        按当日至今累计成交量/流通股本算出后经 daily_turnover_rate 入参传入，本函数
+        不再读 turnover_daily.parquet、不再填 turnover_rate（保持 None）。
         历史 5 分钟无真实盘口，bid/ask 用 close±0.1% 代理（真实成本由 slippage 体现），
         仅当缺失时填充，实盘真盘口不受影响。
         """
         path = self.minute5_path(code)
         if not path.exists():
             return []
-        if daily_turnover is None:
-            daily_turnover = self._daily_turnover_map(code)
         symbol = standard_code(code)
         pure = pure_code(code)
         pl = self._pl
@@ -839,14 +839,15 @@ class QuanStore:
                 bar.high = price(bar.high * scale)
                 bar.low = price(bar.low * scale)
                 bar.close = price(bar.close * scale)
-            # 回测代理：分钟 parquet 无盘口/换手字段，做 T 准入需要它们。
-            # bid/ask 用 close±0.1% 代理（真实成本由 slippage 体现）；换手率取当日日线值。
+            # 回测代理：分钟 parquet 无盘口字段，做 T 准入需要 bid/ask。
+            # bid/ask 用 close±0.1% 代理（真实成本由 slippage 体现）。
+            # ⚠️ 换手率不再给 5 分钟 bar 填「当日日线全天值」——那是未来数据（盘中逐根
+            # 决策时点看不到全天换手）。盘中做 T 准入的换手改由 backtest.py 按当日至今
+            # 累计成交量/流通股本算出后经 daily_turnover_rate 入参传入（见 _t_eligible）。
             if bar.bid is None:
                 bar.bid = price(bar.close * 0.999)
             if bar.ask is None:
                 bar.ask = price(bar.close * 1.001)
-            if bar.turnover_rate is None and daily_turnover:
-                bar.turnover_rate = daily_turnover.get(str(row.get("_day") or str(row["date"])[:10]))
             bars.append(bar)
             previous = bar.close
         if max_rows and len(bars) > max_rows:

@@ -337,6 +337,28 @@ def test_load_minute5(quan_dir):
     assert store.load_minute5("sz.688001") == []
 
 
+def test_load_minute5_does_not_fill_full_day_turnover(quan_dir):
+    """5 分钟 bar 不再代理填充「当日日线全天换手率」（反未来函数回归哨兵）。
+
+    此前 load_minute5 会把当日日线全天换手写到每根 5 分钟 bar 的 turnover_rate 上，
+    而盘中逐根做T准入时点看不到全天换手（look-ahead bias）。修复后即使
+    turnover_daily.parquet 存在，5 分钟 bar 的 turnover_rate 也应保持 None，
+    盘中换手改由 backtest 按当日至今累计成交量/流通股本算出后显式传入。
+    """
+    # 造一个当日全天换手 parquet（若 load_minute5 仍会代理填充，就会读到这个值）。
+    write_parquet(
+        quan_dir / "turnover_daily.parquet",
+        [{"code": "300001", "date": "2026-11-11", "turnover": 0.09}],
+        {"code": pl.String, "date": pl.String, "turnover": pl.Float64},
+    )
+    store = QuanStore(quan_dir)
+    bars = store.load_minute5("300001")
+    assert bars, "应有 5 分钟 bar"
+    assert all(bar.turnover_rate is None for bar in bars), (
+        "5 分钟 bar 的 turnover_rate 必须保持 None（全天换手属未来数据，不可填）"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 代码表 / 覆盖度 / refresher
 # ---------------------------------------------------------------------------

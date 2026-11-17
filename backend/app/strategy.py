@@ -700,17 +700,22 @@ class LayeredTStrategy(Strategy):
         ):
             return False
         recent = history[-5:]
-        # 振幅/换手口径：漏斗回测等日线场景传 daily_amplitude/daily_turnover_rate
-        # （当日日线振幅/换手），避免用 5 分钟 bar 局部振幅（天然 ~0.3%）过不了日线
-        # 口径门槛（振幅≥4%）。未传时回退到 recent（日线 history 或 5 分钟 bar）。
+        # 振幅/换手口径：调用方经 daily_amplitude/daily_turnover_rate 显式传入（参数名沿用
+        # 旧名，语义随调用路径不同）：
+        #   • on_daily 日线路径：传当日「全天」振幅/换手——收盘后决策，全天值合法；
+        #   • on_intraday 盘中路径（回测）：传「当日至今累计」振幅/换手——逐根已收盘 5 分钟
+        #     bar 累积，决策时点完全可得，无未来数据（回测曾误传全天值 → look-ahead bias）；
+        #   • 模拟盘 live-tick：不传这两个（振幅走 recent 回退、换手走 live_turnover 快照）。
+        # 未传时振幅回退到 recent 局部均值（避免单根 5 分钟局部振幅 ~0.3% 直接卡门槛）。
         if daily_amplitude is not None:
             average_amplitude = daily_amplitude
         else:
             average_amplitude = mean(
                 (item.high - item.low) / (item.prev_close or item.open) for item in recent
             )
-        # 换手率取「当日实时快照」优先（live_turnover，腾讯快照字段[38]，做T是当日盘中决策）；
-        # 历史日线 bar 无换手字段（quan 源 turnover_rate 恒 None），缺失时回落实时值。
+        # 换手率取值优先级：① 调用方显式传入的 daily_turnover_rate（回测盘中=当日至今累计，
+        # 日线=全天；模拟盘不传）；② recent[-1].turnover_rate 回退（历史 bar 无换手字段时为
+        # None）；③ live_turnover 实时快照兜底（腾讯快照字段[38]，做T是当日盘中决策）。
         turnover = daily_turnover_rate if daily_turnover_rate is not None else recent[-1].turnover_rate
         if turnover is None and live_turnover is not None:
             turnover = live_turnover

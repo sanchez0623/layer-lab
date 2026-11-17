@@ -908,10 +908,21 @@ class FunnelRotationBacktest:
                     # 5 分钟做 T：逐根喂 on_intraday（信号下一 5 分钟 bar 开盘撮合）。
                     m5_today = intraday_by_date.get(date_str, [])
                     if m5_today:
-                        # 日线口径的振幅/换手（做 T 准入），与模拟盘同口径（架构原则 1）：
-                        # 振幅用当日日线 high/low，换手用当日日线 turn（_load_bars 已从 parquet 填充）。
-                        daily_amp = (bar.high - bar.low) / (bar.prev_close or bar.open)
+                        # 做 T 准入的振幅/换手：用「当日至今累计」而非当日全天值，避免未来函数。
+                        # 盘中逐根决策时点只能看到已收盘 5 分钟 bar，全天振幅/全天换手在盘中
+                        # 不可得（属未来数据）。因此随每根已收盘 m5 累积：
+                        #   累计振幅 cum_amp = (当日至今 running_high - running_low) / prev_close；
+                        #   累计换手 cum_turnover = 当日至今累计成交量 / 流通股本，
+                        # 流通股本由当日日线反推（shares_out ≈ bar.volume / daily_turn，日线
+                        # 收盘后可得口径），当天固定、只让分子（累计量）随盘中推进长大。
+                        # ⚠️ daily_amplitude/daily_turnover_rate 两个入参名沿用旧名（on_daily
+                        # 日线路径传的是真正的当日全天值，收盘后合法），此处盘中传的是累计值，
+                        # 语义见 strategy._t_eligible 注释。
+                        prev_close = bar.prev_close or bar.open
                         daily_turn = bar.turnover_rate
+                        shares_out = (bar.volume / daily_turn) if daily_turn else None
+                        running_high = running_low = None
+                        cum_volume = 0.0
                         recent: list[Bar] = []
                         for m5_index, m5 in enumerate(m5_today):
                             m5_fills = self.account.process_bar(m5, modes={"NEXT_BAR"})
@@ -928,10 +939,18 @@ class FunnelRotationBacktest:
                                 break
                             self.account.mark(current_symbol, m5.close)
                             recent.append(m5)
+                            # 随已收盘 m5 累积当日至今的 running_high/low 与累计成交量。
+                            running_high = m5.high if running_high is None else max(running_high, m5.high)
+                            running_low = m5.low if running_low is None else min(running_low, m5.low)
+                            cum_volume += m5.volume
+                            cum_amp = ((running_high - running_low) / prev_close) if prev_close else None
+                            # 流通股本可反推时用「累计量/流通股本」；否则降级为 None，
+                            # 让 _t_eligible 走「turnover is None → 不做T」路径（绝不退回全天值）。
+                            cum_turnover = (cum_volume / shares_out) if shares_out else None
                             m5_requests = self.strategy.on_intraday(
                                 history[:-1], recent, m5, self.account,
                                 index_history=index_history, session_index=session_index,
-                                daily_amplitude=daily_amp, daily_turnover_rate=daily_turn,
+                                daily_amplitude=cum_amp, daily_turnover_rate=cum_turnover,
                             )
                             self._submit(m5_requests, m5.timestamp)
                         # 日终撤未成交的日内单（下一 5 分钟 bar 开盘模式），与 BacktestEngine 一致。
