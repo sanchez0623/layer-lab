@@ -30,6 +30,7 @@ import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
+import { validateStrategyConfig, describeConfigIssue } from '../lib/configValidation';
 import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
 
 const fallbackConfig: StrategyConfig = {
@@ -209,10 +210,27 @@ export default function BacktestPage() {
   const [reportListVersion, setReportListVersion] = useState(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   // 回测表单草稿：服务端持久化，改完自动保存，进入页面优先恢复（不再被默认值重置）。
-  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'invalid' | 'error'>('idle');
+  const [draftError, setDraftError] = useState('');
   const [resettingDraft, setResettingDraft] = useState(false);
   const draftHydratedRef = useRef(false);
   const lastSavedDraftRef = useRef('');
+  // 前端预校验：约束与后端 StrategyConfig.__post_init__ 同口径，结果直接显示在字段下方（tips），
+  // 存在问题时暂停自动保存并阻止运行/应用，避免每敲一次输入就吃一个 400。
+  const configIssues = useMemo(() => validateStrategyConfig(config), [config]);
+  const configInvalid = Object.keys(configIssues).length > 0;
+  const firstConfigIssueField = (Object.keys(configIssues)[0] ?? undefined) as keyof StrategyConfig | undefined;
+  const firstConfigIssue = firstConfigIssueField ? (configIssues[firstConfigIssueField] ?? '') : '';
+  const firstConfigIssueText = firstConfigIssueField ? describeConfigIssue(firstConfigIssueField, firstConfigIssue) : '';
+  // 字段下方红字在长表单里容易被忽略：出现/变化时再弹一次 toast（同一错误只弹一次）。
+  const lastIssueToastRef = useRef('');
+  useEffect(() => {
+    if (!firstConfigIssueField) { lastIssueToastRef.current = ''; return; }
+    const key = `${firstConfigIssueField}|${firstConfigIssue}`;
+    if (key === lastIssueToastRef.current) return;
+    lastIssueToastRef.current = key;
+    toast.error(firstConfigIssueText, { duration: 5000 });
+  }, [firstConfigIssueField, firstConfigIssue, firstConfigIssueText]);
 
   const loadInitial = async (resetForm = false) => {
     setLoading(true);
@@ -306,6 +324,7 @@ export default function BacktestPage() {
 
   // 回测表单草稿自动保存：任何改动 700ms 后把整份表单 PUT 到服务端。
   // 初始金额暂不合法（用户清空重输）时跳过，避免每敲一个字符报一次 422。
+  // 前端校验不通过（如深跌幅阈值 < 10%）也不发请求：后端必然 400，改为字段下方 tips + 底部红字提示。
   useEffect(() => {
     if (!draftHydratedRef.current) return;
     if (!Number.isFinite(initialCash) || initialCash <= 0) return;
@@ -319,16 +338,24 @@ export default function BacktestPage() {
       screener,
     };
     const serialized = JSON.stringify(payload);
-    if (serialized === lastSavedDraftRef.current) return;
+    // 与已保存内容一致（例如把非法值改回原值）：恢复「已保存」状态并清掉错误。
+    if (serialized === lastSavedDraftRef.current) { setDraftStatus('saved'); setDraftError(''); return; }
+    if (configInvalid) { setDraftStatus('invalid'); return; }
     setDraftStatus('saving');
     const timer = window.setTimeout(() => {
       api.saveBacktestConfigDraft(payload).then(() => {
         lastSavedDraftRef.current = serialized;
         setDraftStatus('saved');
-      }).catch(() => setDraftStatus('error'));
+        setDraftError('');
+      }).catch((cause) => {
+        setDraftStatus('error');
+        // 后端 detail 里就是具体原因（如「t_deep_drop_pct 必须 >= 10%…」），原样透出，
+        // 别再只显示一句泛泛的「保存失败」让用户去翻 Network 面板。
+        setDraftError(cause instanceof Error ? cause.message : '');
+      });
     }, 700);
     return () => window.clearTimeout(timer);
-  }, [name, initialCash, startDate, endDate, config, fees, screener]);
+  }, [name, initialCash, startDate, endDate, config, fees, screener, configInvalid]);
 
   // 在途作业：RUNNING/CANCELLING 或可续跑（CANCELLED/INTERRUPTED/FAILED）时禁止再起新回测，
   // 避免与服务端单作业互斥冲突；想另起必须先对旧作业做「继续」或「放弃」。
@@ -388,6 +415,7 @@ export default function BacktestPage() {
   };
 
   const run = async () => {
+    if (configInvalid) { setError(`配置有误：${firstConfigIssueText}`); return; }
     if (startDate && endDate && startDate > endDate) { setError('开始日期不能晚于结束日期，请调整回测区间。'); return; }
     if (!Number.isFinite(initialCash) || initialCash <= 0) { setError('初始资金必须大于 0。'); return; }
     // 漏斗轮动模式用本地 universe.db，无需选择数据集。
@@ -407,6 +435,7 @@ export default function BacktestPage() {
 
   // 把当前回测配置（策略字段 + 费率）整套应用到模拟盘「当前账户」，下一根 K 起生效。
   const applyToPaper = async () => {
+    if (configInvalid) { setError(`配置有误：${firstConfigIssueText}`); return; }
     setApplying(true);
     setError('');
     try {
@@ -828,25 +857,25 @@ export default function BacktestPage() {
                 <FormGrid>
                   {config.enable_t && (
                     <>
-                      <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T">
+                      <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T" error={configIssues.t_target_net_spread}>
                         <NumberInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
                       </Field>
-                      <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平">
+                      <Field label="做 T T+1 截止时间" hint="到点仍未止盈则尾盘强平" error={configIssues.t_exit_cutoff}>
                         <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
                       </Field>
-                      <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（≥10%，20cm 板极端恐慌线）；0 = 关闭">
+                      <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（≥10%，20cm 板极端恐慌线）；0 = 关闭" error={configIssues.t_deep_drop_pct}>
                         <NumberInput unit="%" min={0} max={20} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
                       </Field>
-                      <Field label="做 T 最小振幅（%）" hint="近5根平均振幅低于该值不做 T">
+                      <Field label="做 T 最小振幅（%）" hint="近5根平均振幅低于该值不做 T" error={configIssues.t_min_amplitude}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_amplitude ?? 0.04) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_amplitude', Number(value) / 100)} />
                       </Field>
-                      <Field label="做 T 换手率下限（%）" hint="当日换手低于该值不做 T">
+                      <Field label="做 T 换手率下限（%）" hint="当日换手低于该值不做 T" error={configIssues.t_min_turnover}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_turnover ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_turnover', Number(value) / 100)} />
                       </Field>
-                      <Field label="做 T 换手率上限（%）" hint="当日换手高于该值不做 T（需 ≥ 下限）">
+                      <Field label="做 T 换手率上限（%）" hint="当日换手高于该值不做 T（需 ≥ 下限）" error={configIssues.t_max_turnover}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_max_turnover ?? 0.12) * 100).toFixed(2))} onChange={(value) => updateConfig('t_max_turnover', Number(value) / 100)} />
                       </Field>
-                      <Field label="做 T 最小期望净利（%）" hint="振幅扣掉一次往返成本后仍需 ≥ 该值">
+                      <Field label="做 T 最小期望净利（%）" hint="振幅扣掉一次往返成本后仍需 ≥ 该值" error={configIssues.t_min_expected_net_spread}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_expected_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_expected_net_spread', Number(value) / 100)} />
                       </Field>
                     </>
@@ -863,21 +892,21 @@ export default function BacktestPage() {
                     <SwitchRow label="指数 beta 腿（创业板 ETF）" description="个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列" checked={Boolean(config.etf_beta_enabled)} onCheckedChange={(checked) => updateConfig('etf_beta_enabled', checked)} />
                     {config.etf_beta_enabled && (
                       <FormGrid className="mt-2">
-                        <Field label="ETF 代码" hint="默认创业板 ETF 159915">
+                        <Field label="ETF 代码" hint="默认创业板 ETF 159915" error={configIssues.etf_symbol}>
                           <SelectField value={config.etf_symbol ?? 'sz.159915'} onValueChange={(value) => updateConfig('etf_symbol', value)} options={[
                             { value: 'sz.159915', label: 'sz.159915 · 创业板ETF易方达' },
                             { value: 'sz.159952', label: 'sz.159952 · 创业板ETF广发' },
                             { value: 'sz.159964', label: 'sz.159964 · 创业板ETF平安' },
                           ]} />
                         </Field>
-                        <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例">
+                        <Field label="仓位（占权益 %）" hint="空仓时买入的 ETF 市值占账户权益比例" error={configIssues.etf_position_pct}>
                           <NumberInput unit="%" min={1} max={100} step={1} value={Number(((config.etf_position_pct ?? 0.2) * 100).toFixed(0))} onChange={(value) => updateConfig('etf_position_pct', Number(value) / 100)} />
                         </Field>
-                        <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF"><NumberInput unit="日" min={2} max={250} step={1} precision={0} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
-                        <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF"><NumberInput unit="日" min={2} max={250} step={1} precision={0} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
-                        <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓"><NumberInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
-                        <Field label="不追高上限（偏离均线 %）" hint="指数收盘高于入场均线超过该幅度时不建仓，等回踩再买；0 关闭"><NumberInput unit="%" min={0} max={50} step={0.5} value={Number(((config.etf_entry_max_deviation ?? 0) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_entry_max_deviation', Number(value) / 100)} /></Field>
-                        <Field label="清仓后冷却（交易日）" hint="ETF 清仓后至少 N 个交易日内不再建仓，抑制均线附近反复打脸；0 关闭"><NumberInput unit="日" min={0} max={60} step={1} precision={0} value={config.etf_reentry_cooldown_days ?? 0} onChange={(value) => updateConfig('etf_reentry_cooldown_days', Number(value))} /></Field>
+                        <Field label="入场均线（日）" hint="创业板指收盘站上该均线才持 ETF" error={configIssues.etf_entry_ma_days}><NumberInput unit="日" min={2} max={250} step={1} precision={0} value={config.etf_entry_ma_days ?? 60} onChange={(value) => updateConfig('etf_entry_ma_days', Number(value))} /></Field>
+                        <Field label="出场均线（日）" hint="创业板指收盘跌破该均线清 ETF" error={configIssues.etf_exit_ma_days}><NumberInput unit="日" min={2} max={250} step={1} precision={0} value={config.etf_exit_ma_days ?? 20} onChange={(value) => updateConfig('etf_exit_ma_days', Number(value))} /></Field>
+                        <Field label="ETF 硬止损（%）" hint="ETF 价格较建仓成本回撤达到该幅度立即清仓" error={configIssues.etf_hard_stop_pct}><NumberInput unit="%" min={0.1} max={99} step={0.1} value={Number(((config.etf_hard_stop_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_hard_stop_pct', Number(value) / 100)} /></Field>
+                        <Field label="不追高上限（偏离均线 %）" hint="指数收盘高于入场均线超过该幅度时不建仓，等回踩再买；0 关闭" error={configIssues.etf_entry_max_deviation}><NumberInput unit="%" min={0} max={50} step={0.5} value={Number(((config.etf_entry_max_deviation ?? 0) * 100).toFixed(1))} onChange={(value) => updateConfig('etf_entry_max_deviation', Number(value) / 100)} /></Field>
+                        <Field label="清仓后冷却（交易日）" hint="ETF 清仓后至少 N 个交易日内不再建仓，抑制均线附近反复打脸；0 关闭" error={configIssues.etf_reentry_cooldown_days}><NumberInput unit="日" min={0} max={60} step={1} precision={0} value={config.etf_reentry_cooldown_days ?? 0} onChange={(value) => updateConfig('etf_reentry_cooldown_days', Number(value))} /></Field>
                       </FormGrid>
                     )}
                   </div>
@@ -900,11 +929,11 @@ export default function BacktestPage() {
                           ]} />
                         </Field>
                         {(config.withdraw_method ?? 'ratio') === 'ratio' ? (
-                          <Field label="提取比例（%）" hint="提取当期已实现盈亏的该比例（0~100）">
+                          <Field label="提取比例（%）" hint="提取当期已实现盈亏的该比例（0~100）" error={configIssues.withdraw_ratio}>
                             <NumberInput unit="%" min={0.1} max={100} step={1} value={Number(((config.withdraw_ratio ?? 0.2) * 100).toFixed(1))} onChange={(value) => updateConfig('withdraw_ratio', Number(value) / 100)} />
                           </Field>
                         ) : (
-                          <Field label="固定金额（元）" hint="当期盈利不足该金额时仍提取该金额（仅以现金余额封顶）">
+                          <Field label="固定金额（元）" hint="当期盈利不足该金额时仍提取该金额（仅以现金余额封顶）" error={configIssues.withdraw_fixed_amount}>
                             <NumberInput unit="CNY" min={0} step={1000} precision={2} value={config.withdraw_fixed_amount ?? 5000} onChange={(value) => updateConfig('withdraw_fixed_amount', Number(value))} />
                           </Field>
                         )}
@@ -947,8 +976,8 @@ export default function BacktestPage() {
                   <div className="grid gap-2">
                     <FeeConfigPanel value={fees} onChange={setFees} />
                     <FormGrid>
-                      <Field label="滑点"><NumberInput unit="bps" min={0} step={1} precision={0} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
-                      <Field label="成交量参与上限"><NumberInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
+                      <Field label="滑点" error={configIssues.slippage_bps}><NumberInput unit="bps" min={0} step={1} precision={0} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
+                      <Field label="成交量参与上限" error={configIssues.volume_participation}><NumberInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
                     </FormGrid>
                   </div>
                 )}
@@ -960,8 +989,11 @@ export default function BacktestPage() {
                   {draftStatus !== 'idle' && (
                     <>
                       <i className="size-1 rounded-full bg-border" />
-                      <span className={cn(draftStatus === 'error' && 'text-destructive')}>
-                        {draftStatus === 'saving' ? '配置保存中…' : draftStatus === 'saved' ? '配置已自动保存' : '配置保存失败，改动仍保留在页面'}
+                      <span className={cn((draftStatus === 'error' || draftStatus === 'invalid') && 'text-destructive')}>
+                        {draftStatus === 'saving' ? '配置保存中…'
+                          : draftStatus === 'saved' ? '配置已自动保存'
+                            : draftStatus === 'invalid' ? '配置有误，暂未自动保存，请按字段下方提示修正'
+                              : `配置保存失败${draftError ? `：${draftError}` : '，改动仍保留在页面'}`}
                       </span>
                     </>
                   )}
