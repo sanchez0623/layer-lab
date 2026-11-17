@@ -48,10 +48,12 @@ export function Panel({
 }
 
 export function Field({
-  label, hint, children, className = '', wide = false,
+  label, hint, error, children, className = '', wide = false,
 }: {
   label: string;
   hint?: string;
+  /** 前端校验错误：存在时优先于 hint 显示为红色提示，避免提交后才发现后端 400。 */
+  error?: string;
   children: ReactNode;
   className?: string;
   /** 名称 / 数据集等需要展示长文本的字段；默认紧凑宽度。 */
@@ -65,9 +67,11 @@ export function Field({
     )}>
       <span className="block h-5 truncate text-[13px] font-medium leading-5 text-foreground/80" title={label}>{label}</span>
       {children}
-      {hint
-        ? <small className="block h-4 truncate text-[10px] leading-4 text-muted-foreground" title={hint}>{hint}</small>
-        : <small className="block h-4" aria-hidden="true" />}
+      {error
+        ? <small className="block h-4 truncate text-[10px] leading-4 text-destructive" title={error}>{error}</small>
+        : hint
+          ? <small className="block h-4 truncate text-[10px] leading-4 text-muted-foreground" title={hint}>{hint}</small>
+          : <small className="block h-4" aria-hidden="true" />}
     </div>
   );
 }
