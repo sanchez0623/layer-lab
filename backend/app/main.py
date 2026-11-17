@@ -224,6 +224,8 @@ class AccountConfigRequest(BaseModel):
     # （strategy._effective_take_profit 任一为 None 即维持原止盈）。
     max_holding_days: int | None = Field(default=None, ge=1, le=250)
     holding_tp_override: float | None = Field(default=None, ge=0, le=1)
+    # 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平；0 = 不限/关闭。
+    force_exit_holding_days: int | None = Field(default=None, ge=0, le=250)
     # 加仓按档位先松后紧（A3 浮亏信号逐档加严）；false = 全档统一原始 A3。
     add_tier_strict: bool | None = None
     # 深跌幅当日做T：日内跌幅（相对前收）≥ 该值绕过底仓笔数门槛；传 0 = 关闭
@@ -236,6 +238,9 @@ class AccountConfigRequest(BaseModel):
     t_min_turnover: float | None = Field(default=None, ge=0, le=1)
     t_max_turnover: float | None = Field(default=None, gt=0, le=1)
     t_min_expected_net_spread: float | None = Field(default=None, gt=0, le=1)
+    # 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔）。
+    # 深跌幅当日做T（t_deep_drop_pct）仍可绕过。之前硬编码为 4，现可视化可调。
+    t_min_base_entries: int | None = Field(default=None, ge=1, le=16)
     # 指数 beta 腿（ETF）：空仓期间用创业板 ETF 承接 beta，选到个股后卖出换股。
     etf_beta_enabled: bool | None = None
     etf_symbol: str | None = Field(default=None, pattern=r"^(sh|sz)\.\d{6}$")
@@ -393,7 +398,11 @@ def _ensure_monthly(report: dict) -> dict:
     if not isinstance(metrics, dict) or "monthly" in metrics:
         return report
     base = metrics.get("initial_cash") or (report.get("config") or {}).get("initial_cash") or 0.0
-    monthly = monthly_breakdown(report.get("equity_curve") or [], float(base))
+    withdrawals = report.get("withdrawals")
+    monthly = monthly_breakdown(
+        report.get("equity_curve") or [], float(base),
+        withdrawals if isinstance(withdrawals, list) else None,
+    )
     if monthly:
         metrics["monthly"] = monthly
     return report
@@ -489,7 +498,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.6.1",
+        version="2.7.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage

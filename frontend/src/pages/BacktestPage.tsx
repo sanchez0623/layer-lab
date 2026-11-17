@@ -47,6 +47,8 @@ const fallbackConfig: StrategyConfig = {
   t_exit_cutoff: '14:50',
   max_holding_days: 22,
   holding_tp_override: 0.03,
+  // 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
+  force_exit_holding_days: 0,
   // 加仓按档位先松后紧：A3 浮亏信号逐档加严（档1 最松 → 档4 = 原始 A3）。
   add_tier_strict: true,
   // 深跌幅当日做T：日内跌幅 ≥ 10% 绕过底仓笔数门槛（0 = 关闭）。
@@ -56,6 +58,8 @@ const fallbackConfig: StrategyConfig = {
   t_min_turnover: 0.03,
   t_max_turnover: 0.12,
   t_min_expected_net_spread: 0.03,
+  // 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（默认 4 = 第5笔起）。
+  t_min_base_entries: 4,
   // 指数 beta 腿默认开启（需求：空仓期默认用创业板 ETF 承接 beta，可手动关闭）。
   etf_beta_enabled: true,
   etf_symbol: 'sz.159915',
@@ -879,6 +883,9 @@ export default function BacktestPage() {
                       <Field label="做 T 最小期望净利（%）" hint="振幅扣掉一次往返成本后仍需 ≥ 该值" error={configIssues.t_min_expected_net_spread}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_expected_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_expected_net_spread', Number(value) / 100)} />
                       </Field>
+                      <Field label="底仓笔数门槛（笔）" hint="累计底仓达到该笔数才允许做T准入；深跌幅当日可绕过。1~16，默认 4（第5笔起）" error={configIssues.t_min_base_entries}>
+                        <NumberInput unit="笔" min={1} max={16} step={1} value={config.t_min_base_entries ?? 4} onChange={(value) => updateConfig('t_min_base_entries', Number(value))} />
+                      </Field>
                     </FormGrid>
                   )}
                 </div>
@@ -898,6 +905,9 @@ export default function BacktestPage() {
                     </Field>
                     <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值">
                       <NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
+                    </Field>
+                    <Field label="最大持仓天数" hint="持有 ≥N 个交易日后无条件强平（兜底）；0 = 不限" error={configIssues.force_exit_holding_days}>
+                      <NumberInput unit="交易日" min={0} max={250} step={1} value={config.force_exit_holding_days ?? 0} onChange={(value) => updateConfig('force_exit_holding_days', Number(value))} />
                     </Field>
                   </FormGrid>
                 </div>
@@ -1077,7 +1087,7 @@ export default function BacktestPage() {
                   <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}`} />
                   <Metric label="夏普比率" value={number(metrics.sharpe_ratio)} sub={`波动率 ${percent(metrics.volatility)}`} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
-                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`} />
+                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}${metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}`} />
                 </MetricGrid>
 
                 <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
@@ -1111,6 +1121,7 @@ export default function BacktestPage() {
                         ...(betaInfo?.enabled ? [{ icon: Layers3, label: 'ETF beta 净贡献', value: signedMoney(Number(betaInfo.pnl ?? 0)), note: `${integer(Number(betaInfo.trade_count ?? 0))} 笔 · ${betaInfo.exit_reason || '持仓中'}`, tone: Number(betaInfo.pnl ?? 0) >= 0 ? 'text-destructive' : 'text-success' }] : []),
                         { icon: CircleDollarSign, label: '累计交易费用', value: money(metrics.total_fees), note: '五項分项相加，滑点另计' },
                         ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔 · 已真实离场` : '未提取', tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
+                        ...(metrics.profit_withdrawn != null && metrics.profit_withdrawn > 0 ? [{ icon: Landmark, label: '盈利出金', value: money(metrics.profit_withdrawn), note: '已计入净利/总收益', tone: 'text-destructive' }] : []),
                         { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
                       ].map(({ icon: Icon, label, value, note, tone }) => (
                         <div key={label} className="flex items-center gap-2 rounded-lg border bg-card px-2.5 py-2">

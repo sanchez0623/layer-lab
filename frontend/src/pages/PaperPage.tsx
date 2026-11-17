@@ -628,6 +628,31 @@ export default function PaperPage() {
     }
   };
 
+  // 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔，默认 4 = 第5笔起）。
+  // 深跌幅当日做T（t_deep_drop_pct）仍可绕过。单独 PATCH 保存。
+  const [baseEntriesInput, setBaseEntriesInput] = useState('');
+  const [savingBaseEntries, setSavingBaseEntries] = useState(false);
+  const baseEntries = account?.config?.t_min_base_entries ?? 4;
+  const saveBaseEntries = async () => {
+    if (!account) return;
+    const value = Number(baseEntriesInput);
+    if (!Number.isInteger(value) || value < 1 || value > 16) {
+      setError('底仓笔数门槛需为 1~16 之间的整数。');
+      return;
+    }
+    setSavingBaseEntries(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { t_min_base_entries: value });
+      setAccount(next);
+      setBaseEntriesInput('');
+      toast.success(`做T底仓笔数门槛已更新为 ${value} 笔，下一根K线起生效。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '做T底仓笔数门槛更新失败。');
+    } finally {
+      setSavingBaseEntries(false);
+    }
+  };
+
   const saveTNetSpread = async () => {
     if (!account) return;
     const pct = Number(tSpreadInput);
@@ -684,6 +709,33 @@ export default function PaperPage() {
       setError(cause instanceof Error ? cause.message : '超期降阈更新失败。');
     } finally {
       setSavingHolding(false);
+    }
+  };
+
+  // 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
+  // 独立于超期降阈止盈（那个只降阈，这个是到期强制清仓兜底）。
+  const [forceExitInput, setForceExitInput] = useState('');
+  const [savingForceExit, setSavingForceExit] = useState(false);
+  const forceExitDays = account?.config?.force_exit_holding_days ?? 0;
+  const saveForceExit = async () => {
+    if (!account) return;
+    const value = Number(forceExitInput);
+    if (!Number.isInteger(value) || value < 0 || value > 250) {
+      setError('最大持仓天数需为 0~250 之间的整数（0 = 不限）。');
+      return;
+    }
+    setSavingForceExit(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { force_exit_holding_days: value });
+      setAccount(next);
+      setForceExitInput('');
+      toast.success(value > 0
+        ? `最大持仓天数已更新为 ${value} 个交易日，超期无条件强平。`
+        : '最大持仓天数已关闭（不限）。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '最大持仓天数更新失败。');
+    } finally {
+      setSavingForceExit(false);
     }
   };
 
@@ -974,6 +1026,12 @@ export default function PaperPage() {
                   <Field label="期望净利（%）" hint="振幅扣成本后仍需 ≥" className="w-36"><NumberInput unit="%" min={0} max={100} step={0.5} allowEmpty placeholder={number(tMinNetSpread * 100, 2)} value={tGate.netSpread} onChange={(value) => setTGate((prev) => ({ ...prev, netSpread: value }))} disabled={savingTGate} /></Field>
                   <Button size="sm" className="h-8" onClick={() => void saveTGate()} disabled={savingTGate || !tGate.amplitude || !tGate.minTurnover || !tGate.maxTurnover || !tGate.netSpread}>{savingTGate ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTGate ? '正在保存' : '保存门槛'}</Button>
                 </div>
+                <div className="mt-1.5 flex flex-wrap items-end gap-2">
+                  <Field label="底仓笔数门槛（笔）" hint="累计底仓达该笔数才允许做T准入（1~16，默认 4 = 第5笔起）；深跌幅当日可绕过" className="w-44">
+                    <NumberInput unit="笔" min={1} max={16} step={1} allowEmpty placeholder={String(baseEntries)} value={baseEntriesInput} onChange={setBaseEntriesInput} disabled={savingBaseEntries} />
+                  </Field>
+                  <Button size="sm" className="h-8" onClick={() => void saveBaseEntries()} disabled={savingBaseEntries || baseEntriesInput === ''}>{savingBaseEntries ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingBaseEntries ? '正在保存' : '保存门槛'}</Button>
+                </div>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
             </Panel>
@@ -999,6 +1057,16 @@ export default function PaperPage() {
                 <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveHoldingOverride()} disabled={savingHolding || holdingDaysInput === '' || holdingTpInput === ''}>{savingHolding ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingHolding ? '正在保存' : '保存降阈'}</Button>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">两项需同时填写才生效；只填一项时后端维持原 15% 止盈。建议 22 个交易日 / 3%。</p>
+            </Panel>
+          )}
+
+          {account.auto_strategy && (
+            <Panel className="mb-3" title="最大持仓天数（强制清仓）" description={`持有 ≥N 个交易日后无条件强平，给长期套牢资金一个硬性兜底（0 = 不限）。当前：${forceExitDays > 0 ? `持有 ≥${forceExitDays} 日 → 强平` : '不限'}`} action={<Badge tone={forceExitDays > 0 ? 'indigo' : 'neutral'}>{forceExitDays > 0 ? '已开启' : '关闭'}</Badge>}>
+              <div className="grid items-start gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                <Field label="最大持仓天数（交易日）" hint="0 = 不限；超期无条件强平"><NumberInput unit="日" min={0} max={250} step={1} allowEmpty placeholder={String(forceExitDays)} value={forceExitInput} onChange={setForceExitInput} disabled={savingForceExit} /></Field>
+                <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveForceExit()} disabled={savingForceExit || forceExitInput === ''}>{savingForceExit ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingForceExit ? '正在保存' : '保存强平'}</Button>
+              </div>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">独立于超期降阈止盈：那个只把止盈阈值从 15% 降下来，这个到期直接强制清仓。0 = 不限（默认）。</p>
             </Panel>
           )}
 

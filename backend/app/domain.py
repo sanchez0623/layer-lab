@@ -164,12 +164,18 @@ class StrategyConfig:
     # 目的：避免资金被长期套牢在「既不到 15% 止盈、也不触发 Armed 背离」的缓慢阴跌标的里。
     max_holding_days: int | None = None
     holding_tp_override: float | None = None
+    # 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
+    # 独立于 max_holding_days（超期降阈止盈）——那个只是降阈，这个是到期强制清仓兜底。
+    force_exit_holding_days: int = 0
     # 加仓按档位「先松后紧」：16 笔序列分 4 档（每档 4 笔，档1=10万…档4=40万）。
     # 开启后 A3 加仓信号按档位分级——档1 最松（仅浮亏+缩量<5日均量）、
     # 档2 +收盘站回前3日低点、档3 +此前破过新低、档4 +缩量收紧到 oversold_volume_ratio
     # （= 原始 A3 条件，最严）。目的：早期仓位易加让资金打满，后段高门槛封顶暴露，
     # 避免无差别摊进输家。False = 全档统一用原始 A3 条件（向后兼容）。
     add_tier_strict: bool = True
+    # 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔）。
+    # 之前硬编码为 4（「第5笔起正T」），现改为可配置。深跌幅当日做T仍可绕过（见 t_deep_drop_pct）。
+    t_min_base_entries: int = 4
     # 深跌幅当日做T：当日盘中跌幅（相对前收盘）≥ 此阈值时，绕过底仓笔数门槛
     # （sequence_index≥4）允许做T。创业板/科创板 20cm 涨跌幅，-10% 已是极端恐慌事件
     # 才值得抢反弹。None = 关闭；__post_init__ 校验：非 None 时必须 >= 0.10。
@@ -254,6 +260,13 @@ class StrategyConfig:
             raise ValueError("t_min_expected_net_spread 必须在 (0,1] 内（做T准入的最小期望净利）")
         if not 0 <= float(self.t_min_turnover) <= float(self.t_max_turnover) <= 1:
             raise ValueError("做T换手率门槛需满足 0 <= t_min_turnover <= t_max_turnover <= 1")
+        if not 1 <= int(self.t_min_base_entries) <= 16:
+            raise ValueError("t_min_base_entries 必须在 1~16 笔之间（做T的底仓笔数门槛）")
+        self.t_min_base_entries = int(self.t_min_base_entries)
+        forced = int(self.force_exit_holding_days or 0)
+        if not 0 <= forced <= 250:
+            raise ValueError("force_exit_holding_days 必须在 0~250 个交易日之间（0 = 不限）")
+        self.force_exit_holding_days = forced
         self.installment_amounts = [float(x) for x in self.installment_amounts]
         # ---- ETF beta 腿校验 -------------------------------------------------
         symbol = str(self.etf_symbol or "").strip().lower()

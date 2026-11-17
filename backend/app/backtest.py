@@ -96,16 +96,18 @@ _GLOBAL_WARNING_MARKERS = (
 
 def monthly_breakdown(
     equity_curve: list[dict[str, Any]], initial_cash: float,
+    withdrawals: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """按自然月汇总账户盈亏，供回测报告「每月盈亏」面板。
 
     口径（与 performance_metrics 的净值口径一致，含未实现盈亏与手续费）：
     - ``pnl``：当月最后一个交易日权益 - 上月最后一个交易日权益（首月以初始资金为基期），
-      即「当月账户权益变动」，不把换仓当外部现金流；
+      再加回当月出金金额（提现会真实扣减权益，但仍是账户赚到的钱），
+      即「当月真实盈亏（含出金）」，不把换仓当外部现金流；
     - ``return_rate``：``pnl / 基期权益``；
     - ``trading_days``：当月实际回测交易日数（净值曲线点数）；
     - ``max_drawdown``：当月内从峰值（峰值基期取进入当月时的权益）起的最大回撤，正数；
-    - ``cumulative_return``：当月末权益 / 初始资金 - 1。
+    - ``cumulative_return``：当月末权益（含截至当月末的累计出金）/ 初始资金 - 1。
 
     净值曲线按日期升序，顺序扫描天然按月切分；空曲线返回空列表（不抛错，
     供 ``performance_metrics([])`` 之外的读路径兜底）。
@@ -117,13 +119,23 @@ def monthly_breakdown(
         month = str(item.get("date") or "")[:7]
         if len(month) == 7 and month[4] == "-":
             buckets.setdefault(month, []).append(item)
+    # 按月汇总出金：提现真实扣减 equity，但资金已落袋，应计入当月盈亏与累计收益，
+    # 避免「盈利出金后统计显示为亏损」的口径偏差（统计数据层面把盈利出金金额考虑上）。
+    month_withdrawn: dict[str, float] = {}
+    for w in withdrawals or []:
+        month = str(w.get("date") or "")[:7]
+        if len(month) == 7 and month[4] == "-":
+            month_withdrawn[month] = month_withdrawn.get(month, 0.0) + float(w.get("amount", 0.0) or 0.0)
     base_cash = float(initial_cash)
     previous_equity = base_cash
+    cumulative_withdrawn = 0.0
     result: list[dict[str, Any]] = []
     for month in sorted(buckets):
         points = buckets[month]
         end_equity = float(points[-1]["equity"])
-        pnl = end_equity - previous_equity
+        month_out = month_withdrawn.get(month, 0.0)
+        cumulative_withdrawn += month_out
+        pnl = (end_equity - previous_equity) + month_out
         peak = previous_equity
         month_drawdown = 0.0
         for point in points:
@@ -139,7 +151,8 @@ def monthly_breakdown(
             "return_rate": pnl / previous_equity if previous_equity > 0 else 0.0,
             "trading_days": len(points),
             "max_drawdown": month_drawdown,
-            "cumulative_return": end_equity / base_cash - 1 if base_cash > 0 else 0.0,
+            "cumulative_return": (end_equity + cumulative_withdrawn) / base_cash - 1
+                if base_cash > 0 else 0.0,
         })
         previous_equity = end_equity
     return result
@@ -151,17 +164,33 @@ def performance_metrics(
     total_fees: float, t_net_profit: float, max_invested: float,
     max_float_loss: float, buy_hold_return: float,
     total_withdrawn: float = 0.0, withdrawn_count: int = 0,
+    withdrawals: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not equity_curve:
         raise ValueError("净值曲线为空")
     equities = [float(item["equity"]) for item in equity_curve]
     final_equity = equities[-1]
-    net_profit = money(final_equity - initial_cash)
-    total_return = final_equity / initial_cash - 1
+    # 盈利出金金额：提现明细里「以盈利为基准」（period_profit > 0）的提取额。
+    # 提现会真实扣减 equity，但资金已落袋，仍是账户赚到的钱——统计口径要加回来，
+    # 否则「盈利出金后净利/收益被低估、甚至显示亏损」。
+    if withdrawals:
+        profit_withdrawn = sum(
+            float(w.get("amount", 0.0) or 0.0) for w in withdrawals
+            if float(w.get("period_profit", 0.0) or 0.0) > 0
+        )
+        if not total_withdrawn:
+            total_withdrawn = sum(float(w.get("amount", 0.0) or 0.0) for w in withdrawals)
+            withdrawn_count = len(withdrawals)
+    else:
+        # 未传提现明细时，按「全部出金视为盈利出金」兜底（默认配置下提现仅来自盈利）。
+        profit_withdrawn = total_withdrawn
+    adjusted_final = final_equity + profit_withdrawn
+    net_profit = money(adjusted_final - initial_cash)
+    total_return = adjusted_final / initial_cash - 1
     start = datetime.fromisoformat(str(equity_curve[0]["date"])).date()
     end = datetime.fromisoformat(str(equity_curve[-1]["date"])).date()
     elapsed_days = max(1, (end - start).days)
-    annualized = (final_equity / initial_cash) ** (365 / elapsed_days) - 1 if final_equity > 0 else -1.0
+    annualized = (adjusted_final / initial_cash) ** (365 / elapsed_days) - 1 if adjusted_final > 0 else -1.0
     returns = [current / previous - 1 for previous, current in zip(equities, equities[1:]) if previous > 0]
     volatility = stdev(returns) * math.sqrt(252) if len(returns) >= 2 else 0.0
     sharpe = mean(returns) / stdev(returns) * math.sqrt(252) if len(returns) >= 2 and stdev(returns) > 0 else 0.0
@@ -194,9 +223,10 @@ def performance_metrics(
         "total_fees": money(total_fees), "t_net_profit": money(t_net_profit),
         "t_trade_count": sum(1 for item in trades if item["purpose"] == "T"),
         "total_withdrawn": money(total_withdrawn), "withdrawn_count": withdrawn_count,
+        "profit_withdrawn": money(profit_withdrawn),
         "max_invested": money(max_invested), "exposure": exposure,
         "max_float_loss": money(max_float_loss), "buy_hold_return": buy_hold_return,
-        "monthly": monthly_breakdown(equity_curve, initial_cash),
+        "monthly": monthly_breakdown(equity_curve, initial_cash, withdrawals),
     }
 
 
@@ -1094,6 +1124,7 @@ class FunnelRotationBacktest:
             buy_hold_return,
             total_withdrawn=self.account.total_withdrawn,
             withdrawn_count=len(self.account.withdrawals),
+            withdrawals=[item.to_dict() for item in self.account.withdrawals],
         )
         screening_count = len(self._trail)
         beta = self._beta_summary()

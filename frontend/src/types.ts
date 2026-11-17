@@ -59,6 +59,8 @@ export interface StrategyConfig {
   max_holding_days?: number | null;
   /** 超期降阈后的止盈阈值（小数，0.03 = 3%）；与 max_holding_days 必须同时配置 */
   holding_tp_override?: number | null;
+  /** 硬性最大持仓天数：持有 ≥ 该交易日数后无条件强平（0 = 不限/关闭）；独立于 max_holding_days（超期降阈） */
+  force_exit_holding_days?: number;
   /** 加仓按档位先松后紧：A3 浮亏信号随 16 笔序列档位逐级加严（false = 全档统一原始 A3） */
   add_tier_strict?: boolean;
   /** 深跌幅当日做T：日内跌幅 ≥ 该值（小数，0.10 = 10%）绕过底仓笔数门槛；null/0 = 关闭 */
@@ -71,6 +73,8 @@ export interface StrategyConfig {
   t_max_turnover?: number;
   /** 做T准入：期望净利下限（振幅扣掉一次往返成本后仍需 ≥ 该值，小数，0.03 = 3%） */
   t_min_expected_net_spread?: number;
+  /** 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔，默认 4 = 第5笔起）；深跌幅当日可绕过 */
+  t_min_base_entries?: number;
   /** 指数 beta 腿：空仓期间持有创业板 ETF，选到个股后卖出换股 */
   etf_beta_enabled?: boolean;
   etf_symbol?: string;
@@ -374,6 +378,8 @@ export interface ReportMetrics {
   /** 盈利提现：累计已提现金额（真实离开账户的资金）与提现笔数。 */
   total_withdrawn?: number;
   withdrawn_count?: number;
+  /** 盈利出金金额：提现里以盈利为基准（period_profit > 0）的提取额；已计入净利/总收益口径 */
+  profit_withdrawn?: number;
   /** 每月盈亏。旧报告由后端读取时按权益曲线补算；极端情况下缺失则前端隐藏该面板。 */
   monthly?: MonthlyPnl[];
 }

@@ -25,6 +25,8 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   t_min_turnover: '做 T 换手率下限',
   t_max_turnover: '做 T 换手率上限',
   t_min_expected_net_spread: '做 T 最小期望净利',
+  t_min_base_entries: '做 T 底仓笔数门槛',
+  force_exit_holding_days: '最大持仓天数',
   volume_participation: '成交量参与上限',
   slippage_bps: '滑点',
   etf_symbol: 'ETF 代码',
@@ -95,6 +97,16 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
     if (isNum(maxTurnover) && !(maxTurnover > 0 && maxTurnover <= 1)) {
       issue('t_max_turnover', '须为 0~100%（不含 0）的百分数');
     }
+  }
+  // 做T底仓笔数门槛：1~16 笔整数（后端同口径 400）。
+  const baseEntries = config.t_min_base_entries;
+  if (baseEntries !== undefined && !(isNum(baseEntries) && Number.isInteger(baseEntries) && baseEntries >= 1 && baseEntries <= 16)) {
+    issue('t_min_base_entries', '须为 1~16 笔之间的整数（做T的底仓笔数门槛）');
+  }
+  // 硬性最大持仓天数：0~250 交易日整数（0 = 不限）。
+  const forceDays = config.force_exit_holding_days;
+  if (forceDays !== undefined && !(isNum(forceDays) && Number.isInteger(forceDays) && forceDays >= 0 && forceDays <= 250)) {
+    issue('force_exit_holding_days', '须为 0~250 个交易日之间的整数（0 = 不限）');
   }
 
   // ---- 交易摩擦 / 撮合 ------------------------------------------------------

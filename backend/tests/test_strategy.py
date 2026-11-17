@@ -132,7 +132,51 @@ def test_max_holding_days_override_requires_both_fields():
     strategy.round_entry_date = "2025-01-01"
     history = [daily(i, 10.5) for i in range(1, 30)]
     assert strategy.on_daily(history, [], account, 29, False) == []
+
+
+def test_force_exit_holding_days_liquidates_when_held_long():
+    """硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
+
+    止盈未触发（+5% < 15%）、Armed 也未进时，靠天数硬兜底强制清仓，避免资金长期套牢。
+    """
+    account = funded_account()
+    config = StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, force_exit_holding_days=5,
+    )
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    strategy.round_entry_date = "2025-01-01"
+    # 持有 10 天（≥ 5），浮盈 5%：未达 15% 止盈，但天数硬顶触发强平。
+    history = [daily(i, 10.5) for i in range(1, 11)]
+    requests = strategy.on_daily(history, [], account, 10, False)
+    assert any(item.side == "SELL" and item.purpose == "PERMANENT" for item in requests)
+    assert strategy.liquidating is True
+    assert strategy.close_reason == "最大持仓5日强平"
+
+
+def test_force_exit_holding_days_zero_disables():
+    """force_exit_holding_days = 0（默认）：不强制清仓，长期持仓也不触发。"""
+    account = funded_account()
+    config = StrategyConfig(slippage_bps=0, volume_participation=1.0)
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    strategy.round_entry_date = "2025-01-01"
+    history = [daily(i, 10.5) for i in range(1, 30)]
+    assert strategy.on_daily(history, [], account, 29, False) == []
     assert strategy.liquidating is False
+
+
+def test_force_exit_holding_days_validation():
+    """force_exit_holding_days 必须在 0~250 之间（0 = 不限）。"""
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, force_exit_holding_days=-1)
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, force_exit_holding_days=251)
+    assert StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, force_exit_holding_days=30
+    ).force_exit_holding_days == 30
 
 
 def test_round_entry_date_survives_state_roundtrip():
@@ -244,6 +288,39 @@ def test_deep_drop_t_bypasses_sequence_gate():
     # 跌 5%（<10%）→ 旁路不生效，sequence_index=1 被底仓笔数门槛挡住
     assert strategy._t_eligible(history, deep_drop_bar(0.05), account,
                                 daily_amplitude=0.05, daily_turnover_rate=0.05) is False
+
+
+def test_t_min_base_entries_gate_configurable():
+    """底仓笔数门槛可配置：t_min_base_entries=2 时 sequence_index=2 过门槛，=1 仍被挡。
+
+    之前硬编码为 4（「第5笔起正T」）；可视化后可调，深跌幅旁路仍可绕过。
+    """
+    history = [daily(i, 10.0, low=9.6) for i in range(1, 6)]
+    bar = daily(6, 10.0, low=9.6, volume=100_000)
+    bar.turnover_rate = 0.05
+    bar.bid, bar.ask = 9.99, 10.01
+    strategy = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, t_min_base_entries=2,
+    ))
+    account = funded_account()
+    account.sequence_index = 2
+    assert strategy._t_eligible(history, bar, account,
+                                daily_amplitude=0.05, daily_turnover_rate=0.05) is True
+    # seq=1 < 门槛 2 → 被底仓笔数门槛挡住
+    account.sequence_index = 1
+    assert strategy._t_eligible(history, bar, account,
+                                daily_amplitude=0.05, daily_turnover_rate=0.05) is False
+
+
+def test_t_min_base_entries_validation():
+    """t_min_base_entries 必须在 1~16 笔之间。"""
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, t_min_base_entries=0)
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, t_min_base_entries=17)
+    assert StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, t_min_base_entries=3
+    ).t_min_base_entries == 3
 
 
 def test_deep_drop_pct_validation():

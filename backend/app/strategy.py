@@ -357,6 +357,14 @@ class LayeredTStrategy(Strategy):
                 if tp_overridden else f"账户轨收益达到{effective_tp * 100:.0f}%"
             )
             return self._liquidation_requests(position, mode)
+        # 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
+        # 放在止盈检查之后（价/账户轨止盈优先，触发即走上面），但先于 Armed 背离
+        # 辅助清仓——超期是硬兜底，不再等背离/回撤信号。
+        if self.config.force_exit_holding_days and int(self.config.force_exit_holding_days) > 0 \
+                and holding_days >= int(self.config.force_exit_holding_days):
+            self.liquidating = True
+            self.close_reason = f"最大持仓{int(self.config.force_exit_holding_days)}日强平"
+            return self._liquidation_requests(position, mode)
         if self.liquidating:
             return self._liquidation_requests(position, mode)
         if price_return >= self.config.price_armed:
@@ -677,15 +685,15 @@ class LayeredTStrategy(Strategy):
                     daily_turnover_rate: float | None = None) -> bool:
         position = account.position(bar.symbol)
         # 深跌幅当日做T旁路：当日盘中跌幅（相对前收盘）≥ t_deep_drop_pct 时，
-        # 绕过底仓笔数门槛（sequence_index≥4）。20cm 板日内 -10% 是极端恐慌事件，
-        # 抢反弹做T，退出仍走净利止盈 + T+1 尾盘强平，风险有界。
+        # 绕过底仓笔数门槛（sequence_index ≥ t_min_base_entries）。20cm 板日内 -10% 是
+        # 极端恐慌事件，抢反弹做T，退出仍走净利止盈 + T+1 尾盘强平，风险有界。
         deep_drop = False
         if self.config.t_deep_drop_pct is not None and bar.prev_close and bar.prev_close > 0:
             intraday_drop = bar.close / bar.prev_close - 1
             deep_drop = intraday_drop <= -float(self.config.t_deep_drop_pct)
         if (
             not self.config.enable_t
-            or (account.sequence_index < 4 and not deep_drop)
+            or (account.sequence_index < self.config.t_min_base_entries and not deep_drop)
             or self.armed
             or self.liquidating or self.t_traded_today or self.t_order_submitted
             or position.t_qty or len(history) < 5
@@ -811,5 +819,6 @@ class LayeredTStrategy(Strategy):
         self.t_order_submitted = True
         return [OrderRequest(
             symbol=bar.symbol, side="BUY", quantity=quantity, purpose="T",
-            execution_mode="NEXT_BAR", reason="第5笔起正T_准入通过",
+            execution_mode="NEXT_BAR",
+            reason=f"底仓{self.config.t_min_base_entries}笔起正T_准入通过",
         )]

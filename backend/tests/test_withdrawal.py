@@ -12,7 +12,7 @@ from datetime import datetime
 
 import pytest
 
-from app.backtest import performance_metrics
+from app.backtest import monthly_breakdown, performance_metrics
 from app.broker import BrokerAccount
 from app.domain import Bar, OrderRequest, StrategyConfig, Withdrawal
 
@@ -283,6 +283,54 @@ def test_performance_metrics_include_withdrawal():
     )
     assert metrics["total_withdrawn"] == pytest.approx(19_663.15)
     assert metrics["withdrawn_count"] == 4
+    # 未传提现明细时按「全部出金视为盈利出金」兜底：净利/总收益应加回出金金额
+    assert metrics["profit_withdrawn"] == pytest.approx(19_663.15)
+    assert metrics["net_profit"] == pytest.approx(119_663.15 + 19_663.15 - 100_000)
+    assert metrics["total_return"] == pytest.approx((119_663.15 + 19_663.15) / 100_000 - 1)
+
+
+def test_performance_metrics_profit_withdrawn_from_details():
+    """盈利出金只统计以盈利为基准（period_profit>0）的提现，并加回净利/总收益。
+
+    提现明细传入时：profit_withdrawn 精确过滤；total_withdrawn 若未显式传则由明细补全。
+    """
+    curve = [{"date": "2026-01-02", "equity": 100_000.0, "market_value": 0.0},
+             {"date": "2026-01-03", "equity": 105_000.0, "market_value": 0.0}]
+    withdrawals = [
+        {"id": "W1", "date": "2026-01-03", "amount": 3_000.0, "period_profit": 5_000.0},
+        {"id": "W2", "date": "2026-01-03", "amount": 2_000.0, "period_profit": 0.0},
+    ]
+    metrics = performance_metrics(
+        equity_curve=curve, initial_cash=100_000, rounds=[], trades=[],
+        total_fees=0.0, t_net_profit=0.0, max_invested=0.0,
+        max_float_loss=0.0, buy_hold_return=0.0,
+        withdrawals=withdrawals,
+    )
+    assert metrics["profit_withdrawn"] == pytest.approx(3_000.0)
+    assert metrics["total_withdrawn"] == pytest.approx(5_000.0)
+    assert metrics["net_profit"] == pytest.approx(105_000.0 + 3_000.0 - 100_000)
+    assert metrics["total_return"] == pytest.approx((105_000.0 + 3_000.0) / 100_000 - 1)
+
+
+def test_monthly_breakdown_includes_withdrawals():
+    """月度统计把盈利出金金额计入当月盈亏与累计收益（统计数据层面考虑出金）。"""
+    curve = [
+        {"date": "2026-01-02", "equity": 100_000.0, "market_value": 0.0},
+        {"date": "2026-01-30", "equity": 110_000.0, "market_value": 0.0},
+        {"date": "2026-02-03", "equity": 108_000.0, "market_value": 0.0},
+    ]
+    withdrawals = [
+        {"id": "W1", "date": "2026-01-20", "amount": 5_000.0, "period_profit": 10_000.0},
+        {"id": "W2", "date": "2026-02-02", "amount": 2_000.0, "period_profit": 3_000.0},
+    ]
+    monthly = monthly_breakdown(curve, 100_000, withdrawals)
+    jan, feb = monthly[0], monthly[1]
+    assert jan["month"] == "2026-01"
+    assert jan["pnl"] == pytest.approx(15_000.0)          # +10k 权益 + 5k 出金
+    assert jan["cumulative_return"] == pytest.approx(0.15)  # (110k+5k)/100k-1
+    assert feb["month"] == "2026-02"
+    assert feb["pnl"] == pytest.approx(0.0)                # -2k 权益 + 2k 出金
+    assert feb["cumulative_return"] == pytest.approx(0.15)  # (108k+7k)/100k-1
 
 
 def test_performance_metrics_withdrawal_default_zero():
