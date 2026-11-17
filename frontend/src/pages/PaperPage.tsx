@@ -653,6 +653,44 @@ export default function PaperPage() {
     }
   };
 
+  // Armed 量价背离缩量项口径：盘中把当日累计量折算成日量当量再与前5日均量比。
+  // annualized=线性年化（默认，只会高估早盘量→缩量项偏保守）/debiased=实测分布去偏/
+  // cumulative=旧口径（累计量直比，偏松，仅回滚）。缩量阈值一起保存。
+  const [riskCaliber, setRiskCaliber] = useState('');
+  const [riskRatio, setRiskRatio] = useState('');
+  const [savingRisk, setSavingRisk] = useState(false);
+  const riskCaliberCurrent = account?.config?.risk_volume_caliber ?? 'annualized';
+  const riskRatioCurrent = account?.config?.risk_volume_ratio ?? 0.8;
+  const saveRiskCaliber = async () => {
+    if (!account) return;
+    const caliber = riskCaliber || riskCaliberCurrent;
+    const ratioInput = riskRatio;
+    const ratio = ratioInput === '' ? riskRatioCurrent * 100 : Number(ratioInput);
+    if (!['annualized', 'debiased', 'cumulative'].includes(caliber)) {
+      setError('缩量口径需为 annualized / debiased / cumulative 之一。');
+      return;
+    }
+    if (!Number.isFinite(ratio) || ratio <= 0 || ratio > 100) {
+      setError('缩量阈值需为 0–100 之间的百分数。');
+      return;
+    }
+    setSavingRisk(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, {
+        risk_volume_caliber: caliber,
+        risk_volume_ratio: ratio / 100,
+      });
+      setAccount(next);
+      setRiskCaliber('');
+      setRiskRatio('');
+      toast.success('Armed 量价背离缩量口径已更新，下一根K线起生效。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Armed 量价背离缩量口径更新失败。');
+    } finally {
+      setSavingRisk(false);
+    }
+  };
+
   const saveTNetSpread = async () => {
     if (!account) return;
     const pct = Number(tSpreadInput);
@@ -1031,6 +1069,19 @@ export default function PaperPage() {
                     <NumberInput unit="笔" min={1} max={16} step={1} allowEmpty placeholder={String(baseEntries)} value={baseEntriesInput} onChange={setBaseEntriesInput} disabled={savingBaseEntries} />
                   </Field>
                   <Button size="sm" className="h-8" onClick={() => void saveBaseEntries()} disabled={savingBaseEntries || baseEntriesInput === ''}>{savingBaseEntries ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingBaseEntries ? '正在保存' : '保存门槛'}</Button>
+                </div>
+                <div className="mt-1.5 flex flex-wrap items-end gap-2">
+                  <Field label="缩量口径" hint="annualized=线性年化（默认）/debiased=实测去偏/cumulative=旧口径（回滚）" className="w-44">
+                    <SelectField value={riskCaliber || riskCaliberCurrent} onValueChange={setRiskCaliber} disabled={savingRisk} options={[
+                      { value: 'annualized', label: 'annualized · 线性年化（默认）' },
+                      { value: 'debiased', label: 'debiased · 实测分布去偏' },
+                      { value: 'cumulative', label: 'cumulative · 旧口径（回滚）' },
+                    ]} ariaLabel="Armed 量价背离缩量口径" />
+                  </Field>
+                  <Field label="缩量阈值（%）" hint="折算后当日量能 < 前5日均量 × 该比例即缩量" className="w-36">
+                    <NumberInput unit="%" min={0.1} max={100} step={1} allowEmpty placeholder={number(riskRatioCurrent * 100, 0)} value={riskRatio} onChange={setRiskRatio} disabled={savingRisk} />
+                  </Field>
+                  <Button size="sm" className="h-8" onClick={() => void saveRiskCaliber()} disabled={savingRisk}>{savingRisk ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingRisk ? '正在保存' : '保存口径'}</Button>
                 </div>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>

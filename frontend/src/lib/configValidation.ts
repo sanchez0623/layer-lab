@@ -38,6 +38,8 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   etf_exit_ma_days: '出场均线',
   withdraw_ratio: '提取比例',
   withdraw_fixed_amount: '固定金额',
+  risk_volume_caliber: 'Armed 量价背离缩量口径',
+  risk_volume_ratio: '缩量阈值',
 };
 
 /** 把「字段 + 文案」拼成一句可读提示：`深跌幅当日做T：开启时须 ≥ 10%…`。 */
@@ -155,6 +157,16 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   const withdrawFixed = config.withdraw_fixed_amount;
   if (withdrawFixed !== undefined && !(isNum(withdrawFixed) && withdrawFixed >= 0)) {
     issue('withdraw_fixed_amount', '固定金额不能为负');
+  }
+
+  // ---- Armed 量价背离缩量项口径 ---------------------------------------------
+  const caliber = config.risk_volume_caliber;
+  if (caliber !== undefined && !['annualized', 'debiased', 'cumulative'].includes(caliber)) {
+    issue('risk_volume_caliber', '须为 annualized / debiased / cumulative 之一');
+  }
+  const volumeRatio = config.risk_volume_ratio;
+  if (volumeRatio !== undefined && !(isNum(volumeRatio) && volumeRatio > 0 && volumeRatio <= 1)) {
+    issue('risk_volume_ratio', '须为 0~100%（不含 0）的百分数');
   }
 
   return issues;

@@ -261,6 +261,10 @@ class AccountConfigRequest(BaseModel):
     withdraw_fixed_amount: float | None = Field(default=None, ge=0)
     # 每月提现开关：当月不盈利（已实现盈亏 <= 0）则不提取。仅 monthly 模式生效。
     withdraw_skip_when_no_profit: bool | None = None
+    # Armed 量价背离缩量项口径：annualized=线性年化（默认）/debiased=实测去偏/cumulative=旧口径（回滚）。
+    risk_volume_caliber: str | None = None
+    # 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
+    risk_volume_ratio: float | None = Field(default=None, gt=0, le=1)
 
 
 class ApplyConfigRequest(BaseModel):
@@ -498,7 +502,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.7.2",
+        version="2.7.3",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage

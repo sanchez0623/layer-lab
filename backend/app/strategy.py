@@ -43,6 +43,31 @@ def board_sell_threshold(symbol: str) -> int:
 TAIL_ENTRY_START = dtime(14, 30)
 TAIL_ENTRY_END = dtime(14, 50)
 
+# ---------------------------------------------------------------------------
+# Armed「量价背离」量能口径：盘中把「当日至今累计量」折算成日量当量的当量单位。
+# 一个 A 股交易日的盘中当量 = 9:30-11:30 + 13:00-15:00 = 240 分钟 = 48 根 5 分钟 K。
+# 只有折算到日量当量，才能和日线口径的「前 5 日全天均量」同尺度比较（C2 修复）。
+# ---------------------------------------------------------------------------
+TRADING_MINUTES_PER_DAY = 240
+INTRADAY_BARS_PER_DAY = 48
+
+_RISK_VOLUME_CALIBERS = ("annualized", "debiased", "cumulative")
+
+# 「debiased」口径用的实测累计分布：_VOLUME_CUM_FRACTION[k-1] = 第 k 根 5 分钟 K 收盘时，
+# 当日已完成量占全天的比例（均值）。60 只 × 806 个交易日 = 48385 个完整交易日实测
+# （2026-11-17，quan_quant 本地 minute5 parquet 只读统计）。
+# 线性年化（annualized）等价于假设该比例 = k/48，实测早盘严重偏离：
+#   09:35 实测 0.0923 vs k/48=0.0208；10:00 0.2925 vs 0.125；11:30 0.6075 vs 0.500；
+#   14:00 0.7824 vs 0.750；15:00 1.0000 vs 1.000。
+_VOLUME_CUM_FRACTION: tuple[float, ...] = (
+    0.0923, 0.1456, 0.1896, 0.2282, 0.2623, 0.2925, 0.3228, 0.3482,
+    0.3718, 0.3937, 0.4140, 0.4328, 0.4520, 0.4692, 0.4853, 0.5010,
+    0.5159, 0.5298, 0.5444, 0.5576, 0.5704, 0.5832, 0.5956, 0.6075,
+    0.6293, 0.6442, 0.6587, 0.6732, 0.6871, 0.7006, 0.7152, 0.7289,
+    0.7424, 0.7559, 0.7693, 0.7824, 0.7975, 0.8115, 0.8255, 0.8394,
+    0.8535, 0.8678, 0.8854, 0.9025, 0.9222, 0.9449, 0.9736, 1.0000,
+)
+
 # ------------------------------------------------------------------
 # 策略状态单一来源：字段清单只写这一份，state_dict / load_state 由它生成。
 # （属性名, 类型, 缺省值）。新增状态字段必须同步登记这张表——
@@ -380,8 +405,9 @@ class LayeredTStrategy(Strategy):
         if len(history) >= 20:
             is_20d_high = bar.high >= max(item.high for item in history[-20:])
             previous_five = history[-6:-1] if len(history) >= 6 else history[:-1]
+            # 0.8 → 配置项（架构原则 2：可调参数可视化可编辑）
             volume_average = mean(item.volume for item in previous_five) if previous_five else bar.volume
-            volume_not_supporting = bar.volume < volume_average * 0.8
+            volume_not_supporting = bar.volume < volume_average * self.config.risk_volume_ratio
             upper_shadow = False
             for item in recent_bars[-5:]:
                 body = abs(item.close - item.open)
@@ -390,7 +416,11 @@ class LayeredTStrategy(Strategy):
                 if upper >= 2 * max(body, 0.01) and upper / full_range >= 0.45:
                     upper_shadow = True
                     break
-            self.recent_long_upper = self.recent_long_upper or upper_shadow
+            # 上影线证据源去重，不再当日 latched。
+            # 旧写法 `self.recent_long_upper or upper_shadow` 让「当日出现过一次长上影」后
+            # 该项全天恒 True（白送一票），与「上影回撤」在同一根 bar 上重复计数 → 三选二
+            # 退化成「上影线 OR 上影回撤」。按最近 5 根窗口重算后，三项都需要当前时点的新鲜证据。
+            self.recent_long_upper = upper_shadow
             atr = self._atr(history, self.config.atr_period)
             threshold = min(0.03, max(0.008, 0.4 * atr / bar.close)) if bar.close else 0.03
             high_drawdown = (bar.high - bar.close) / bar.close >= threshold
@@ -594,13 +624,59 @@ class LayeredTStrategy(Strategy):
         )]
 
     @staticmethod
-    def _today_daily_bar(history: list[Bar], bar: Bar, recent_bars: list[Bar]) -> Bar:
+    def _intraday_bars_elapsed(bar: Bar, recent_bars: list[Bar]) -> int:
+        """当日已知已收盘 5 分钟 K 的根数（含决策 bar 自身）。
+
+        只数 recent_bars 里当日的已收盘 bar，**不读墙钟**：回测（backtest.py:941
+        在决策前 append(m5)）与 live-tick（main.py:1170 只保留 ``timestamp <= now``
+        的当日 bar）两条路径由此得到同一个数，满足架构原则 1（单一真相源）。
+        """
+        today = [item for item in (recent_bars or []) if item.date == bar.date]
+        if not today:
+            return 0
+        return len(today) + (0 if today[-1].timestamp == bar.timestamp else 1)
+
+    @staticmethod
+    def _daily_volume_equivalent(
+        cum_volume: float, elapsed_bars: int, caliber: str,
+    ) -> float:
+        """把「当日至今累计量」折算成日量当量。
+
+        - ``annualized``：线性年化 ``cum × 48/已过根数``。早盘只会**高估**今日量
+          （09:35 +343%、10:00 +134%、11:30 +21.5%、14:00 +4.3%），因此缩量项
+          偏保守、**绝不会误判**；代价是早盘缩量项基本失效（见方案报告 §七）。
+        - ``debiased``  ：用 _VOLUME_CUM_FRACTION 去偏，全天近似无偏。
+        - ``cumulative``：不折算（旧口径，系统性偏松，C3 已记录），仅留作回滚。
+        已过根数 < 2 时调用方直接判「无法判定」（缩量项 False），不走这里。
+        """
+        if caliber == "cumulative":
+            return cum_volume
+        if caliber == "debiased":
+            index = min(max(elapsed_bars, 1), INTRADAY_BARS_PER_DAY) - 1
+            fraction = _VOLUME_CUM_FRACTION[index]
+            return cum_volume / max(fraction, 1e-9)
+        return cum_volume * INTRADAY_BARS_PER_DAY / max(2, elapsed_bars)
+
+    @staticmethod
+    def _today_daily_bar(
+        history: list[Bar], bar: Bar, recent_bars: list[Bar] | None = None,
+        volume_caliber: str = "cumulative",
+    ) -> Bar:
         """用当日已有的 5 分钟 K 合成一根「截至当前」的日线，供盘中加仓判定。
 
         尾盘时段当日成交量已基本走完，用累计量近似日量，避免拿单根 5 分钟量
         与日均量比较（会把 A3 的缩量条件放大成假信号）。
+
+        ``volume_caliber``：volume 的折算口径。默认 ``cumulative`` 保持既有行为
+        （尾盘 A3 缩量仍在用这个近似，C3 已记录为已知偏松，本次不动）；
+        Armed 背离路径传 ``config.risk_volume_caliber``。
         """
         today = [item for item in (recent_bars or []) if item.date == bar.date] or [bar]
+        volume = sum(item.volume for item in today)
+        if volume_caliber != "cumulative":
+            elapsed = LayeredTStrategy._intraday_bars_elapsed(bar, recent_bars or [bar])
+            if elapsed >= 2:
+                volume = LayeredTStrategy._daily_volume_equivalent(volume, elapsed, volume_caliber)
         prev_close = history[-1].close if history else bar.prev_close
         return Bar(
             timestamp=bar.timestamp, symbol=bar.symbol,
@@ -608,7 +684,7 @@ class LayeredTStrategy(Strategy):
             high=max(item.high for item in today),
             low=min(item.low for item in today),
             close=bar.close,
-            volume=sum(item.volume for item in today),
+            volume=volume,
             amount=sum(item.amount for item in today),
             timeframe="daily", turnover_rate=bar.turnover_rate, prev_close=prev_close,
         )
@@ -753,13 +829,17 @@ class LayeredTStrategy(Strategy):
         if self.last_intraday_timestamp == bar.timestamp:
             return []
         self.last_intraday_timestamp = bar.timestamp
-        risk_history = history + [Bar(
-            timestamp=bar.timestamp, symbol=bar.symbol, open=bar.open, high=bar.high,
-            low=bar.low, close=bar.close, volume=bar.volume, amount=bar.amount,
-            timeframe=bar.timeframe, turnover_rate=bar.turnover_rate,
-            prev_close=bar.prev_close, bid=bar.bid, ask=bar.ask,
-        )]
-        risk = self._risk_requests(risk_history, bar, account, recent_bars, "NEXT_BAR")
+        # 【C2 口径修复】Armed 背离/VWAP 判定不再把「当前 5 分钟 bar」与「日线序列」混喂。
+        # 先把当日已收盘数据合成一根日线（量按 caliber 折算成日量当量、high/low 用
+        # running 极值、close 用当前价），再和 history 拼成**纯日线**序列：
+        # 「前 5 日均量 / 日线 ATR / 20 日新高 / 上影回撤」四项全部落到日线口径，与
+        # on_daily 逐字同构。_risk_requests 本体与 on_daily 均不改动，日线路径行为零变化。
+        # VWAP 仍用 recent（5 分钟）与 bar.close（当前价），口径不变。
+        today_bar = self._today_daily_bar(
+            history, bar, recent_bars, volume_caliber=self.config.risk_volume_caliber,
+        )
+        risk_history = list(history) + [today_bar]
+        risk = self._risk_requests(risk_history, today_bar, account, recent_bars, "NEXT_BAR")
         if risk:
             return risk
         # 尾盘首仓：只在空仓时生效，且优先级低于风控/止盈（上面已处理）。

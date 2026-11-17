@@ -102,6 +102,10 @@ export interface StrategyConfig {
   withdraw_fixed_amount?: number;
   /** 每月提现开关：当月不盈利（已实现盈亏 <= 0）则不提取；仅 monthly 模式生效 */
   withdraw_skip_when_no_profit?: boolean;
+  /** Armed 量价背离缩量项口径：annualized=线性年化（默认）/debiased=实测去偏/cumulative=旧口径（回滚） */
+  risk_volume_caliber?: string;
+  /** 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（小数，0.8 = 80%） */
+  risk_volume_ratio?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {

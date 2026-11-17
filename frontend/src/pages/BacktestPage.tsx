@@ -76,6 +76,10 @@ const fallbackConfig: StrategyConfig = {
   withdraw_ratio: 0.2,
   withdraw_fixed_amount: 5000,
   withdraw_skip_when_no_profit: true,
+  // Armed 量价背离缩量项口径：annualized=线性年化（默认）/debiased=实测去偏/cumulative=旧口径（回滚）。
+  risk_volume_caliber: 'annualized',
+  // 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
+  risk_volume_ratio: 0.8,
 };
 
 /** 回测仅保留漏斗轮动模式（清仓后重跑选股换票）；旧的单标的模式已下线。 */
@@ -908,6 +912,23 @@ export default function BacktestPage() {
                     </Field>
                     <Field label="最大持仓天数" hint="持有 ≥N 个交易日后无条件强平（兜底）；0 = 不限" error={configIssues.force_exit_holding_days}>
                       <NumberInput unit="交易日" min={0} max={250} step={1} value={config.force_exit_holding_days ?? 0} onChange={(value) => updateConfig('force_exit_holding_days', Number(value))} />
+                    </Field>
+                  </FormGrid>
+                </div>
+
+                {/* Armed 量价背离（辅助清仓）缩量项口径 */}
+                <div className="rounded-xl border bg-muted/25 p-3">
+                  <strong className="mb-2 block text-[12px] font-semibold text-foreground/80">Armed 量价背离（辅助清仓）</strong>
+                  <FormGrid>
+                    <Field label="缩量口径" hint="盘中把当日累计量折算成日量当量再与前5日均量比：annualized=线性年化（默认，只会高估早盘量→缩量项偏保守）；debiased=用实测累计分布去偏；cumulative=旧口径（累计量直比，偏松，仅回滚）" error={configIssues.risk_volume_caliber}>
+                      <SelectField value={config.risk_volume_caliber ?? 'annualized'} onValueChange={(value) => updateConfig('risk_volume_caliber', value as StrategyConfig['risk_volume_caliber'])} options={[
+                        { value: 'annualized', label: 'annualized · 线性年化（默认）' },
+                        { value: 'debiased', label: 'debiased · 实测分布去偏' },
+                        { value: 'cumulative', label: 'cumulative · 旧口径（回滚）' },
+                      ]} />
+                    </Field>
+                    <Field label="缩量阈值（%）" hint="折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量" error={configIssues.risk_volume_ratio}>
+                      <NumberInput unit="%" min={0.1} max={100} step={1} value={Number(((config.risk_volume_ratio ?? 0.8) * 100).toFixed(0))} onChange={(value) => updateConfig('risk_volume_ratio', Number(value) / 100)} />
                     </Field>
                   </FormGrid>
                 </div>

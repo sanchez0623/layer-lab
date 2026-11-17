@@ -223,6 +223,13 @@ class StrategyConfig:
     withdraw_fixed_amount: float = 5000.0
     # 每月提现开关：当月不盈利（已实现盈亏 <= 0）则不提取。仅 monthly 模式生效。
     withdraw_skip_when_no_profit: bool = True
+    # ---- Armed 量价背离（缩量项）口径 ----
+    # 盘中「缩量」项的量能口径：annualized=当日累计量按 48/已过5分钟根数 线性年化成日量
+    # 当量（只会高估早盘量→缩量项偏保守，本次修复默认）；debiased=用实测累计分布去偏；
+    # cumulative=旧口径（累计量直比全天均量，系统性偏松，C3 已知），仅留作回滚。
+    risk_volume_caliber: str = "annualized"
+    # 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
+    risk_volume_ratio: float = 0.8
 
     def __post_init__(self) -> None:
         if len(self.installment_amounts) != 16:
@@ -300,6 +307,14 @@ class StrategyConfig:
             raise ValueError("withdraw_fixed_amount 不能为负")
         self.withdraw_ratio = float(self.withdraw_ratio)
         self.withdraw_fixed_amount = float(self.withdraw_fixed_amount)
+        # Armed 缩量口径：非法值必须在源头 400，而不是让该项悄悄失效。
+        if self.risk_volume_caliber not in ("annualized", "debiased", "cumulative"):
+            raise ValueError(
+                "risk_volume_caliber 必须是 annualized/debiased/cumulative 之一，"
+                f"实际 {self.risk_volume_caliber}"
+            )
+        if not 0 < float(self.risk_volume_ratio) <= 1:
+            raise ValueError("risk_volume_ratio 必须在 (0, 1]（缩量阈值占前 5 日均量的比例）")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "StrategyConfig":
