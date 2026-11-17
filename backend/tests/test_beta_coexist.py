@@ -1,20 +1,24 @@
-"""并存模式（etf_beta_coexist=True）下个股买入是否受 beta 比例限制的验证。
+"""并存模式（etf_beta_coexist=True）下买入金额与 beta 腿规则关系的验证。
 
 结论锚点（供 lead 复核）：
-1. 个股买入**金额**只由 ``installment_amounts[sequence_index]`` 固定档位决定，
-   ``board_buy_quantity`` 折算股数；``strategy.py`` 的 ``_buy_request`` /
-   ``_tail_entry_requests`` / ``_tail_add_requests`` **从不读取** ``etf_position_pct``
-   —— beta 比例只约束 ETF 腿自身的建仓预算
-   （``backtest._beta_target_quantity`` / ``main.py`` live-tick 两条路径同口径）。
-2. 并存模式下个股与 ETF 共用同一现金池；个股成交由 broker ``process_bar``
-   以可用现金（``self.cash``）封顶（可能降档/拒单「可用资金不足」），是**间接**
-   受现金限制，而非受 beta 比例参数限制。
+- **ETF 买入受 beta 腿规则限制**（需求4 的回答）：
+  ``backtest._beta_target_quantity`` / ``main.py`` live-tick 两条路径同口径 ——
+  预算基数 = ``min(账户权益, 可用现金 / 1.002)``（并存模式再以可用现金封顶，留 0.2% 费用），
+  买入金额 = 预算基数 × ``etf_position_pct``，份数 = ``floor(金额/价格/step)*step``，
+  低于 ``min_qty`` 不买。即 ETF 买入**同时**受 ``etf_position_pct`` 与可用现金限制。
+- **个股买入不受 beta 比例限制**：金额只由 ``installment_amounts[sequence_index]``
+  固定档位决定，``strategy.py`` 的 ``_buy_request`` / ``_tail_entry_requests`` /
+  ``_tail_add_requests`` **从不读取** ``etf_position_pct``；个股成交由 broker
+  ``process_bar`` 以可用现金（``self.cash``）封顶（可能降档/拒单「可用资金不足」），
+  是**间接**受现金限制，而非受 beta 比例参数限制。
 """
 
 from datetime import datetime
 
 import pytest
 
+from app.backtest import FunnelRotationBacktest
+from app.beta_sleeve import target_quantity
 from app.broker import BrokerAccount
 from app.domain import Bar, OrderRequest, StrategyConfig
 from app.strategy import LayeredTStrategy, board_buy_quantity
@@ -82,6 +86,18 @@ def _max_affordable_qty(acct: BrokerAccount, symbol: str, price: float, start_qt
             return qty
         qty -= step
     return 0
+
+
+def _beta_engine(acct: BrokerAccount, config: StrategyConfig) -> FunnelRotationBacktest:
+    """构造一个不跑 __init__ 的最小引擎实例，仅用于单测 ``_beta_target_quantity``。
+
+    ``_beta_target_quantity`` 只依赖 ``self.account`` / ``self.config`` 与模块级
+    ``target_quantity``，故绕过完整回测初始化（不加载数据、不联网）。
+    """
+    engine = FunnelRotationBacktest.__new__(FunnelRotationBacktest)
+    engine.account = acct
+    engine.config = config
+    return engine
 
 
 def test_stock_entry_amount_not_scaled_by_beta_ratio():
@@ -162,3 +178,55 @@ def test_stock_buy_quantity_invariant_to_etf_position_pct():
         quantities.append(fills[0].quantity)
     # 两个不同的 beta 比例（0.20 vs 0.50）→ 个股买入成交数量完全相同（不读该参数）
     assert quantities[0] == quantities[1] == 7_900
+
+
+# ---------------------------------------------------------------------------
+# ETF 买入路径（需求4 的核心：ETF 买入是否受 beta 腿规则限制）—— 答案是「是」。
+# ---------------------------------------------------------------------------
+
+def test_etf_buy_limited_by_beta_leg_rules_in_coexist():
+    """并存模式：ETF 买入份数 = target_quantity(min(权益, 可用现金/1.002), etf_position_pct, 价)。
+
+    预算基数被「可用现金 / 1.002」封顶（留 0.2% 费用），再乘 ``etf_position_pct``。
+    该场景账户已持 20% ETF，剩余现金 ≈ 79.998 万 < 权益 ≈ 100 万 → 现金封顶生效。
+    """
+    acct = coexist_account(etf_position_pct=0.20)
+    engine = _beta_engine(acct, acct.config)
+
+    qty = engine._beta_target_quantity(ETF_PRICE, 100, 100)
+    base = min(acct.equity, acct.available_cash / 1.002)
+    # 现金封顶确实把预算基数压到「可用现金」以下（而非用满权益）
+    assert base == pytest.approx(acct.available_cash / 1.002)
+    assert base < acct.equity
+    # 精确等于 beta 腿规则推导的份数
+    assert qty == target_quantity(base, 0.20, ETF_PRICE, min_qty=100, step=100)
+    assert qty > 0
+    # 若不受 etf_position_pct 约束（用全部预算买 ETF）会买到远超 qty 的份数
+    assert target_quantity(base, 1.0, ETF_PRICE, min_qty=100, step=100) > qty
+
+
+def test_etf_buy_quantity_scales_with_etf_position_pct():
+    """并存模式：etf_position_pct 直接决定 ETF 买入金额（beta 腿规则的核心约束）。
+
+    更高仓位比例 → 更大 ETF 买入；且每档都精确等于规则推导值。
+    """
+    quantities = []
+    for pct in (0.20, 0.50):
+        acct = coexist_account(etf_position_pct=pct)
+        engine = _beta_engine(acct, acct.config)
+        base = min(acct.equity, acct.available_cash / 1.002)
+        qty = engine._beta_target_quantity(ETF_PRICE, 100, 100)
+        assert qty == target_quantity(base, pct, ETF_PRICE, min_qty=100, step=100)
+        quantities.append(qty)
+    assert quantities[1] > quantities[0]
+
+
+def test_etf_buy_respects_min_qty_and_step():
+    """ETF 买入向下取整到申报单位：低于 min_qty 不买；结果恒为 step 整数倍。"""
+    acct = coexist_account(etf_position_pct=0.20)
+    engine = _beta_engine(acct, acct.config)
+    # 极高价 → 预算买不起 100 份 → 0
+    assert engine._beta_target_quantity(100_000.0, 100, 100) == 0
+    # 正常价 → 结果 100 整数倍
+    qty = engine._beta_target_quantity(ETF_PRICE, 100, 100)
+    assert qty > 0 and qty % 100 == 0
