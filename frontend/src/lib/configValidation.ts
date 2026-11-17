@@ -16,6 +16,33 @@ import type { StrategyConfig } from '../types';
  */
 export type ConfigIssueMap = Partial<Record<keyof StrategyConfig, string>>;
 
+/** 字段中文名：弹窗/汇总提示里用（字段下方红字已紧贴输入框，不必重复）。 */
+export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> = {
+  t_deep_drop_pct: '深跌幅当日做T',
+  t_target_net_spread: '做 T 净利止盈',
+  t_exit_cutoff: '做 T T+1 截止时间',
+  t_min_amplitude: '做 T 最小振幅',
+  t_min_turnover: '做 T 换手率下限',
+  t_max_turnover: '做 T 换手率上限',
+  t_min_expected_net_spread: '做 T 最小期望净利',
+  volume_participation: '成交量参与上限',
+  slippage_bps: '滑点',
+  etf_symbol: 'ETF 代码',
+  etf_position_pct: 'ETF 仓位',
+  etf_hard_stop_pct: 'ETF 硬止损',
+  etf_entry_max_deviation: '不追高上限',
+  etf_reentry_cooldown_days: '清仓后冷却',
+  etf_entry_ma_days: '入场均线',
+  etf_exit_ma_days: '出场均线',
+  withdraw_ratio: '提取比例',
+  withdraw_fixed_amount: '固定金额',
+};
+
+/** 把「字段 + 文案」拼成一句可读提示：`深跌幅当日做T：开启时须 ≥ 10%…`。 */
+export const describeConfigIssue = (field: keyof StrategyConfig, message: string): string =>
+  `${CONFIG_FIELD_LABELS[field] ?? String(field)}：${message}`;
+
+
 const isNum = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 
 /** HH:MM（24 小时制）合法性判定，与后端 strptime("%H:%M") 同口径。 */

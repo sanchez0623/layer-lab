@@ -30,7 +30,7 @@ import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
-import { validateStrategyConfig } from '../lib/configValidation';
+import { validateStrategyConfig, describeConfigIssue } from '../lib/configValidation';
 import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
 
 const fallbackConfig: StrategyConfig = {
@@ -219,7 +219,18 @@ export default function BacktestPage() {
   // 存在问题时暂停自动保存并阻止运行/应用，避免每敲一次输入就吃一个 400。
   const configIssues = useMemo(() => validateStrategyConfig(config), [config]);
   const configInvalid = Object.keys(configIssues).length > 0;
-  const firstConfigIssue = Object.values(configIssues)[0] ?? '';
+  const firstConfigIssueField = (Object.keys(configIssues)[0] ?? undefined) as keyof StrategyConfig | undefined;
+  const firstConfigIssue = firstConfigIssueField ? (configIssues[firstConfigIssueField] ?? '') : '';
+  const firstConfigIssueText = firstConfigIssueField ? describeConfigIssue(firstConfigIssueField, firstConfigIssue) : '';
+  // 字段下方红字在长表单里容易被忽略：出现/变化时再弹一次 toast（同一错误只弹一次）。
+  const lastIssueToastRef = useRef('');
+  useEffect(() => {
+    if (!firstConfigIssueField) { lastIssueToastRef.current = ''; return; }
+    const key = `${firstConfigIssueField}|${firstConfigIssue}`;
+    if (key === lastIssueToastRef.current) return;
+    lastIssueToastRef.current = key;
+    toast.error(firstConfigIssueText, { duration: 5000 });
+  }, [firstConfigIssueField, firstConfigIssue, firstConfigIssueText]);
 
   const loadInitial = async (resetForm = false) => {
     setLoading(true);
@@ -404,7 +415,7 @@ export default function BacktestPage() {
   };
 
   const run = async () => {
-    if (configInvalid) { setError(`配置有误：${firstConfigIssue}`); return; }
+    if (configInvalid) { setError(`配置有误：${firstConfigIssueText}`); return; }
     if (startDate && endDate && startDate > endDate) { setError('开始日期不能晚于结束日期，请调整回测区间。'); return; }
     if (!Number.isFinite(initialCash) || initialCash <= 0) { setError('初始资金必须大于 0。'); return; }
     // 漏斗轮动模式用本地 universe.db，无需选择数据集。
@@ -424,7 +435,7 @@ export default function BacktestPage() {
 
   // 把当前回测配置（策略字段 + 费率）整套应用到模拟盘「当前账户」，下一根 K 起生效。
   const applyToPaper = async () => {
-    if (configInvalid) { setError(`配置有误：${firstConfigIssue}`); return; }
+    if (configInvalid) { setError(`配置有误：${firstConfigIssueText}`); return; }
     setApplying(true);
     setError('');
     try {
