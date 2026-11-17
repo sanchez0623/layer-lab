@@ -424,6 +424,74 @@ def test_funnel_etf_partial_coverage_warns(tmp_path, monkeypatch):
     ), report["warnings"]
 
 
+def _coexist_scenario(tmp_path, monkeypatch, *, coexist: bool) -> dict:
+    """构造「个股已建仓 + 创业板指刚站上 5 日线」的场景，测 beta 腿互斥/并存。
+
+    指数路径分两段（共 400 根；回测窗口起点 2025-08-20 = 第 231 根）：
+      1) 前 232 根单边缓跌 —— 窗口起点（bar 231）的 20 日收益 < 0，L0 大盘门与
+         策略大盘门都开门（个股能建仓）；
+      2) 第 232 根起单边上行 —— 窗口内（约 bar 236 后）指数站上 5 日线，beta 腿的
+         entry_allowed 成立并持续成立（不跌破出场均线，也不触发硬止损）。
+    个股沿用 _build_store 的「线性跌到 20 平台 + 低位横盘」路径：持续超跌 → L1 选中，
+    8/21 开盘建仓后不触发止盈，持仓到窗口结束。
+    于是 coexist=False 时反复「买 ETF → 选到个股清 ETF」，coexist=True 时两者同持。
+    """
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    store = _build_store(tmp_path / "u.db")
+    count = N_BARS + 140
+    ramp_from = 232                       # 窗口起点之后才开始上行，保证 L0 开门
+    fall = [round(6000.0 * 0.9995 ** index, 4) for index in range(ramp_from)]
+    base = fall[-1]
+    ramp = [round(base + 3.0 * index, 4) for index in range(1, count - ramp_from + 1)]
+    for board in (BOARD_GEM, BOARD_STAR):
+        store.upsert_index(BOARD_INDEX[board], _bars(BOARD_INDEX[board], fall + ramp))
+    save_etf_bars(
+        cache_path(tmp_path / "data", "sz.159915"),
+        _bars("sz.159915", [3.0 + 0.01 * index for index in range(N_BARS)],
+              amounts=[1e9] * N_BARS),
+    )
+    return _run(
+        store,
+        initial_cash=1_000_000.0,
+        config=StrategyConfig(
+            etf_beta_enabled=True, etf_position_pct=0.20,
+            etf_entry_ma_days=5, etf_exit_ma_days=5,
+            etf_hard_stop_pct=0.6,
+            etf_reentry_cooldown_days=0,
+            etf_beta_coexist=coexist,
+        ),
+    )
+
+
+def test_funnel_etf_beta_coexist_holds_alongside_stock(tmp_path, monkeypatch):
+    """并存模式：个股持仓期间 beta 腿照常持有，净值曲线上出现「个股+ETF」双持日。"""
+    report = _coexist_scenario(tmp_path, monkeypatch, coexist=True)
+
+    assert report["data_info"]["beta"]["trade_count"] >= 1
+    assert report["metrics"]["total_rounds"] >= 1, "该场景应选到个股"
+    both = [
+        point for point in report["equity_curve"]
+        if (point.get("position_qty") or 0) > 0 and (point.get("beta_qty") or 0) > 0
+    ]
+    assert both, "并存模式下净值曲线应出现个股与 ETF 同持的交易日"
+    # 互斥的换仓理由在并存模式下不应出现
+    assert not any(
+        event.get("reason") == "选到个股换仓" for event in report["events"]
+        if event.get("type") in {"SIGNAL", "ETF_EXIT"}
+    )
+
+
+def test_funnel_etf_beta_mutual_exclusive_keeps_single_asset(tmp_path, monkeypatch):
+    """互斥模式（默认）：同场景下净值曲线永远不同时持有个股与 ETF。"""
+    report = _coexist_scenario(tmp_path, monkeypatch, coexist=False)
+
+    both = [
+        point for point in report["equity_curve"]
+        if (point.get("position_qty") or 0) > 0 and (point.get("beta_qty") or 0) > 0
+    ]
+    assert both == [], f"互斥模式下不应双持：{both[:3]}"
+
+
 def test_funnel_etf_cache_symbol_is_normalized(tmp_path, monkeypatch):
     """缓存里 symbol 是腾讯风格（sz159915）时，撮合仍按标准代码 sz.159915 匹配持仓。"""
     monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))

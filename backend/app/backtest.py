@@ -324,11 +324,16 @@ class FunnelRotationBacktest:
                 f"清仓后冷却 {self.config.etf_reentry_cooldown_days} 个交易日再入场"
             )
         guard_text = f"；入场保护：{'、'.join(guards)}" if guards else ""
+        # 并存模式：ETF 与个股可同时持有，建仓额度以「权益×仓位」和「可用现金」的较小者为准。
+        mode_text = (
+            "；并存模式：与个股同时持有，建仓额度以可用现金封顶"
+            if self.config.etf_beta_coexist
+            else "；个股空仓期间持有、选到个股后卖出换股"
+        )
         self.warnings.append(
             f"ETF beta 腿已启用：{self.etf_symbol}，仓位 {self.config.etf_position_pct * 100:.0f}% 权益，"
             f"入场 指数>{self.config.etf_entry_ma_days}日线，出场 指数<{self.config.etf_exit_ma_days}日线 "
-            f"或 ETF 硬止损 {self.config.etf_hard_stop_pct * 100:.1f}%{guard_text}；"
-            f"个股空仓期间持有、选到个股后卖出换股"
+            f"或 ETF 硬止损 {self.config.etf_hard_stop_pct * 100:.1f}%{guard_text}{mode_text}"
         )
 
     def _etf_bar_for(self, day: str) -> Bar | None:
@@ -394,16 +399,20 @@ class FunnelRotationBacktest:
                 exit_ma_days=self.config.etf_exit_ma_days,
                 hard_stop_pct=self.config.etf_hard_stop_pct,
             )
-            if reason is None and (self._has_stock_target() or self.account.has_stock_position):
-                # 一旦选出个股（或个股已建仓），ETF 立即清仓让位：个股与 ETF 不允许同时持有。
+            if reason is None and not self.config.etf_beta_coexist \
+                and (self._has_stock_target() or self.account.has_stock_position):
+                # 互斥模式：一旦选出个股（或个股已建仓），ETF 立即清仓让位。
+                # 并存模式（etf_beta_coexist）下 ETF 只由指数均线/硬止损决定进出。
                 reason = "选到个股换仓"
             if reason and not self._has_pending_beta("SELL"):
                 self._beta_last_exit_reason = reason
                 self._submit_beta_sell(day, beta_qty, reason)
             return
-        # 空仓（无个股、无 ETF）且指数趋势向上 → 建 beta 腿。
-        if self.account.has_stock_position or self._has_stock_target():
-            return
+        # 空仓（或并存模式下的空 beta 腿）且指数趋势向上 → 建 beta 腿。
+        # 互斥模式要求个股腿完全空仓；并存模式不看个股，只按可用现金定额度。
+        if not self.config.etf_beta_coexist:
+            if self.account.has_stock_position or self._has_stock_target():
+                return
         if self._has_pending_beta("BUY"):
             return
         if not self._beta_cooldown_ready(day):
@@ -417,13 +426,28 @@ class FunnelRotationBacktest:
         if etf_bar is None or etf_bar.close <= 0:
             return
         rules = rules_for(self.etf_symbol)
-        qty = target_quantity(
-            self.account.equity, self.config.etf_position_pct, etf_bar.close,
-            min_qty=rules.min_qty, step=rules.step,
+        qty = self._beta_target_quantity(
+            etf_bar.close, rules.min_qty, rules.step,
         )
         if qty <= 0:
             return
         self._submit_beta_order(day, "BUY", qty, "指数趋势向上，空仓建 beta 腿")
+
+    def _beta_target_quantity(self, price: float, min_qty: int, step: int) -> int:
+        """beta 腿建仓份数：按权益×仓位比例，并存模式下再以可用现金封顶。
+
+        并存模式下个股与 ETF 分摊同一笔现金：若按权益算出的预算超过可用现金，
+        就只用现金（留 0.2% 给费用），避免出现「额度足够但买不进」的空转，
+        也不会挤占个股的加仓资金造成现金透支。
+        """
+        equity = self.account.equity
+        if self.config.etf_beta_coexist:
+            affordable = self.account.available_cash / 1.002
+            equity = min(equity, affordable)
+        return target_quantity(
+            equity, self.config.etf_position_pct, price,
+            min_qty=min_qty, step=step,
+        )
 
     def _has_stock_target(self) -> bool:
         return bool(getattr(self, "_current_symbol", None))
@@ -961,7 +985,8 @@ class FunnelRotationBacktest:
                         "date": date_str, "type": "WAIT",
                         "reason": "L0 大盘门关闭" if not snapshot["gate_open"] else "L0–L4 后无候选，空仓等待",
                     })
-            # ETF beta 腿收盘决策：个股空仓且指数趋势向上→持有/建仓；选到个股→卖 ETF 换股。
+            # ETF beta 腿收盘决策：指数趋势向上→持有/建仓；互斥模式下选到个股→卖 ETF 换股，
+            # 并存模式（etf_beta_coexist）下 ETF 与个股同存，只按可用现金封顶建仓额度。
             self._current_symbol = current_symbol
             self._manage_beta(date_str)
             # 净值曲线点

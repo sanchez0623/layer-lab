@@ -272,6 +272,7 @@ export default function BacktestPage() {
         ...fallbackConfig,
         ...defaultConfig,
         etf_beta_enabled: defaultConfig.etf_beta_enabled ?? true,
+        etf_beta_coexist: defaultConfig.etf_beta_coexist ?? false,
         max_holding_days: defaultConfig.max_holding_days ?? 22,
         holding_tp_override: defaultConfig.holding_tp_override ?? 0.03,
         etf_entry_max_deviation: defaultConfig.etf_entry_max_deviation || 0.08,
@@ -903,6 +904,9 @@ export default function BacktestPage() {
 
                 <div className="rounded-xl border bg-muted/25 p-3">
                     <SwitchRow label="指数 beta 腿（创业板 ETF）" description="个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列" checked={Boolean(config.etf_beta_enabled)} onCheckedChange={(checked) => updateConfig('etf_beta_enabled', checked)} />
+                    {config.etf_beta_enabled && (
+                      <SwitchRow className="mt-1" label="与个股并存（不互斥）" description="选到个股后不清 ETF，与个股共用现金；建仓额度按可用现金封顶。关闭则回到「个股空仓才持 ETF、选到个股清仓」" checked={Boolean(config.etf_beta_coexist)} onCheckedChange={(checked) => updateConfig('etf_beta_coexist', checked)} />
+                    )}
                     {config.etf_beta_enabled && (
                       <FormGrid className="mt-2">
                         <Field label="ETF 代码" hint="默认创业板 ETF 159915" error={configIssues.etf_symbol}>

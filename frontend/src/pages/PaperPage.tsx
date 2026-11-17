@@ -541,6 +541,7 @@ export default function PaperPage() {
   const [etfCooldownInput, setEtfCooldownInput] = useState('');
   const [savingEtf, setSavingEtf] = useState(false);
   const etfEnabled = Boolean(account?.config?.etf_beta_enabled);
+  const etfCoexist = Boolean(account?.config?.etf_beta_coexist);
   const etfSymbol = account?.config?.etf_symbol ?? 'sz.159915';
   const etfPct = account?.config?.etf_position_pct ?? 0.2;
   const etfEntryMa = account?.config?.etf_entry_ma_days ?? 60;
@@ -697,6 +698,22 @@ export default function PaperPage() {
         : 'ETF beta 腿已关闭，已有 ETF 持仓不会被自动清仓。');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'ETF beta 腿切换失败。');
+    } finally {
+      setSavingEtf(false);
+    }
+  };
+
+  const toggleEtfCoexist = async (coexist: boolean) => {
+    if (!account) return;
+    setSavingEtf(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { etf_beta_coexist: coexist });
+      setAccount(next);
+      toast.success(coexist
+        ? 'ETF 与个股并存：选到个股后不清 ETF，建仓额度按可用现金封顶，与个股共用现金。'
+        : 'ETF 与个股互斥：回到「个股空仓才持 ETF、选到个股清仓」。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'ETF 并存模式切换失败。');
     } finally {
       setSavingEtf(false);
     }
@@ -986,7 +1003,10 @@ export default function PaperPage() {
           )}
 
           {account.auto_strategy && (
-            <Panel className="mb-3" title="指数 beta 腿（创业板 ETF）" description={`个股空仓期间用 ${etfSymbol} 承接 beta：指数收盘站上 ${etfEntryMa} 日线买入，跌破 ${etfExitMa} 日线或 ETF 较成本回撤 ${number(etfStop * 100, 1)}% 卖出；一旦选出个股并建仓，ETF 卖出换股。`} action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{etfEnabled ? '空仓期持有 ETF' : '空仓期纯现金'}</span><Switch checked={etfEnabled} onCheckedChange={(checked) => void toggleEtfBeta(checked)} disabled={savingEtf} /></div>}>
+            <Panel className="mb-3" title="指数 beta 腿（创业板 ETF）" description={`个股空仓期间用 ${etfSymbol} 承接 beta：指数收盘站上 ${etfEntryMa} 日线买入，跌破 ${etfExitMa} 日线或 ETF 较成本回撤 ${number(etfStop * 100, 1)}% 卖出；${etfCoexist ? '与个股并存：选到个股不清仓，共用现金。' : '一旦选出个股并建仓，ETF 卖出换股。'}`} action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{etfEnabled ? '空仓期持有 ETF' : '空仓期纯现金'}</span><Switch checked={etfEnabled} onCheckedChange={(checked) => void toggleEtfBeta(checked)} disabled={savingEtf} /></div>}>
+              {etfEnabled && (
+                <SwitchRow className="mb-2" label="与个股并存（不互斥）" description="选到个股后不清 ETF，与个股共用现金；建仓额度按可用现金封顶。关闭则回到「个股空仓才持 ETF、选到个股清仓」" checked={etfCoexist} onCheckedChange={(checked) => void toggleEtfCoexist(checked)} />
+              )}
               <FormGrid>
                 <Field label="ETF 代码" hint={`当前 ${etfSymbol}`}><SelectField value={etfSymbolInput || etfSymbol} onValueChange={setEtfSymbolInput} disabled={savingEtf || !etfEnabled} options={[{ value: 'sz.159915', label: 'sz.159915 · 创业板ETF易方达' }, { value: 'sz.159952', label: 'sz.159952 · 创业板ETF广发' }, { value: 'sz.159964', label: 'sz.159964 · 创业板ETF平安' }]} ariaLabel="ETF 代码" /></Field>
                 <Field label="仓位（%权益）" hint={`当前 ${number(etfPct * 100, 0)}%`}><NumberInput unit="%" min={1} max={100} step={1} allowEmpty placeholder={number(etfPct * 100, 0)} value={etfPctInput} onChange={setEtfPctInput} disabled={savingEtf || !etfEnabled} /></Field>
@@ -998,7 +1018,7 @@ export default function PaperPage() {
               </FormGrid>
               <div className="mt-2 flex flex-wrap items-center gap-2">
                 <Button size="sm" className="h-8" onClick={() => void saveEtfConfig()} disabled={savingEtf || !etfEnabled}>{savingEtf ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingEtf ? '正在保存' : '保存 ETF'}</Button>
-                <p className="text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值；ETF 不占 16 笔加仓序列，与个股互斥：个股建仓后 ETF 自动卖出。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
+                <p className="text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值；ETF 不占 16 笔加仓序列{etfCoexist ? '，与个股并存、共用现金（建仓额度按可用现金封顶）' : '，与个股互斥：个股建仓后 ETF 自动卖出'}。首版仅支持创业板 ETF（结算规则 100 份/手、T+1、±20%）。</p>
               </div>
             </Panel>
           )}
