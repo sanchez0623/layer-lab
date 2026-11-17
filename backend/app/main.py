@@ -246,6 +246,8 @@ class AccountConfigRequest(BaseModel):
     # 入场保护：不追高（相对入场均线偏离上限，0 关闭）+ 清仓后冷却（交易日，0 关闭）。
     etf_entry_max_deviation: float | None = Field(default=None, ge=0, lt=1)
     etf_reentry_cooldown_days: int | None = Field(default=None, ge=0, le=60)
+    # beta 腿是否与个股并存（True=同持，额度按可用现金封顶；False=互斥换股）。
+    etf_beta_coexist: bool | None = None
     # 盈利提现：把已落袋盈利从账户现金中取出（模拟真实提现，减少可买资金与权益）。
     # mode: none=关闭 / monthly=每月提现 / per_trade=每笔提现；method: ratio=按盈利比例 / fixed=按固定金额。
     withdraw_mode: Literal["none", "monthly", "per_trade"] | None = None
@@ -487,7 +489,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.5.0",
+        version="2.6.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -998,8 +1000,9 @@ def create_app() -> FastAPI:
                 exit_ma_days=config.etf_exit_ma_days,
                 hard_stop_pct=config.etf_hard_stop_pct,
             )
-            if reason is None and (account.has_stock_position or target):
-                # 个股与 ETF 不允许同时持有：一旦选出个股，ETF 先清仓。
+            if reason is None and not config.etf_beta_coexist \
+                and (account.has_stock_position or target):
+                # 个股与 ETF 不允许同时持有（互斥模式）：一旦选出个股，ETF 先清仓。
                 reason = "选到个股换仓"
             pending = any(
                 order.symbol == bar.symbol and order.purpose == "BETA" and order.side == "SELL"
@@ -1012,7 +1015,7 @@ def create_app() -> FastAPI:
                     execution_mode="NEXT_BAR", purpose="BETA", reason=reason,
                 ), bar.timestamp)
             return
-        if account.has_stock_position or target:
+        if not config.etf_beta_coexist and (account.has_stock_position or target):
             return
         pending_buy = any(
             order.symbol == bar.symbol and order.purpose == "BETA" and order.side == "BUY"
@@ -1027,8 +1030,12 @@ def create_app() -> FastAPI:
         ):
             return
         rules = rules_for(bar.symbol)
+        equity = account.equity
+        # 并存模式：个股与 ETF 分摊同一笔现金，以可用现金（留 0.2% 费用缓冲）封顶。
+        if config.etf_beta_coexist:
+            equity = min(equity, account.available_cash / 1.002)
         quantity = target_quantity(
-            account.equity, config.etf_position_pct, bar.close,
+            equity, config.etf_position_pct, bar.close,
             min_qty=rules.min_qty, step=rules.step,
         )
         if quantity <= 0:
@@ -1096,7 +1103,11 @@ def create_app() -> FastAPI:
             save_paper(account)
             return account
         # 个股与 ETF 互斥：ETF 没清完之前不推进个股，避免同一账户同时持有两者。
-        if account.config.etf_beta_enabled and _beta_qty(account) > 0:
+        # 并存模式（etf_beta_coexist）下个股与 ETF 可同持，不挡个股推进。
+        if (
+            account.config.etf_beta_enabled and not account.config.etf_beta_coexist
+            and _beta_qty(account) > 0
+        ):
             return None
 
         daily_history: list[Bar] = []
