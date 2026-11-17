@@ -851,12 +851,12 @@ export default function BacktestPage() {
               </div>
 
               <div className="grid gap-2">
-                <SwitchRow label="启用做 T" description="可选，不占用 16 笔序列" checked={config.enable_t} onCheckedChange={(checked) => updateConfig('enable_t', checked)} />
-                <SwitchRow label="加仓按档位先松后紧" description="A3 浮亏信号逐档加严：档1（10万）最松（浮亏+缩量），档4（40万）最严（= 原始 A3）；浮盈右侧回撤不变。关闭 = 全档统一原始 A3" checked={config.add_tier_strict ?? true} onCheckedChange={(checked) => updateConfig('add_tier_strict', checked)} />
-
-                <FormGrid>
+                {/* 做 T 分组：启停 + 七个准入门槛/退出参数 */}
+                <div className="rounded-xl border bg-muted/25 p-3">
+                  <strong className="mb-2 block text-[12px] font-semibold text-foreground/80">做 T（日内做差价）</strong>
+                  <SwitchRow label="启用做 T" description="可选，不占用 16 笔序列" checked={config.enable_t} onCheckedChange={(checked) => updateConfig('enable_t', checked)} />
                   {config.enable_t && (
-                    <>
+                    <FormGrid className="mt-2">
                       <Field label="做 T 净利止盈（%）" hint="扣完成本后净赚该幅度即平 T" error={configIssues.t_target_net_spread}>
                         <NumberInput unit="%" min={0} max={100} step={0.1} value={Number(((config.t_target_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_target_net_spread', Number(value) / 100)} />
                       </Field>
@@ -878,15 +878,28 @@ export default function BacktestPage() {
                       <Field label="做 T 最小期望净利（%）" hint="振幅扣掉一次往返成本后仍需 ≥ 该值" error={configIssues.t_min_expected_net_spread}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_expected_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_expected_net_spread', Number(value) / 100)} />
                       </Field>
-                    </>
+                    </FormGrid>
                   )}
-                  <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降阈；留空=关闭">
-                    <NumberInput unit="交易日" min={1} max={250} step={1} allowEmpty value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
-                  </Field>
-                  <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值">
-                    <NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
-                  </Field>
-                </FormGrid>
+                </div>
+
+                {/* 加仓分组 */}
+                <div className="rounded-xl border bg-muted/25 p-3">
+                  <strong className="mb-2 block text-[12px] font-semibold text-foreground/80">加仓</strong>
+                  <SwitchRow label="加仓按档位先松后紧" description="A3 浮亏信号逐档加严：档1（10万）最松（浮亏+缩量），档4（40万）最严（= 原始 A3）；浮盈右侧回撤不变。关闭 = 全档统一原始 A3" checked={config.add_tier_strict ?? true} onCheckedChange={(checked) => updateConfig('add_tier_strict', checked)} />
+                </div>
+
+                {/* 止盈分组 */}
+                <div className="rounded-xl border bg-muted/25 p-3">
+                  <strong className="mb-2 block text-[12px] font-semibold text-foreground/80">止盈</strong>
+                  <FormGrid>
+                    <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降阈；留空=关闭">
+                      <NumberInput unit="交易日" min={1} max={250} step={1} allowEmpty value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
+                    </Field>
+                    <Field label="降阈后止盈（%）" hint="超期后价格轨/账户轨止盈阈值">
+                      <NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty value={config.holding_tp_override != null ? Number((config.holding_tp_override * 100).toFixed(2)) : ''} onChange={(value) => updateConfig('holding_tp_override', value === '' ? null : Number(value) / 100)} />
+                    </Field>
+                  </FormGrid>
+                </div>
 
                 <div className="rounded-xl border bg-muted/25 p-3">
                     <SwitchRow label="指数 beta 腿（创业板 ETF）" description="个股空仓时持有 ETF；选到个股后卖出换股，不占 16 笔加仓序列" checked={Boolean(config.etf_beta_enabled)} onCheckedChange={(checked) => updateConfig('etf_beta_enabled', checked)} />
