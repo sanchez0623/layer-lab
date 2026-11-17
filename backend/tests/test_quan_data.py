@@ -364,16 +364,26 @@ def test_load_minute5_does_not_fill_full_day_turnover(quan_dir):
 # ---------------------------------------------------------------------------
 
 
-def test_list_codes_filters_boards_and_delisted(quan_dir):
+def test_list_codes_filters_boards_and_keeps_delisted(quan_dir):
+    """方案二-A：退市票（delisted=True）不再被整体剔除，照常进入代码表。
+
+    旧实现按「今天的 delisted 标」continue 掉退市票，导致历史回测 as_of 早于
+    退市日时该票（当时仍正常交易）凭空消失——幸存者偏差。现在保留进代码表，
+    由 screener 用「as_of 前 N 个交易日必须有有效日线」的行情口径自然淘汰。
+    """
     store = QuanStore(quan_dir)
     gem = store.list_codes(["创业板"])
-    assert [row.code for row in gem] == ["sz.300001", "sz.300002"]
+    # 300009（退市样本，delisted=True）现在也应进入创业板代码表
+    assert [row.code for row in gem] == ["sz.300001", "sz.300002", "sz.300009"]
     assert gem[1].is_st is True
     star = store.list_codes(["科创板"])
     assert [row.code for row in star] == ["sh.688001"]
     all_rows = {row.code for row in store.list_codes()}
-    assert "sh.600000" not in all_rows and "sz.300009" not in all_rows
+    # 沪深主板 600000 仍因板块不在 SUPPORTED_BOARDS 被排除；退市票 300009 保留
+    assert "sh.600000" not in all_rows
+    assert "sz.300009" in all_rows
     assert store.get_code("300001").name == "创业一号"
+    assert store.get_code("300009").name == "退市样本"
     assert store.get_code("999999") is None
 
 
@@ -384,7 +394,7 @@ def test_coverage(quan_dir):
     assert coverage["codes"] == 5
     assert coverage["start"] == business_days(date(2026, 11, 11), 320)[0]
     assert coverage["end"] == "2026-11-11"
-    assert coverage["boards"] == {"创业板": 2, "科创板": 1}
+    assert coverage["boards"] == {"创业板": 3, "科创板": 1}
     assert coverage["missing_codes"] == 0
     assert coverage["stale_codes"] == 0
     assert coverage["turnover_available"] is False

@@ -225,8 +225,12 @@ class QuanStore:
             raw = str(item.get("code") or "").strip()
             if not _PURE_CODE.fullmatch(raw):
                 continue
-            if bool(item.get("delisted")):
-                continue
+            # 方案二-A：不再按「今天的 delisted 标」整体剔除退市票。
+            # delisted 是 stock_basic.parquet 以「当前」视角打的布尔标（无退市日期），
+            # 历史回测 as_of 早于退市日时，该票当时仍在正常交易，按未来退市结果回溯
+            # 剔除会引入幸存者偏差（系统性高估轮动收益、低估尾部风险）。
+            # 退市票照常进入代码表（保留 name/st/list_date），由下游 screener 用
+            # 「as_of 前 N 个交易日必须有有效日线」的行情兜底过滤自然淘汰。
             exchange = infer_exchange(raw)
             if not exchange or exchange == "bj":
                 continue

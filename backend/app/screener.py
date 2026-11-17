@@ -115,6 +115,13 @@ class ScreenerConfig:
     # 目的：把「大盘弱势才做多超跌」放宽为「大盘弱势 **或** 个股深度超跌」，提高资金利用率。
     l0_ret20_open: float | None = None
     l0_stock_bypass_chg20d: float | None = None
+    # 兜底过滤：候选票在 as_of 之前最近 N 个交易日内必须有有效日线（close>0）。
+    # 用于挡住「退市整理期最后几天还有日线但注定退市」的边界票，以及长期停牌/已退市
+    # （日线止于退市日、相对 as_of 已陈旧）的标的。
+    # N=5（约一个自然周）的理由：正常交易的票每个交易日都有日线（落在最近 1 天），
+    # 短期停牌 1~2 天后复牌属正常，应容忍；而退市/长期停牌票相对 as_of 的日线缺口
+    # 远大于 5 个交易日。取 5 既能容忍正常短停牌，又能稳定剔除退市与冻结票。
+    min_recent_trade_days: int = 5
 
     def __post_init__(self) -> None:
         if not self.boards:
@@ -549,6 +556,9 @@ def run_screener(
 
     # -- L0 大盘同步门 ---------------------------------------------------
     gate_boards: dict[str, dict] = {}
+    # 收集全部板块指数的交易日（A 股各板块共用同一交易日历），用于兜底过滤
+    # 「as_of 前最近 N 个交易日必须有有效日线」。index_bars 已被 _bar_window 截到 <= as_of。
+    trading_dates: set[str] = set()
     for board in boards:
         index_code = BOARD_INDEX[board]
         if index_history is not None and board in index_history:
@@ -556,6 +566,8 @@ def run_screener(
         else:
             index_all = store.load_index(index_code, max_rows=260)
         index_bars = _bar_window(index_all, as_of_text)
+        for _bar in index_bars:
+            trading_dates.add(_bar.date)
         entry: dict[str, Any] = {
             "index": index_code,
             "ret20": None,
@@ -585,6 +597,20 @@ def run_screener(
         gate_boards[board] = entry
     gate_open = any(entry["open"] for entry in gate_boards.values())
     gate = {"boards": gate_boards, "open": bool(gate_open)}
+
+    # -- 兜底过滤阈值：as_of 前最近 N 个交易日的起点（行情自然淘汰） ----------------
+    # 退市票日线止于退市日，_bar_window(as_of) 会保留其全部历史（末根=退市日），
+    # 窗口并不「不足」；因此仅靠 L1 的 21 根窗口无法剔除「已退市但历史够长」的票。
+    # 这里以板块指数交易日历为基准，取 as_of 前第 N 个交易日作为 recent_cutoff，
+    # 要求候选票末根日线日期 >= recent_cutoff 且 close>0，才能进入后续漏斗。
+    recent_cutoff: str | None = None
+    n_recent = max(int(cfg.min_recent_trade_days), 1)
+    if trading_dates:
+        ordered = sorted(trading_dates)
+        if len(ordered) >= n_recent:
+            recent_cutoff = ordered[-n_recent]
+        else:  # 交易日不足 N（数据极端稀疏）→ 退化为要求「末根=as_of 前最后一个交易日」
+            recent_cutoff = ordered[-1]
 
     funnel = {
         "universe": len(rows),
@@ -654,6 +680,14 @@ def run_screener(
         for row in target_rows:
             bars = _bar_window(history.get(row.code, []), as_of_text)
             if len(bars) < 21:
+                continue
+            # 兜底过滤（行情自然淘汰）：as_of 前最近 N 个交易日内必须有有效日线。
+            # 末根日线太陈旧（< recent_cutoff）说明该票已退市或长期停牌，不可选；
+            # 末根 close<=0 同样视为无效。此判定只看 as_of 口径，不含任何未来信息。
+            last_bar = bars[-1]
+            if last_bar.close <= 0 or (
+                recent_cutoff is not None and last_bar.date < recent_cutoff
+            ):
                 continue
             close = bars[-1].close
             base = bars[-21].close
