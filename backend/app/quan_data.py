@@ -833,16 +833,26 @@ class QuanStore:
         days = [day for day, _ in factor_by_day]
         frame = frame.with_columns(pl.col("date").str.slice(0, 10).alias("_day"))
         bars: list[Bar] = []
-        previous: float | None = None
+        # 5 分钟 bar 的 prev_close = 「前一交易日最后一根 5 分钟收盘」（昨收），与模拟盘
+        # market.py 给实时 5 分钟 bar 统一挂 quote["prev_close"] 的口径一致（架构原则 1）。
+        # 状态只跨日推进：绝不用上一根 5 分钟 bar 的收盘，否则 _t_eligible 的
+        # t_deep_drop_pct 会退化成「单根 5 分钟跌幅 ≥ 阈值」，几乎永不成立。
+        prev_state: dict[str, float | None] = {"day": None, "day_last": None, "prev_day": None}
         for row in frame.iter_rows(named=True):
-            bar = self._bar_from_row(row, symbol, "5m", previous)
-            factor = _factor_on(days, factor_by_day, str(row.get("_day") or str(row["date"])[:10]))
+            day = str(row.get("_day") or str(row["date"])[:10])
+            # _bar_from_row 第 4 参传 None：临时把 prev_close 置为 close，紧接着被
+            # _minute5_prev_close 覆盖（签名与语义完全不动）。
+            bar = self._bar_from_row(row, symbol, "5m", None)
+            factor = _factor_on(days, factor_by_day, day)
             scale = 1.0 if (unreliable or not factor_ref) else factor / factor_ref
             if scale != 1.0:
                 bar.open = price(bar.open * scale)
                 bar.high = price(bar.high * scale)
                 bar.low = price(bar.low * scale)
                 bar.close = price(bar.close * scale)
+            # 昨收必须在复权缩放之后赋值：取同一 scale 基准下前一交易日的收盘，
+            # 保证「昨收 vs 当日 bar」永远同复权基准（若改用日线 prev_close 会跨基准混算）。
+            bar.prev_close = _minute5_prev_close(day, bar.close, prev_state)
             # 回测代理：分钟 parquet 无盘口字段，做 T 准入需要 bid/ask。
             # bid/ask 用 close±0.1% 代理（真实成本由 slippage 体现）。
             # ⚠️ 换手率不再给 5 分钟 bar 填「当日日线全天值」——那是未来数据（盘中逐根
@@ -853,7 +863,6 @@ class QuanStore:
             if bar.ask is None:
                 bar.ask = price(bar.close * 1.001)
             bars.append(bar)
-            previous = bar.close
         if max_rows and len(bars) > max_rows:
             bars = bars[-int(max_rows):]
         return bars
@@ -1063,6 +1072,32 @@ def _factor_on(days: list[str], rows: list[tuple[str, float]], day: str) -> floa
     if index < 0:
         index = 0
     return float(rows[index][1] or 1.0)
+
+
+def _minute5_prev_close(day: str, bar_close: float, state: dict[str, float | None]) -> float:
+    """返回本根 5 分钟 bar 的 prev_close（前一交易日收盘价，即「昨收」），并滚动 ``state``。
+
+    ``state`` 三个键：``day`` 当前遍历到的交易日、``day_last`` 该日最后一根收盘、
+    ``prev_day`` 前一交易日最后一根收盘。状态**只跨「日」边界推进，绝不跨根**。
+
+    取「前一交易日最后一根 5 分钟 bar 的收盘」（A 股最后一根即 15:00 收盘）≈ 前一日日线收盘，
+    且与当日 bar 走同一套复权缩放（同 factor_ref），不存在跨复权基准混算。
+
+    ⚠️ 绝不能取「上一根 5 分钟 bar 的收盘」：那会让 ``strategy._t_eligible`` 的
+    ``t_deep_drop_pct`` 从「当日盘中跌幅（相对昨收）≥ 阈值」退化成「单根 5 分钟跌幅 ≥ 阈值」，
+    几乎永不成立，做 T 旁路在回测中形同虚设。
+
+    窗口内没有前驱（回测区间首日、数据首日）时降级为本根收盘价——与模拟盘
+    ``market.py`` 的 ``quote.get("prev_close") or close`` 兜底同形，此时
+    ``close / prev_close - 1 == 0``，``_t_eligible`` 的 deep_drop 分支自然为 False。
+    """
+    if day != state["day"]:
+        state["prev_day"] = state["day_last"]
+        state["day"] = day
+        state["day_last"] = None
+    state["day_last"] = bar_close
+    previous = state["prev_day"]
+    return price(previous) if previous else price(bar_close)
 
 
 def _import_polars() -> Any:
