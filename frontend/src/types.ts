@@ -86,6 +86,8 @@ export interface StrategyConfig {
   etf_entry_max_deviation?: number;
   /** 清仓后冷却：至少 N 个交易日内不再建仓；0 表示关闭 */
   etf_reentry_cooldown_days?: number;
+  /** beta 腿是否与个股并存：False=互斥（个股空仓才建、选到个股清仓）；True=同持，建仓额度按可用现金封顶 */
+  etf_beta_coexist?: boolean;
   /** 盈利提现模式：none=关闭 / monthly=每月提现 / per_trade=每笔提现 */
   withdraw_mode?: 'none' | 'monthly' | 'per_trade';
   /** 盈利提现提取方式：ratio=按盈利比例 / fixed=按固定金额 */
