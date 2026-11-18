@@ -6,7 +6,7 @@ date 只依赖构造时给定的 timestamp（timestamp 构造后从不被改写�
 
 from datetime import datetime
 
-from backend.app.domain import Bar
+from app.domain import Bar
 
 
 def _make_bar(timestamp: datetime) -> Bar:
