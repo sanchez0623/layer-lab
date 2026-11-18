@@ -317,6 +317,135 @@ def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def cashflow_adjusted_series(
+    equity_curve: list[dict[str, Any]], withdrawals: list[dict[str, Any]] | None,
+) -> tuple[list[float], list[float]]:
+    """把提现视为外部现金流，重建「时间加权」口径的调整后权益序列与日收益序列。
+
+    报告口径（``performance_metrics`` 现有字段）把提现当亏损记在净值曲线上：
+    每笔盈利提现直接扣 cash → equity 形成负台阶，于是提现日的日收益、波动、
+    maxDD、水下时长都被系统性污染（提现越多，Sharpe 越被压低）。
+
+    这里重建 TWR（Time-Weighted Return）口径：
+    - ``adjusted[t] = equity[t] + Σ(截至 t 的提现额)``：把已落袋的提现加回，
+      得到「若无提现、利润全部留在账户」的复利净值；
+    - ``returns[t] = adjusted[t] / adjusted[t-1] - 1``：把提现日不再记成亏损。
+
+    与 ``annualized_return``（名义加回口径）和 ``xirr_annualized``（资金加权口径）
+    互补：TWR 反映「策略本身的风险收益比」，XIRR 反映「这笔钱实际什么时候进出」。
+    返回 ``(adjusted_equities, daily_returns)``，长度与 equity_curve 一致（首日收益为 0）。
+    """
+    wd_by_date: dict[str, float] = {}
+    for w in withdrawals or []:
+        day = str(w.get("date") or "")[:10]
+        amount = float(w.get("amount", 0.0) or 0.0)
+        if day and amount:
+            wd_by_date[day] = wd_by_date.get(day, 0.0) + amount
+    adjusted: list[float] = []
+    cum = 0.0
+    for item in equity_curve:
+        day = str(item.get("date") or "")[:10]
+        cum += wd_by_date.get(day, 0.0)
+        adjusted.append(float(item["equity"]) + cum)
+    returns: list[float] = [0.0]
+    for previous, current in zip(adjusted, adjusted[1:]):
+        returns.append(current / previous - 1 if previous > 0 else 0.0)
+    return adjusted, returns
+
+
+def cashflow_adjusted_metrics(
+    equity_curve: list[dict[str, Any]], initial_cash: float,
+    withdrawals: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """TWR 口径的风险收益指标块：年化/波动/Sharpe/maxDD/Calmar/水下统计。
+
+    与 ``performance_metrics`` 顶层字段（提现当亏损的「账户体验」口径）并列，
+    供前端并列展示、让用户自行选择评估口径。旧报告可离线重算（用 equity_curve +
+    withdrawals 即可），不需要重跑回测。
+    """
+    adjusted, returns = cashflow_adjusted_series(equity_curve, withdrawals)
+    nav_returns = returns[1:] if returns else []
+    volatility = stdev(nav_returns) * math.sqrt(252) if len(nav_returns) >= 2 else 0.0
+    sharpe = (
+        mean(nav_returns) / stdev(nav_returns) * math.sqrt(252)
+        if len(nav_returns) >= 2 and stdev(nav_returns) > 0 else 0.0
+    )
+    # maxDD 直接在调整后权益序列上算（峰值/谷底都含加回的提现）。
+    peak = adjusted[0] if adjusted else 0.0
+    max_drawdown = 0.0
+    for equity in adjusted:
+        peak = max(peak, equity)
+        if peak > 0:
+            max_drawdown = max(max_drawdown, 1 - equity / peak)
+    # TWR 累计收益 + 日历年化：与 annualized_return 的 elapsed_days/365 口径一致，
+    # 但分母换成「首日调整后权益」（含已加回的提现），避免把提现当期末一次性收益。
+    if adjusted and adjusted[0] > 0:
+        twr_total_return = adjusted[-1] / adjusted[0] - 1
+        start = datetime.fromisoformat(str(equity_curve[0]["date"])).date()
+        end = datetime.fromisoformat(str(equity_curve[-1]["date"])).date()
+        elapsed_days = max(1, (end - start).days)
+        annualized = (
+            (adjusted[-1] / adjusted[0]) ** (365 / elapsed_days) - 1
+            if adjusted[-1] > 0 else -1.0
+        )
+    else:
+        twr_total_return = 0.0
+        annualized = 0.0
+    calmar = annualized / max_drawdown if max_drawdown > 0 else 0.0
+    # 水下统计按调整后权益重算：把提现台阶临时替换为调整后权益，复用同一函数。
+    adjusted_curve = [
+        {**item, "equity": adj} for item, adj in zip(equity_curve, adjusted)
+    ]
+    underwater = underwater_stats(adjusted_curve)
+    return {
+        "annualized_return": annualized,
+        "total_return": twr_total_return,
+        "volatility": volatility,
+        "sharpe_ratio": sharpe,
+        "max_drawdown": max_drawdown,
+        "calmar_ratio": calmar,
+        "underwater": underwater,
+    }
+
+
+def exposure_breakdown(equity_curve: list[dict[str, Any]]) -> dict[str, float]:
+    """敞口拆分：总敞口 / 个股敞口 / ETF beta 敞口 / 完全空仓占比。
+
+    总敞口（``exposure``）= mean(market_value / equity)，其中 market_value 含 ETF beta 仓
+    （``Position.total_qty = permanent_qty + t_qty + beta_qty``），因此单看总敞口会误以为
+    「个股只用了 23%」。这里把 ETF 部分单独拆出（``beta_value`` 已记录在 equity_curve），
+    并统计完全空仓（既无个股也无 ETF）交易日占比，供前端并列展示。
+    """
+    if not equity_curve:
+        return {"exposure_total": 0.0, "exposure_stock": 0.0, "exposure_beta": 0.0, "idle_ratio": 0.0}
+    total: list[float] = []
+    stock: list[float] = []
+    beta: list[float] = []
+    idle = 0
+    for item in equity_curve:
+        equity = float(item["equity"]) or 0.0
+        if equity <= 0:
+            total.append(0.0)
+            stock.append(0.0)
+            beta.append(0.0)
+            idle += 1
+            continue
+        market_value = float(item.get("market_value") or 0.0)
+        beta_value = float(item.get("beta_value") or 0.0)
+        total.append(market_value / equity)
+        stock.append(max(0.0, market_value - beta_value) / equity)
+        beta.append(beta_value / equity)
+        if market_value <= 0:
+            idle += 1
+    n = len(equity_curve)
+    return {
+        "exposure_total": mean(total),
+        "exposure_stock": mean(stock),
+        "exposure_beta": mean(beta),
+        "idle_ratio": idle / n,
+    }
+
+
 def performance_metrics(
     equity_curve: list[dict[str, Any]], initial_cash: float,
     rounds: list[dict[str, Any]], trades: list[dict[str, Any]],
@@ -380,6 +509,13 @@ def performance_metrics(
             xirr_flows.append((str(withdrawal.get("date") or ""), amount))
     xirr_flows.append((str(equity_curve[-1]["date"]), adjusted_final))
     xirr = xirr_annualized(xirr_flows)
+    # 现金流调整（TWR）口径：把提现视为外部现金流而非亏损，重建日收益/波动/Sharpe/
+    # maxDD/Calmar/水下。与顶层字段（账户体验口径）并列输出，供前端并列展示。
+    # 旧报告可离线重算（只需 equity_curve + withdrawals），不需重跑回测。
+    cashflow_adjusted = cashflow_adjusted_metrics(equity_curve, initial_cash, withdrawals)
+    # 敞口拆分：总敞口含 ETF beta 仓；个股/ETF 分项 + 完全空仓占比，避免误读
+    # 「exposure 23% = 个股只用 23%」。
+    exposure_parts = exposure_breakdown(equity_curve)
     # 净值曲线水下时长：最长连续低于此前峰值的交易日区间。
     underwater = underwater_stats(equity_curve)
     # 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后重算，看收益是否靠少数极端项撑起。
@@ -404,6 +540,10 @@ def performance_metrics(
         "total_withdrawn": money(total_withdrawn), "withdrawn_count": withdrawn_count,
         "profit_withdrawn": money(profit_withdrawn),
         "max_invested": money(max_invested), "exposure": exposure,
+        "exposure_total": exposure_parts["exposure_total"],
+        "exposure_stock": exposure_parts["exposure_stock"],
+        "exposure_beta": exposure_parts["exposure_beta"],
+        "idle_ratio": exposure_parts["idle_ratio"],
         "max_float_loss": money(max_float_loss), "buy_hold_return": buy_hold_return,
         "buy_hold_benchmarks": buy_hold_benchmarks or [],
         "monthly": monthly_list,
@@ -421,6 +561,11 @@ def performance_metrics(
         },
         # 净值曲线水下时长：最长连续水下区间 + 水下交易日占比 + 当前是否仍处水下。
         "underwater": underwater,
+        # 现金流调整（TWR）口径指标块：把提现当外部现金流而非亏损，重建
+        # annualized/total/volatility/sharpe/max_drawdown/calmar/underwater。
+        # 与顶层同名字段并列输出（顶层是「提现当亏损」的账户体验口径），
+        # 让用户自选评估口径；旧报告可用 equity_curve + withdrawals 离线重算。
+        "cashflow_adjusted": cashflow_adjusted,
     }
 
 

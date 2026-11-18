@@ -230,6 +230,11 @@ class AccountConfigRequest(BaseModel):
     force_exit_holding_days: int | None = Field(default=None, ge=0, le=250)
     # 加仓按档位先松后紧（A3 浮亏信号逐档加严）；false = 全档统一原始 A3。
     add_tier_strict: bool | None = None
+    # 16 笔金额的规模口径：fixed=绝对金额（默认，向后兼容）/
+    # equity=按「(当前权益+已提现)/初始本金」等比缩放，避免账户增长后相对仓位被稀释。
+    # 配套 scale_floor（默认 0.5）为放大倍数下限，防止权益大幅回撤时压出尘粒单。
+    installment_scale_mode: str | None = Field(default=None, pattern=r"^(fixed|equity)$")
+    installment_scale_floor: float | None = Field(default=None, gt=0, le=1)
     # 深跌幅当日做T：日内跌幅（相对前收）≥ 该值绕过底仓笔数门槛；传 0 = 关闭
     # （__post_init__ 归一化为 None），开启时必须 >= 0.10（20cm 板极端恐慌线）。
     t_deep_drop_pct: float | None = Field(default=None, ge=0, le=1)
@@ -537,7 +542,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.9.1",
+        version="2.10.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1342,6 +1347,8 @@ def create_app() -> FastAPI:
             "config": config.to_dict(),
             "fees": fees.to_dict(),
             "installment_amounts": config.installment_amounts,
+            "installment_scale_mode": config.installment_scale_mode,
+            "installment_scale_floor": config.installment_scale_floor,
             "initial_cash": 4_000_000.0,
             "rules": STRATEGY_RULES,
         }

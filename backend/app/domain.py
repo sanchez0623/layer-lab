@@ -116,6 +116,16 @@ class StrategyConfig:
         default_factory=lambda: [100000.0] * 4 + [200000.0] * 4
         + [300000.0] * 4 + [400000.0] * 4
     )
+    # 16 笔金额的规模口径：
+    #   fixed（默认，向后兼容）——绝对金额，不随账户权益变化。
+    #     问题：账户盈利/提现后相对敞口被稀释（4M 阶梯在权益 6.5M 时只覆盖 ~62%）。
+    #   equity——按「(当前权益 + 已提现)/初始本金」等比缩放（回撤时同步缩小，
+    #     盈利时放大，避免相对仓位被账户增长自动稀释）。回测复盘显示该口径
+    #     能同时提升平均资金敞口与 TWR 年化（代价：maxDD 同步放大，见研究报告）。
+    # 校验：__post_init__ 只允许 fixed/equity；scale_floor 为放大倍数下限
+    #   （默认 0.5 = 权益跌到初始本金一半以下也至少按半仓规模下注，防止尘粒单）。
+    installment_scale_mode: str = "fixed"
+    installment_scale_floor: float = 0.5
     enable_t: bool = True
     # 已废弃：做T金额现跟随当前加仓档 installment_amounts[sequence_index]
     # （满仓后取最大档），不再使用本字段。保留字段仅为兼容老账户已快照的 config，
@@ -236,6 +246,12 @@ class StrategyConfig:
             raise ValueError("installment_amounts 必须恰好包含16笔")
         if any(float(x) <= 0 for x in self.installment_amounts):
             raise ValueError("每笔金额必须为正数")
+        # 16 笔规模口径：fixed（绝对金额）或 equity（按账户权益等比缩放）。
+        if self.installment_scale_mode not in ("fixed", "equity"):
+            raise ValueError("installment_scale_mode 必须是 fixed/equity 之一")
+        if not 0 < float(self.installment_scale_floor) <= 1:
+            raise ValueError("installment_scale_floor 必须在 (0,1] 内（放大倍数下限）")
+        self.installment_scale_floor = float(self.installment_scale_floor)
         if not 0 < self.volume_participation <= 1:
             raise ValueError("volume_participation 必须在(0,1]内")
         if self.divergence_ticks < 1:
