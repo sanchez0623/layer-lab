@@ -335,12 +335,17 @@ def _beta_span_outcome(
         span["beta_buy_count"] = len(buys)
         span["beta_sell_count"] = len(sells)
     else:
-        # 旧报告没有逐笔 fills：优雅降级。整腿只有一段持仓时把汇总 pnl 挂上；
-        # 多段无法拆分则留空（前端显示「—」）。收益率无投入分母，一并留空。
-        overall = float((beta or {}).get("pnl")) if (beta or {}).get("pnl") is not None else None
+        # 旧报告没有逐笔 fills：优雅降级。整腿盈亏只在「beta 腿实际清仓的那一段」
+        # （含 beta.last_exit_date 的区间）挂上——多段持仓时把汇总 pnl 复制到每一段
+        # 会让人误以为每段都赚了那么多。无 last_exit_date（ beta 仍持仓 / 数据缺失）
+        # 时一律留空。收益率无投入分母，一并留空。
         span["beta_invested"] = None
-        span["pnl"] = overall
+        span["pnl"] = None
         span["return_rate"] = None
+        last_exit = str((beta or {}).get("last_exit_date") or "")
+        overall = (beta or {}).get("pnl")
+        if last_exit and overall is not None and start <= last_exit <= end:
+            span["pnl"] = float(overall)
 
 
 def _round_digest(item: dict[str, Any]) -> dict[str, Any]:

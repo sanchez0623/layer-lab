@@ -433,7 +433,8 @@ def _report_with_beta() -> dict:
         "data_info": {
             "mode": "funnel_rotation", "screening_count": len(trail),
             "rotation_trail": trail,
-            "beta": {"enabled": True, "symbol": "sz.159915", "pnl": 888.0},
+            "beta": {"enabled": True, "symbol": "sz.159915", "pnl": 888.0,
+                     "last_exit_date": "2025-01-06"},
         },
     }
 
@@ -531,7 +532,7 @@ def test_beta_span_carries_holding_window_days_and_pnl(api):
 
 
 def test_beta_span_without_fills_falls_back_to_summary_pnl(api):
-    """旧报告无逐笔 fills：优雅降级，把整个 beta 腿汇总 pnl 挂到单区间行。"""
+    """旧报告无逐笔 fills：优雅降级，整腿汇总 pnl 只挂在 beta 实际清仓的那一段。"""
     application, client = api
     application.state.storage.save_backtest(_report_with_beta())
 
@@ -540,8 +541,34 @@ def test_beta_span_without_fills_falls_back_to_summary_pnl(api):
     ).json()
     spans = [item for item in body["items"] if item["kind"] == "BETA_SPAN"]
     assert len(spans) == 1
+    # 单区间且含 last_exit_date（01-06）→ 汇总 pnl 挂上。
     assert spans[0]["pnl"] == pytest.approx(888.0)
     assert spans[0]["return_rate"] is None  # 无投入分母，收益率留空
+
+
+def test_beta_span_without_fills_does_not_duplicate_pnl_across_spans(api):
+    """回归：旧报告多段持仓、无 fills 时，整腿 pnl 不得复制到每一段。
+
+    只有包含 last_exit_date 的那一段（beta 实际清仓处）才挂汇总 pnl，
+    其余段留空——否则会让人误以为每段都赚了整腿那么多。
+    """
+    trail = [
+        _beta("2025-01-03"),
+        _beta("2025-01-06"),
+        _waiting("2025-01-07", gate_open=False),
+        _beta("2025-02-03"),
+        _beta("2025-02-04"),
+    ]
+    beta = {"enabled": True, "symbol": "sz.159915", "pnl": 888.0,
+            "last_exit_date": "2025-02-04"}
+    collapsed = collapse_waiting_spans(enrich_trail(trail, [], TRADING_DATES + [
+        "2025-02-03", "2025-02-04"]), beta=beta)
+    spans = [item for item in collapsed if item["kind"] == "BETA_SPAN"]
+    assert len(spans) == 2
+    pnls = [span["pnl"] for span in spans]
+    # 第一段（01-03→01-06）不含 last_exit_date → 留空；第二段（含 02-04）→ 挂 pnl。
+    assert pnls[0] is None
+    assert pnls[1] == pytest.approx(888.0)
 
 
 def test_beta_span_without_beta_info_leaves_pnl_none(api):
