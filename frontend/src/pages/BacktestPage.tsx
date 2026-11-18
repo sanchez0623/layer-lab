@@ -62,6 +62,10 @@ const fallbackConfig: StrategyConfig = {
   t_min_base_entries: 4,
   // 指数 beta 腿默认开启（需求：空仓期默认用创业板 ETF 承接 beta，可手动关闭）。
   etf_beta_enabled: true,
+  // beta 腿与个股「并存」（不互斥）：必须登记在 fallbackConfig 里，否则 mergeKnown
+  // 只拷贝 base 已有的键，「带入回测」时报告快照里的 etf_beta_coexist 会被静默丢弃，
+  // 开关永远回退到默认 false（bug：ETF 与个股并存配置带入不生效）。
+  etf_beta_coexist: false,
   etf_symbol: 'sz.159915',
   etf_position_pct: 0.2,
   etf_entry_ma_days: 60,
