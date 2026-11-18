@@ -318,6 +318,53 @@ def test_funnel_switches_symbol_after_take_profit(tmp_path):
         assert {"round", "symbol", "select_date", "gate_open", "status"} <= set(item)
 
 
+def test_funnel_closed_round_carries_close_diagnostic(tmp_path):
+    """已结束轮次带「止盈执行诊断」：信号价 vs 成交价 vs 执行落差。
+
+    解释「价格轨收益达到 15%，实际只落袋 ~8.8%」——15% 是决策 K 线收盘价的浮盈，
+    成交走下一根 bar 开盘（含滑点）再扣双边费用。诊断把三个口径都记下来。
+    """
+    store = _build_store(tmp_path / "u.db")
+    report = _run(store)
+
+    closed = [item for item in report["rounds"] if item["status"] == "CLOSED"]
+    assert closed, "fixture 应至少跑出一个已结束轮次"
+    for item in closed:
+        diagnostic = item["close_diagnostic"]
+        assert isinstance(diagnostic, dict)
+        # 信号侧：触发类型 + 信号价 + 价格轨收益。
+        assert diagnostic["trigger"] in {
+            "价格轨止盈", "账户轨止盈", "量价背离", "VWAP回撤", "超期强平", "事件熔断",
+        }
+        assert diagnostic["signal_price"] > 0
+        assert "signal_time" in diagnostic and "price_return" in diagnostic
+        # 成交侧：实际成交价 + 执行落差。
+        assert diagnostic["fill_price"] > 0
+        assert "fill_time" in diagnostic
+        assert "execution_gap" in diagnostic
+        # 轮次侧：账户收益 + 总落差（= 轮次收益 - 信号收益）。
+        assert diagnostic["round_return"] == pytest.approx(
+            item["pnl"] / item["max_invested"]
+        )
+        assert diagnostic["return_gap"] == pytest.approx(
+            diagnostic["round_return"] - diagnostic["price_return"]
+        )
+        # 执行落差与总落差都应为负（成交价 ≤ 信号价、落袋 ≤ 信号浮盈），这是
+        # 「信号 +15%、落袋更少」的直接量化；不硬断言符号以免 fixture 波动误伤，
+        # 但必须存在且为有限数。
+        assert diagnostic["execution_gap"] == diagnostic["execution_gap"]  # 非 NaN
+
+
+def test_funnel_open_round_has_no_close_diagnostic(tmp_path):
+    """未结束轮次（OPEN）不写 close_diagnostic：只在轮次闭合时产生。"""
+    store = _build_store(tmp_path / "u.db")
+    report = _run(store)
+
+    for item in report["rounds"]:
+        if item["status"] != "CLOSED":
+            assert "close_diagnostic" not in item
+
+
 def test_funnel_no_same_day_reentry_after_close(tmp_path):
     """清仓当日不得再建仓：轮动语义是「清仓→次日收盘重筛」，同日追单会让持仓失去管理。
 

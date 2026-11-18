@@ -256,6 +256,8 @@ class LayeredTStrategy(Strategy):
         # 按 (当日日期, 指数序列长度) 记一笔，避免每根 5 分钟 bar 重扫 ~4000 根指数 bar。
         self._index_gate_memo_key: tuple[str, int] | None = None
         self._index_gate_memo_value: bool = False
+        # 清仓信号诊断（见 _set_close_signal）：本轮首次判定清仓的 K 线快照。
+        self._close_signal: dict | None = None
 
     def state_dict(self) -> dict:
         dump: dict = {"state_version": STATE_VERSION}
@@ -289,6 +291,7 @@ class LayeredTStrategy(Strategy):
         self.armed = False
         self.liquidating = False
         self.close_reason = ""
+        self._close_signal = None
         self.divergence_count = 0
         self.vwap_count = 0
         self.account_return_peak = 0.0
@@ -306,6 +309,26 @@ class LayeredTStrategy(Strategy):
         self.event_halt = True
         self.liquidating = True
         self.close_reason = reason
+
+    def _set_close_signal(self, trigger: str, bar: Bar, account: BrokerAccount) -> None:
+        """记录清仓信号诊断：本轮首次判定清仓那一根 K 线的收盘价与触发类型。
+
+        信号价 = 决策 K 线的 close；成交价 = 下一根 bar 开盘（含滑点）。两者之差
+        就是「信号 +15%、落袋 +8.8%」里执行落差的来源，报告据此做止盈执行诊断。
+        仅首次触发记录（``_close_signal`` 已存在则不覆盖），保证拿到的是最初信号价。
+        不进 ``STRATEGY_STATE_FIELDS``：这是逐轮诊断信息，轮次闭合时由 backtest 读走
+        写进 round，无需跨重启持久化。
+        """
+        if self._close_signal is not None:
+            return
+        price_return, _ = self._returns(account, bar.symbol, bar.close, self.round_t_start)
+        timestamp = bar.timestamp
+        self._close_signal = {
+            "trigger": trigger,
+            "signal_price": bar.close,
+            "signal_time": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
+            "price_return": price_return,
+        }
 
     def on_fill(self, fill: Fill, session_index: int) -> None:
         if fill.side == "BUY" and fill.purpose == "PERMANENT":
@@ -416,6 +439,7 @@ class LayeredTStrategy(Strategy):
         effective_tp, tp_overridden = self._effective_take_profit(holding_days)
         if self.event_halt:
             self.close_reason = self.close_reason or "事件熔断"
+            self._set_close_signal("事件熔断", bar, account)
             return self._liquidation_requests(position, mode)
         if price_return >= effective_tp:
             self.liquidating = True
@@ -423,6 +447,7 @@ class LayeredTStrategy(Strategy):
                 f"超期持仓{holding_days}日_止盈降至{effective_tp * 100:.0f}%"
                 if tp_overridden else f"价格轨收益达到{effective_tp * 100:.0f}%"
             )
+            self._set_close_signal("价格轨止盈", bar, account)
             return self._liquidation_requests(position, mode)
         if account_return >= effective_tp:
             self.liquidating = True
@@ -430,6 +455,7 @@ class LayeredTStrategy(Strategy):
                 f"超期持仓{holding_days}日_账户轨止盈降至{effective_tp * 100:.0f}%"
                 if tp_overridden else f"账户轨收益达到{effective_tp * 100:.0f}%"
             )
+            self._set_close_signal("账户轨止盈", bar, account)
             return self._liquidation_requests(position, mode)
         # 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
         # 放在止盈检查之后（价/账户轨止盈优先，触发即走上面），但先于 Armed 背离
@@ -438,6 +464,7 @@ class LayeredTStrategy(Strategy):
                 and holding_days >= int(self.config.force_exit_holding_days):
             self.liquidating = True
             self.close_reason = f"最大持仓{int(self.config.force_exit_holding_days)}日强平"
+            self._set_close_signal("超期强平", bar, account)
             return self._liquidation_requests(position, mode)
         if self.liquidating:
             return self._liquidation_requests(position, mode)
@@ -487,9 +514,11 @@ class LayeredTStrategy(Strategy):
         if self.divergence_count >= self.config.divergence_ticks:
             self.liquidating = True
             self.close_reason = "Armed量价背离三选二_3根5分钟K线"
+            self._set_close_signal("量价背离", bar, account)
         elif self.vwap_count >= self.config.divergence_ticks:
             self.liquidating = True
             self.close_reason = "VWAP账户回撤4%_3根5分钟K线"
+            self._set_close_signal("VWAP回撤", bar, account)
         return self._liquidation_requests(position, mode) if self.liquidating else []
 
     def on_daily(

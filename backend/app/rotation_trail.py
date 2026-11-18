@@ -139,6 +139,7 @@ def enrich_trail(
             entry["max_invested"] = round_row.get("max_invested")
             entry["t_net_profit"] = round_row.get("t_net_profit")
             entry["return_rate"] = _round_return_rate(round_row)
+            _apply_close_diagnostic(entry, round_row)
         else:
             entry.setdefault("close_reason", None)
             entry["return_rate"] = None
@@ -174,7 +175,10 @@ def _beta_signature(item: dict[str, Any]) -> tuple[str | None, bool]:
     return (str(item.get("beta_symbol") or ""), bool(item.get("gate_open")))
 
 
-def collapse_waiting_spans(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def collapse_waiting_spans(
+    items: list[dict[str, Any]] | None,
+    beta: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """把连续同因的空仓日合并成区间行（轮次行原样保留，不跨轮次合并）。
 
     区间行字段：``kind=WAITING_SPAN`` / ``start_date`` / ``end_date`` / ``days`` /
@@ -183,7 +187,9 @@ def collapse_waiting_spans(items: list[dict[str, Any]] | None) -> list[dict[str,
 
     ETF beta 持仓项（``kind=BETA``）会打断空仓区间（像 ROUND 那样），并把连续
     持仓日合并成 ``kind=BETA_SPAN`` 区间（``days`` / ``start_date`` / ``end_date`` /
-    ``beta_symbol`` / ``funnel`` / ``gate``），避免逐日刷屏。
+    ``beta_symbol`` / ``funnel`` / ``gate``），避免逐日刷屏。``beta``（报告 data_info
+    里的 beta 汇总，含逐笔 ``fills``）传入时给 BETA_SPAN 补「净盈亏 / 本轮收益率 /
+    区间投入」，补齐用户看到的四个空列（持仓区间 / 持有交易日 / 本轮收益率 / 净盈亏）。
     """
     result: list[dict[str, Any]] = []
     current_waiting: dict[str, Any] | None = None
@@ -198,6 +204,7 @@ def collapse_waiting_spans(items: list[dict[str, Any]] | None) -> list[dict[str,
     def flush_beta() -> None:
         nonlocal current_beta
         if current_beta is not None:
+            _beta_span_outcome(current_beta, beta)
             result.append(current_beta)
             current_beta = None
 
@@ -273,6 +280,67 @@ def collapse_waiting_spans(items: list[dict[str, Any]] | None) -> list[dict[str,
     flush_waiting()
     flush_beta()
     return result
+
+
+def _apply_close_diagnostic(entry: dict[str, Any], round_row: dict[str, Any]) -> None:
+    """把轮次的 ``close_diagnostic``（止盈执行诊断）摊平成 ``close_*`` 字段挂到轨迹行。
+
+    后端在轮次闭合时把诊断存成嵌套 dict（``round.close_diagnostic``），前端要的是
+    扁平字段（``close_signal_price`` 等）。这里做一层读时映射，旧报告无诊断时全部
+    留空、优雅降级。``close_round_return`` 优先用 ``_round_return_rate``（带峰值投入
+    缺失时回退期初权益的兜底），与轮次行 ``return_rate`` 同口径。
+    """
+    diagnostic = round_row.get("close_diagnostic")
+    if not isinstance(diagnostic, dict):
+        return
+    entry["close_signal_trigger"] = diagnostic.get("trigger")
+    entry["close_signal_price"] = diagnostic.get("signal_price")
+    entry["close_signal_time"] = diagnostic.get("signal_time")
+    entry["close_signal_return"] = diagnostic.get("price_return")
+    entry["close_fill_price"] = diagnostic.get("fill_price")
+    entry["close_fill_time"] = diagnostic.get("fill_time")
+    entry["close_execution_gap"] = diagnostic.get("execution_gap")
+    entry["close_round_return"] = _round_return_rate(round_row) or diagnostic.get("round_return")
+    entry["close_return_gap"] = diagnostic.get("return_gap")
+
+
+def _beta_span_outcome(
+    span: dict[str, Any], beta: dict[str, Any] | None,
+) -> None:
+    """给合并后的 ETF beta 持仓区间行（``kind=BETA_SPAN``）补上成果字段。
+
+    用户看到的空列：持仓区间 / 持有交易日 / 本轮收益率 / 净盈亏。前三者区间合并时
+    已有（``start_date``/``end_date``/``days``/``holding_days``），这里补「净盈亏」
+    与「本轮收益率」：用落在区间内的 beta 卖出成交汇总已实现盈亏，再除以区间内
+    beta 买入成本（含费）得资金效率口径收益率——与轮次行 ``pnl / max_invested``
+    的资金效率口径一致。
+
+    ``beta.fills`` 缺失（旧报告 / beta 未启用）时优雅降级：盈亏回退整个 beta 腿的
+    汇总 pnl（仅单区间时准确），收益率留空。
+    """
+    start = str(span.get("start_date") or "")
+    end = str(span.get("end_date") or span.get("start_date") or "")
+    fills = [
+        item for item in ((beta or {}).get("fills") or [])
+        if start <= str(item.get("date") or "") <= end
+    ]
+    buys = [item for item in fills if item.get("side") == "BUY"]
+    sells = [item for item in fills if item.get("side") == "SELL"]
+    if fills:
+        invested = sum(float(item.get("price", 0.0)) * int(item.get("quantity", 0)) for item in buys)
+        pnl = sum(float(item.get("realized_pnl", 0.0) or 0.0) for item in sells)
+        span["beta_invested"] = round(invested, 2)
+        span["pnl"] = round(pnl, 2)
+        span["return_rate"] = (pnl / invested) if invested > 0 else None
+        span["beta_buy_count"] = len(buys)
+        span["beta_sell_count"] = len(sells)
+    else:
+        # 旧报告没有逐笔 fills：优雅降级。整腿只有一段持仓时把汇总 pnl 挂上；
+        # 多段无法拆分则留空（前端显示「—」）。收益率无投入分母，一并留空。
+        overall = float((beta or {}).get("pnl")) if (beta or {}).get("pnl") is not None else None
+        span["beta_invested"] = None
+        span["pnl"] = overall
+        span["return_rate"] = None
 
 
 def _round_digest(item: dict[str, Any]) -> dict[str, Any]:

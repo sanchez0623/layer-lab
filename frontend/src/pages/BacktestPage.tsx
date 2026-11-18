@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, Square, Trash2, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -1104,11 +1104,11 @@ export default function BacktestPage() {
 
                 <MetricGrid columns={6}>
                   <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={`期末权益 ${money(metrics.final_equity)}`} />
-                  <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={metrics.buy_hold_benchmarks?.length ? <span className="whitespace-normal break-words">买入持有: {metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}</span> : `买入持有 ${signedPercent(metrics.buy_hold_return)}`} />
-                  <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}`} />
+                  <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}{metrics.xirr_annualized != null ? ` · XIRR ${signedPercent(metrics.xirr_annualized)}` : ''}</span>} />
+                  <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}${metrics.underwater?.longest_underwater_days ? ` · 最长水下 ${integer(metrics.underwater.longest_underwater_days)} 天` : ''}`} />
                   <Metric label="夏普比率" value={number(metrics.sharpe_ratio)} sub={`波动率 ${percent(metrics.volatility)}`} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
-                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}${metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}`} />
+                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}${metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}${metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}`} />
                 </MetricGrid>
 
                 <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
@@ -1155,6 +1155,36 @@ export default function BacktestPage() {
                     <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-muted/60 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground"><Gauge className="mt-0.5 size-3 shrink-0" /><span>风险表现需结合数据粒度、成交假设与样本区间共同判断。</span></div>
                   </Panel>
                 </div>
+
+                {(() => {
+                  const rb = metrics.robustness;
+                  const u = metrics.underwater;
+                  if (rb == null && u == null) return null;
+                  const tiles: { label: string; value: string; note?: string; tone?: string }[] = [];
+                  if (rb != null) {
+                    tiles.push({ label: '稳健版净利润', value: signedMoney(rb.net_profit), note: `剔最佳月 ${signedMoney(rb.excluded_best_month_pnl)} + 最大3笔 ${signedMoney(rb.excluded_top3_win_pnl)}`, tone: rb.net_profit >= 0 ? 'text-destructive' : 'text-success' });
+                    tiles.push({ label: '稳健版总收益', value: signedPercent(rb.total_return), note: `vs 完整 ${signedPercent(metrics.total_return)}` });
+                    tiles.push({ label: '稳健版年化', value: signedPercent(rb.annualized_return), note: `vs 完整 ${signedPercent(metrics.annualized_return)}` });
+                  }
+                  if (u != null) {
+                    tiles.push({ label: '最长水下时长', value: `${integer(u.longest_underwater_days)} 交易日`, note: `${shortDate(u.longest_underwater_start)} ~ ${shortDate(u.longest_underwater_end)} · ${integer(u.longest_underwater_calendar_days)} 自然日` });
+                    tiles.push({ label: '水下占比', value: percent(u.underwater_ratio), note: `${integer(u.underwater_days)} / ${integer(report.equity_curve.length)} 交易日` });
+                    tiles.push({ label: '当前状态', value: u.currently_underwater ? `水下第 ${integer(u.current_drawdown_days)} 日` : '处于峰值上方', tone: u.currently_underwater ? 'text-success' : 'text-foreground' });
+                  }
+                  return (
+                    <Panel className="mb-3" title="稳健性与水下时长" description="剔除极端项后的收益成色 · 净值曲线在水下的时长分布" action={<ShieldCheck className="size-4" />}>
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {tiles.map((tile) => (
+                          <div key={tile.label} className="rounded-lg border bg-card px-2.5 py-2">
+                            <small className="block text-[10px] text-muted-foreground">{tile.label}</small>
+                            <strong className={cn('block font-mono text-[13px]', tile.tone)}>{tile.value}</strong>
+                            <span className="mt-0.5 block text-[10px] leading-4 text-muted-foreground">{tile.note}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </Panel>
+                  );
+                })()}
 
                 {monthly.length > 0 && (
                   <Panel className="mb-3" title="每月盈亏" description={`按自然月汇总账户权益变动（含未实现盈亏与手续费）· 共 ${monthly.length} 个月 · 红涨绿跌`} action={<CalendarDays className="size-4" />}>
@@ -1268,7 +1298,8 @@ export default function BacktestPage() {
                         {rotationTrail.map((item, index) => {
                           const isBeta = item.kind === 'BETA';
                           const isBetaSpan = item.kind === 'BETA_SPAN';
-                          const isSpan = item.kind === 'WAITING_SPAN' || isBetaSpan;
+                          const isWaitingSpan = item.kind === 'WAITING_SPAN';
+                          const isSpan = isWaitingSpan || isBetaSpan;
                           const trailKey = isSpan
                             ? `span-${item.start_date}-${index}`
                             : item.round || `row-${item.select_date}-${index}`;
@@ -1281,15 +1312,15 @@ export default function BacktestPage() {
                               <TableRow className={isSpan ? 'bg-muted/25' : ''}>
                                 <TableCell><button className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>{expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</button></TableCell>
                                 <TableCell>{isBeta || isBetaSpan ? <Badge tone="indigo">ETF持仓</Badge> : isSpan ? <Badge tone="amber">空仓</Badge> : item.round ? <strong className="font-mono text-[11px] text-primary">{item.round}</strong> : <span className="text-[11px] text-muted-foreground">待建仓</span>}</TableCell>
-                                <TableCell>{isSpan ? <span className="font-mono text-[11px]">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}<small className="ml-1 text-muted-foreground">（{integer(item.days)} 个交易日）</small></span> : shortDate(item.select_date)}</TableCell>
+                                <TableCell>{isSpan ? <span className="font-mono text-[11px]">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}{isWaitingSpan && item.days != null && <small className="ml-1 text-muted-foreground">（{integer(item.days)} 个交易日）</small>}</span> : shortDate(item.select_date)}</TableCell>
                                 <TableCell>{isBeta || isBetaSpan ? <div><span className="text-muted-foreground">ETF持仓覆盖</span><small className="block text-[10px] text-muted-foreground">{item.beta_symbol ? displaySymbol(item.beta_symbol) : 'beta 腿'}</small></div> : isSpan ? <div><span className="text-muted-foreground">空仓等待</span><small className="block text-[10px] text-muted-foreground">{trailWaitReason(item)}</small></div> : item.symbol ? <div><strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong><small className="ml-1 text-[11px] text-muted-foreground">{item.name || '—'}</small></div> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
                                 <TableCell>{isSpan ? '—' : item.board || '—'}</TableCell>
                                 <TableCell className={cn('text-right font-mono text-[12px]', item.chg20d_at_select != null && (item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</TableCell>
                                 <TableCell><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></TableCell>
                                 <TableCell>{isSpan ? '—' : item.entry_date || item.exit_date ? <span className="font-mono text-[11px]">{item.entry_date ? shortDate(item.entry_date) : '—'} → {item.exit_date ? shortDate(item.exit_date) : '持仓中'}</span> : '—'}</TableCell>
-                                <TableCell className="text-right font-mono text-[12px]">{isSpan ? '—' : item.holding_days ?? '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.return_rate != null ? signedPercent(item.return_rate) : '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
+                                <TableCell className="text-right font-mono text-[12px]">{isWaitingSpan ? '—' : item.holding_days ?? '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{isWaitingSpan ? '—' : item.return_rate != null ? signedPercent(item.return_rate) : '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{isWaitingSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
                                 <TableCell>{isBeta || isBetaSpan ? <div><Badge tone="indigo">ETF持仓</Badge><small className="ml-1 text-[10px] text-muted-foreground">个股空仓期间覆盖</small></div> : isSpan ? <span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span> : <div><Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>{item.close_reason && <small className="ml-1 text-[10px] text-muted-foreground">{item.close_reason}</small>}</div>}</TableCell>
                               </TableRow>
                               {expanded && (
@@ -1329,6 +1360,21 @@ export default function BacktestPage() {
                                           {item.entry_delay_days != null && <span>建仓延迟 <b className="font-mono text-foreground">{integer(item.entry_delay_days)}</b> 天</span>}
                                           {item.max_invested != null && <span>峰值投入 <b className="font-mono text-foreground">{money(item.max_invested)}</b></span>}
                                           {item.t_net_profit != null && <span>做 T 净贡献 <b className="font-mono text-foreground">{signedMoney(item.t_net_profit)}</b></span>}
+                                        </div>
+                                      )}
+                                      {!isSpan && item.close_signal_price != null && (
+                                        <div className="mt-1.5 rounded-md border bg-card px-2.5 py-2 text-[10px]">
+                                          <small className="block text-muted-foreground">止盈执行诊断（信号 → 成交）</small>
+                                          <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                            {item.close_signal_trigger != null && <span><span className="text-muted-foreground">触发 </span><b className="font-mono text-foreground">{item.close_signal_trigger}</b></span>}
+                                            <span><span className="text-muted-foreground">信号价 </span><b className="font-mono text-foreground">{money(item.close_signal_price)}</b>{item.close_signal_return != null && <b className="ml-1 font-mono text-foreground">{signedPercent(item.close_signal_return)}</b>}</span>
+                                            {item.close_signal_time != null && <span><span className="text-muted-foreground">信号时间 </span><b className="font-mono text-foreground">{shortDate(item.close_signal_time)}</b></span>}
+                                            {item.close_fill_price != null && <span><span className="text-muted-foreground">成交价 </span><b className="font-mono text-foreground">{money(item.close_fill_price)}</b></span>}
+                                            {item.close_fill_time != null && <span><span className="text-muted-foreground">成交时间 </span><b className="font-mono text-foreground">{shortDate(item.close_fill_time)}</b></span>}
+                                            {item.close_execution_gap != null && <span><span className="text-muted-foreground">执行落差 </span><b className={cn('font-mono', item.close_execution_gap < 0 ? 'text-success' : 'text-muted-foreground')}>{signedPercent(item.close_execution_gap)}</b></span>}
+                                            {item.close_round_return != null && <span><span className="text-muted-foreground">轮次收益 </span><b className="font-mono text-foreground">{signedPercent(item.close_round_return)}</b></span>}
+                                            {item.close_return_gap != null && <span><span className="text-muted-foreground">总落差 </span><b className={cn('font-mono', item.close_return_gap < 0 ? 'text-success' : 'text-muted-foreground')}>{signedPercent(item.close_return_gap)}</b></span>}
+                                          </div>
                                         </div>
                                       )}
                                       {item.screen_warnings && item.screen_warnings.length > 0 ? <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-[10px] text-muted-foreground">{item.screen_warnings.map((warning, wIndex) => <li key={wIndex}>{warning}</li>)}</ul> : <p className="mt-1.5 text-[10px] text-muted-foreground">{isBeta || isBetaSpan ? '该 ETF 持仓区间无额外决策提示。' : isSpan ? '该空仓区间无额外决策提示。' : '本轮选股无逐轮决策提示。'}</p>}

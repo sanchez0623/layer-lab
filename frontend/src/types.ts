@@ -252,6 +252,32 @@ export interface RotationTrailItem {
   /* ---------- ETF beta 腿持仓行（kind=BETA / BETA_SPAN） ---------- */
   /** 持仓的 ETF 标的（如 sz.159915）；个股空仓期间 beta 腿持有不算空仓。 */
   beta_symbol?: string | null;
+  /* ---------- ETF beta 持仓区间行（kind=BETA_SPAN）读时派生 ---------- */
+  /** 区间内 beta 买入成本（含费），作收益率分母；旧报告无逐笔 fills 时为 null。 */
+  beta_invested?: number | null;
+  /** 区间内 beta 买入笔数。 */
+  beta_buy_count?: number | null;
+  /** 区间内 beta 卖出笔数。 */
+  beta_sell_count?: number | null;
+  /* ---------- 轮次行（kind=ROUND）止盈执行诊断 ---------- */
+  /** 清仓信号触发类型（价格轨止盈/账户轨止盈/量价背离/VWAP回撤/超期强平/事件熔断）。 */
+  close_signal_trigger?: string | null;
+  /** 清仓信号价 = 判定清仓那根 K 线的 close。 */
+  close_signal_price?: number | null;
+  /** 清仓信号时间（决策 K 线时间戳）。 */
+  close_signal_time?: string | null;
+  /** 信号价对应的价格轨收益（信号时点浮盈）。 */
+  close_signal_return?: number | null;
+  /** 实际成交价 = 出场 bar 的成交均价。 */
+  close_fill_price?: number | null;
+  /** 实际成交时间。 */
+  close_fill_time?: string | null;
+  /** 执行落差 = 成交价 / 信号价 - 1（负 = 出场比信号价低）。 */
+  close_execution_gap?: number | null;
+  /** 轮次账户收益 = pnl / max_invested。 */
+  close_round_return?: number | null;
+  /** 总落差 = 轮次收益 - 信号收益（负 = 落袋比信号少）。 */
+  close_return_gap?: number | null;
 }
 
 /** 轮次摘要（汇总里的最佳/最差轮）。 */
@@ -399,6 +425,27 @@ export interface ReportMetrics {
   profit_withdrawn?: number;
   /** 每月盈亏。旧报告由后端读取时按权益曲线补算；极端情况下缺失则前端隐藏该面板。 */
   monthly?: MonthlyPnl[];
+  /** 资金加权年化（XIRR）：把盈利出金当成回流现金流；无符号变化现金流时为 null，前端隐藏。 */
+  xirr_annualized?: number | null;
+  /** 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后重算，判断收益是否靠少数极端项撑起。 */
+  robustness?: {
+    excluded_best_month_pnl: number;
+    excluded_top3_win_pnl: number;
+    net_profit: number;
+    total_return: number;
+    annualized_return: number;
+  } | null;
+  /** 净值曲线水下时长：最长连续低于此前峰值的区间 + 水下交易日占比 + 当前是否仍处水下。 */
+  underwater?: {
+    longest_underwater_days: number;
+    longest_underwater_calendar_days: number;
+    longest_underwater_start: string | null;
+    longest_underwater_end: string | null;
+    underwater_days: number;
+    underwater_ratio: number;
+    currently_underwater: boolean;
+    current_drawdown_days: number;
+  } | null;
 }
 
 export interface Trade {

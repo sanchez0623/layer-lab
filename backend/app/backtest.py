@@ -209,6 +209,114 @@ def monthly_breakdown(
     return result
 
 
+def xirr_annualized(
+    cashflows: list[tuple[str, float]], *, lower: float = -0.9999, upper: float = 10.0,
+) -> float | None:
+    """资金加权年化收益率（XIRR）：让所有现金流按时间折现后净现值为 0 的年化利率。
+
+    与 ``annualized_return``（期初期末两点的时间加权口径）互补：XIRR 把中途的
+    盈利提现（真实资金离场）也当成现金流，反映「这笔钱实际什么时候进出」，对
+    有出金的账户更贴近真实回报。口径：投入为负（-initial_cash），出金与期末权益
+    为正（出金虽离开账户但属赚到的钱回流）。
+
+    解法用二分法（不依赖 scipy，符号变化时必然收敛）：NPV 对 r 单调递减，
+    ``[lower, upper]`` 两端 NPV 异号则必有唯一根；无符号变化（全正/全负现金流）
+    返回 None 让前端优雅降级。现金流日期不足两条同样返回 None。
+    """
+    points: list[tuple[datetime, float]] = []
+    for raw_date, amount in cashflows:
+        amount = float(amount)
+        if not amount:
+            continue
+        try:
+            day = datetime.fromisoformat(str(raw_date)[:10])
+        except ValueError:
+            continue
+        points.append((day, amount))
+    if len(points) < 2:
+        return None
+    t0 = min(day for day, _ in points)
+    flows = [((day - t0).days / 365.0, amount) for day, amount in points]
+
+    def npv(rate: float) -> float:
+        return sum(amount / (1.0 + rate) ** years for years, amount in flows)
+
+    lo, hi = lower, upper
+    npv_lo, npv_hi = npv(lo), npv(hi)
+    if npv_lo * npv_hi > 0:
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2
+        npv_mid = npv(mid)
+        if abs(npv_mid) < 1e-9:
+            return mid
+        if npv_lo * npv_mid <= 0:
+            hi, npv_hi = mid, npv_mid
+        else:
+            lo, npv_lo = mid, npv_mid
+    return (lo + hi) / 2
+
+
+def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
+    """净值曲线水下时长：从峰值回落到收复的全部区间统计。
+
+    - ``longest_underwater_days``：最长连续水下交易日数（equity 严格低于此前峰值）；
+    - ``longest_underwater_calendar_days``：同一段水下区间跨越的日历天数；
+    - ``longest_underwater_start`` / ``longest_underwater_end``：该区间起止日期；
+    - ``underwater_days`` / ``underwater_ratio``：水下交易日数与占比；
+    - ``currently_underwater`` / ``current_drawdown_days``：当前是否仍处水下及已持续天数。
+
+    逐日比对「此前峰值」（含当日），equity < 峰值即记为水下一天；空曲线返回全 0。
+    """
+    if not equity_curve:
+        return {
+            "longest_underwater_days": 0, "longest_underwater_calendar_days": 0,
+            "longest_underwater_start": None, "longest_underwater_end": None,
+            "underwater_days": 0, "underwater_ratio": 0.0,
+            "currently_underwater": False, "current_drawdown_days": 0,
+        }
+    peak = float(equity_curve[0]["equity"])
+    longest = current = total = 0
+    longest_start: str | None = None
+    longest_end: str | None = None
+    current_start: str | None = None
+    for item in equity_curve:
+        equity = float(item["equity"])
+        day = str(item.get("date") or "")
+        if equity >= peak:
+            # 收复峰值（或创新高）：一段水下区间在此结束。
+            if current > longest:
+                longest, longest_start, longest_end = current, current_start, day
+            current = 0
+            current_start = None
+            peak = max(peak, equity)
+            continue
+        if current == 0:
+            current_start = day
+        current += 1
+        total += 1
+    if current > longest:
+        longest, longest_start, longest_end = current, current_start, str(equity_curve[-1].get("date") or "")
+    calendar = 0
+    if longest and longest_start and longest_end:
+        try:
+            calendar = max(0, (
+                datetime.fromisoformat(longest_end[:10]) - datetime.fromisoformat(longest_start[:10])
+            ).days)
+        except ValueError:
+            calendar = 0
+    return {
+        "longest_underwater_days": longest,
+        "longest_underwater_calendar_days": calendar,
+        "longest_underwater_start": longest_start,
+        "longest_underwater_end": longest_end,
+        "underwater_days": total,
+        "underwater_ratio": total / len(equity_curve),
+        "currently_underwater": current > 0,
+        "current_drawdown_days": current,
+    }
+
+
 def performance_metrics(
     equity_curve: list[dict[str, Any]], initial_cash: float,
     rounds: list[dict[str, Any]], trades: list[dict[str, Any]],
@@ -264,6 +372,25 @@ def performance_metrics(
         item["market_value"] / item["equity"] if item["equity"] else 0.0
         for item in equity_curve
     )
+    # 资金加权年化（XIRR）：把盈利出金当成回流现金流，与时间加权 annualized 互补。
+    xirr_flows: list[tuple[str, float]] = [(str(equity_curve[0]["date"]), -float(initial_cash))]
+    for withdrawal in withdrawals or []:
+        amount = float(withdrawal.get("amount", 0.0) or 0.0)
+        if amount:
+            xirr_flows.append((str(withdrawal.get("date") or ""), amount))
+    xirr_flows.append((str(equity_curve[-1]["date"]), adjusted_final))
+    xirr = xirr_annualized(xirr_flows)
+    # 净值曲线水下时长：最长连续低于此前峰值的交易日区间。
+    underwater = underwater_stats(equity_curve)
+    # 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后重算，看收益是否靠少数极端项撑起。
+    monthly_list = monthly_breakdown(equity_curve, initial_cash, withdrawals)
+    best_month_pnl = max((float(row["pnl"]) for row in monthly_list), default=0.0)
+    top3_win_pnl = sum(item["pnl"] for item in sorted(wins, key=lambda row: row["pnl"], reverse=True)[:3])
+    robust_net_profit = net_profit - best_month_pnl - top3_win_pnl
+    robust_total_return = (initial_cash + robust_net_profit) / initial_cash - 1 if initial_cash > 0 else 0.0
+    robust_annualized = (
+        (initial_cash + robust_net_profit) / initial_cash
+    ) ** (365 / elapsed_days) - 1 if initial_cash > 0 and initial_cash + robust_net_profit > 0 else -1.0
     return {
         "initial_cash": money(initial_cash), "final_equity": money(final_equity),
         "net_profit": net_profit, "total_return": total_return,
@@ -279,7 +406,21 @@ def performance_metrics(
         "max_invested": money(max_invested), "exposure": exposure,
         "max_float_loss": money(max_float_loss), "buy_hold_return": buy_hold_return,
         "buy_hold_benchmarks": buy_hold_benchmarks or [],
-        "monthly": monthly_breakdown(equity_curve, initial_cash, withdrawals),
+        "monthly": monthly_list,
+        # 资金加权年化（XIRR）：出金当成回流现金流，与时间加权 annualized 互补；
+        # 无符号变化的现金流（从未出金且亏损）返回 None，前端降级隐藏。
+        "xirr_annualized": xirr,
+        # 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后的净利/收益/年化，
+        # 用于判断收益是否靠少数极端项撑起（``*_excluded`` 记被剔除的金额）。
+        "robustness": {
+            "excluded_best_month_pnl": money(best_month_pnl),
+            "excluded_top3_win_pnl": money(top3_win_pnl),
+            "net_profit": money(robust_net_profit),
+            "total_return": robust_total_return,
+            "annualized_return": robust_annualized,
+        },
+        # 净值曲线水下时长：最长连续水下区间 + 水下交易日占比 + 当前是否仍处水下。
+        "underwater": underwater,
     }
 
 
@@ -602,6 +743,17 @@ class FunnelRotationBacktest:
             "exit_reason": self._beta_last_exit_reason,
             "pnl": pnl,
             "position_qty": self._beta_qty(),
+            # 逐笔成交（紧凑字段）：供换票轨迹的 BETA_SPAN 区间行拆出「持仓区间 /
+            # 持有交易日 / 本轮收益率 / 净盈亏」。beta 成交笔数很少（趋势跟踪，
+            # 一年几笔），随报告落库体积可忽略。
+            "fills": [
+                {
+                    "date": item["date"], "side": item["side"],
+                    "quantity": item["quantity"], "price": item["price"],
+                    "fee": item["fee"], "realized_pnl": item["realized_pnl"],
+                }
+                for item in self._beta_fills
+            ],
             # 数据覆盖：ETF 日线首根晚于回测起点时，早期时段不会建仓（见 _prepare_etf）。
             "coverage_start": getattr(self, "_beta_coverage_start", None),
             "coverage_end": getattr(self, "_beta_coverage_end", None),
@@ -838,7 +990,40 @@ class FunnelRotationBacktest:
             ):
                 item["deep_loss_recovery_days"] = session_index - item["_deep_loss_start_session"]
 
+    def _build_close_diagnostic(self, close_fill: Fill | None, bar: Bar) -> dict[str, Any]:
+        """轮次闭合时的「止盈执行诊断」：拆出信号价 → 成交价 的落差。
+
+        用户困惑「价格轨收益达到 15%，实际只落袋 8.81%」的根因是：15% 是**决策 K 线
+        收盘价**相对持仓成本的浮盈（``strategy._returns``），而成交走下一根 bar 的
+        开盘价（含滑点），再扣掉双边费用。这里把三个口径都记下来，报告页直接展示：
+        - ``signal_price`` / ``signal_return``：判定清仓那根 K 线的 close 与当时的价格轨收益；
+        - ``fill_price`` / ``fill_time``：实际成交价与时间（出场 bar）；
+        - ``execution_gap``：signal_price → fill_price 的落差（负 = 出场比信号价低）；
+        - ``return_gap``：信号收益 → 轮次账户收益（pnl / 峰值投入）的总落差。
+
+        缺信号（旧状态续跑 / 日线路径未触发 ``_set_close_signal``）时优雅降级，
+        只返回成交侧能算的字段，不抛错。
+        """
+        signal = self.strategy._close_signal
+        diagnostic: dict[str, Any] = {}
+        if close_fill is not None:
+            diagnostic["fill_price"] = close_fill.price
+            diagnostic["fill_time"] = close_fill.timestamp
+        if signal:
+            diagnostic.update(signal)
+            if close_fill is not None and signal.get("signal_price"):
+                # 执行落差：成交价相对信号价的偏移（负 = 出场比信号价低，收益被吃掉）。
+                diagnostic["execution_gap"] = close_fill.price / signal["signal_price"] - 1
+        item = self.current_round
+        if item:
+            round_return = item["pnl"] / item["max_invested"] if item.get("max_invested") else None
+            diagnostic["round_return"] = round_return
+            if signal and signal.get("price_return") is not None and round_return is not None:
+                diagnostic["return_gap"] = round_return - signal["price_return"]
+        return diagnostic
+
     def _handle_fills(self, fills: list[Fill], session_index: int, bar: Bar) -> None:
+        close_fill: Fill | None = None
         for fill in fills:
             _normalize_fill_timestamp(fill, bar)
             if fill.side == "BUY" and fill.purpose == "PERMANENT" and self.current_round is None:
@@ -849,6 +1034,9 @@ class FunnelRotationBacktest:
                 "side": fill.side, "purpose": fill.purpose, "quantity": fill.quantity,
                 "price": fill.price, "fee": fill.total_fee,
             })
+            if fill.side == "SELL" and fill.purpose in ("PERMANENT", "T"):
+                # 记最后一笔卖出成交：轮次闭合时它就是「实际出场价」，用于止盈执行诊断。
+                close_fill = fill
             self._update_round(bar, session_index)
         position = self.account.position(bar.symbol)
         if self.current_round and position.total_qty == 0:
@@ -858,6 +1046,7 @@ class FunnelRotationBacktest:
             item["pnl"] = money(self.account.equity - item["start_equity"])
             item["close_reason"] = self.strategy.close_reason or "整体止盈/事件熔断"
             item["t_net_profit"] = money(self.account.t_net_profit - item["t_net_profit_start"])
+            item["close_diagnostic"] = self._build_close_diagnostic(close_fill, bar)
             item.pop("_deep_loss_start_session", None)
             self.events.append({
                 "date": bar.date, "type": "ROUND_CLOSED", "round_id": item["id"],

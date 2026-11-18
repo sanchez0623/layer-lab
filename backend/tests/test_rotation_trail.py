@@ -471,3 +471,84 @@ def test_export_trail_csv_includes_beta_kind(api):
     assert "BETA" in text
     assert "beta_symbol" in lines[0]
     assert "sz.159915" in text
+
+
+# -------------------------------------------------- BETA_SPAN 成果字段 ----
+
+def _report_with_beta_fills() -> dict:
+    """beta 腿一段完整持仓：买入 2 笔建仓、卖出 1 笔清仓（含已实现盈亏）。"""
+    trail = [
+        _waiting("2025-01-02", gate_open=False),
+        _beta("2025-01-03"),
+        _beta("2025-01-06"),
+        _waiting("2025-01-07", gate_open=False),
+    ]
+    return {
+        "id": "bt-trail-beta-fills", "name": "换票轨迹 beta 成果测试", "status": "COMPLETED",
+        "created_at": "2026-11-18T00:00:00", "config": {}, "metrics": {},
+        "equity_curve": [{"date": day, "equity": 4_000_000.0} for day in TRADING_DATES_API],
+        "trades": [], "orders": [], "rounds": [], "events": [], "warnings": [],
+        "data_info": {
+            "mode": "funnel_rotation", "screening_count": len(trail),
+            "rotation_trail": trail,
+            "beta": {
+                "enabled": True, "symbol": "sz.159915", "pnl": 6000.0,
+                "fills": [
+                    {"date": "2025-01-03", "side": "BUY", "quantity": 100_000,
+                     "price": 1.0, "fee": 50.0, "realized_pnl": 0.0},
+                    {"date": "2025-01-06", "side": "BUY", "quantity": 100_000,
+                     "price": 1.1, "fee": 55.0, "realized_pnl": 0.0},
+                    {"date": "2025-01-06", "side": "SELL", "quantity": 200_000,
+                     "price": 1.2, "fee": 120.0, "realized_pnl": 6000.0},
+                ],
+            },
+        },
+    }
+
+
+def test_beta_span_carries_holding_window_days_and_pnl(api):
+    """BETA_SPAN 区间行补齐四列：持仓区间 / 持有交易日 / 本轮收益率 / 净盈亏。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_beta_fills())
+
+    body = client.get(
+        f"/api/backtests/bt-trail-beta-fills/rotation-trail?page=1&page_size=20&collapse_waiting=true"
+    ).json()
+    spans = [item for item in body["items"] if item["kind"] == "BETA_SPAN"]
+    assert len(spans) == 1
+    span = spans[0]
+
+    # 持仓区间 + 持有交易日（01-03 → 01-06，含首尾）。
+    assert span["start_date"] == "2025-01-03" and span["end_date"] == "2025-01-06"
+    assert span["holding_days"] == 2
+    # 净盈亏 = 区间内卖出成交的已实现盈亏之和。
+    assert span["pnl"] == pytest.approx(6000.0)
+    # 本轮收益率 = 净盈亏 / 区间内买入成本（含费），资金效率口径。
+    invested = 100_000 * 1.0 + 100_000 * 1.1
+    assert span["return_rate"] == pytest.approx(6000.0 / invested)
+    assert span["beta_invested"] == pytest.approx(invested)
+    assert span["beta_buy_count"] == 1 + 1 and span["beta_sell_count"] == 1
+
+
+def test_beta_span_without_fills_falls_back_to_summary_pnl(api):
+    """旧报告无逐笔 fills：优雅降级，把整个 beta 腿汇总 pnl 挂到单区间行。"""
+    application, client = api
+    application.state.storage.save_backtest(_report_with_beta())
+
+    body = client.get(
+        f"/api/backtests/bt-trail-beta/rotation-trail?page=1&page_size=20&collapse_waiting=true"
+    ).json()
+    spans = [item for item in body["items"] if item["kind"] == "BETA_SPAN"]
+    assert len(spans) == 1
+    assert spans[0]["pnl"] == pytest.approx(888.0)
+    assert spans[0]["return_rate"] is None  # 无投入分母，收益率留空
+
+
+def test_beta_span_without_beta_info_leaves_pnl_none(api):
+    """beta 未启用 / 无汇总：pnl 为 None，不抛错。"""
+    trail = [_beta("2025-01-03"), _beta("2025-01-06")]
+    collapsed = collapse_waiting_spans(enrich_trail(trail, [], TRADING_DATES), beta=None)
+    spans = [item for item in collapsed if item["kind"] == "BETA_SPAN"]
+    assert len(spans) == 1
+    assert spans[0]["pnl"] is None
+    assert spans[0]["holding_days"] == 2  # 持仓交易日照常
