@@ -426,6 +426,7 @@ class QuanStore:
 
     def _adjust_frame(
         self, daily: Any, codes: Sequence[str], end: str | None, cutoff: str | None = None,
+        *, adj_frame: Any | None = None,
     ) -> Any:
         """把不复权 OHLC 转成「以区间末日因子为基准」的前复权价。
 
@@ -434,9 +435,19 @@ class QuanStore:
         ``cutoff`` 为窗口起点（仅窗口化读取时传入）：窗口内首根之前可能整段没有
         adj_factor 事件，此时用窗口前最后一个因子（``_factor_base``）回填，
         保证窗口内每一根的复权基准仍然正确。
+
+        ``adj_frame``：调用方已驻留内存的因子表（DailyPanel 用，避免逐日重扫
+        adj_factor.parquet）。传 ``codes``/``end`` 语义与 ``_adj_frame`` 一致，
+        这里只补 ``date <= end`` 过滤 + 排序，不再触发磁盘扫描。
         """
         pl = self._pl
-        adj = self._adj_frame(codes, end=end)
+        if adj_frame is not None:
+            adj = adj_frame
+            if end:
+                adj = adj.filter(pl.col("date") <= end)
+            adj = adj.sort(["code", "date"])
+        else:
+            adj = self._adj_frame(codes, end=end)
         if adj.height == 0:
             return daily
         unreliable = self._unreliable_factor_codes(adj)
@@ -544,6 +555,8 @@ class QuanStore:
             mapping[f"{infer_exchange(pure)}.{pure}"] = pure
         if not mapping:
             return {}
+        # 反向映射只建一次：group_by 循环里用 O(1) 查表，避免每只都线性扫整个 mapping。
+        pure_to_symbol: dict[str, str] = {pure: symbol for symbol, pure in mapping.items()}
         result: dict[str, list[Bar]] = {code: [] for code in mapping}
         lf = pl.scan_parquet(self.daily_path)
         lf = lf.filter(pl.col("code").is_in(list(mapping.values())))
@@ -566,7 +579,7 @@ class QuanStore:
         for group_key, frame in daily.sort(["code", "date"]).group_by("code", maintain_order=True):
             # polars 的 group_by 迭代键在部分版本里是 1 元 tuple。
             pure = group_key[0] if isinstance(group_key, tuple) else group_key
-            symbol = next((code for code, value in mapping.items() if value == pure), None)
+            symbol = pure_to_symbol.get(pure)
             if symbol is None:
                 continue
             rows = list(frame.iter_rows(named=True))
@@ -1053,6 +1066,134 @@ class QuanStore:
                 "VALUES(?,?,?)",
                 (standard, utc_now(), text),
             )
+
+    def load_daily_panel(
+        self, codes: Sequence[str], *, start: str | None = None, end: str | None = None,
+    ) -> "DailyPanel":
+        """一次性把候选池的不复权日线 + 因子 scan/collect 进内存，供逐日窗口切片。
+
+        回测里每个选股日都要「截至 as_of 的最近 260 根」，as_of 逐日移动。原路径
+        （``load_history(end=as_of)``）每天重新 scan_parquet + is_in + 复权 + 重建
+        约 39 万根 Bar，是回测的主要耗时。DailyPanel 把磁盘扫描收敛到一次，逐日只做
+        内存过滤 + 复权 + 重建当日窗口 Bar，输出与「每天现读 parquet」逐字节一致。
+        """
+        return DailyPanel(self, codes, start=start, end=end)
+
+
+class DailyPanel:
+    """驻留内存的日线面板：scan/collect 一次，逐日切片（回测选股提速）。
+
+    逐日窗口复用 ``QuanStore`` 的同一条复权/建 Bar 管线（``_recent_cutoff`` /
+    ``_adjust_frame`` / ``_tail_frame`` / ``_bar_from_row``），只是把「每天扫 parquet」
+    换成「在已驻留的内存 DataFrame 上过滤」。因此逐日窗口与 ``load_history(end=as_of)``
+    逐字节一致，但省掉了每天的磁盘 IO。
+    """
+
+    def __init__(
+        self, store: "QuanStore", codes: Sequence[str], *,
+        start: str | None = None, end: str | None = None,
+    ) -> None:
+        self._store = store
+        pl = store._pl
+        mapping: dict[str, str] = {}
+        for raw in codes or []:
+            try:
+                pure = pure_code(raw)
+            except ValueError:
+                continue
+            mapping[f"{infer_exchange(pure)}.{pure}"] = pure
+        self._pure_to_symbol: dict[str, str] = {
+            pure: symbol for symbol, pure in mapping.items()
+        }
+        self.end = str(end)[:10] if end else None
+        pure_codes = list(mapping.values())
+        empty_daily = pl.DataFrame(schema={
+            "code": pl.String, "date": pl.String, "open": pl.Float64,
+            "high": pl.Float64, "low": pl.Float64, "close": pl.Float64,
+            "volume": pl.Int64, "amount": pl.Float64,
+        })
+        empty_adj = pl.DataFrame(schema={
+            "code": pl.String, "date": pl.String, "adj_factor": pl.Float64,
+        })
+        if not pure_codes:
+            self._daily = empty_daily
+            self._adj = empty_adj
+            return
+        # 不复权日线：scan + collect 一次（此后不再碰磁盘）。
+        lf = pl.scan_parquet(store.daily_path).filter(pl.col("code").is_in(pure_codes))
+        if self.end:
+            lf = lf.filter(pl.col("date") <= self.end)
+        if start:
+            lf = lf.filter(pl.col("date") >= str(start)[:10])
+        self._daily = lf.sort(["code", "date"]).collect()
+        # 复权因子：scan + collect 一次（因子表很小，且通常只有事件日才有行）。
+        if store.adj_path.exists():
+            alf = pl.scan_parquet(store.adj_path).filter(
+                pl.col("code").is_in(pure_codes)
+            )
+            if self.end:
+                alf = alf.filter(pl.col("date") <= self.end)
+            self._adj = alf.collect().sort(["code", "date"])
+        else:
+            self._adj = empty_adj
+
+    def history(
+        self, codes: Sequence[str], as_of: str, *, max_rows: int | None = 260,
+    ) -> dict[str, list[Bar]]:
+        """截至 ``as_of`` 的每代码日线窗口（前复权），与 ``load_history`` 同口径。
+
+        ``max_rows`` 默认 260：取「截至 as_of 的最近 260 根」（窗口化 + cutoff 下推），
+        与 ``load_history(..., max_rows=260, end=as_of)`` 逐字节一致；传 ``None`` 取全量。
+        """
+        store = self._store
+        pl = store._pl
+        as_of_text = str(as_of)[:10]
+        wanted: list[str] = []
+        for raw in codes or []:
+            try:
+                pure = pure_code(raw)
+            except ValueError:
+                continue
+            symbol = self._pure_to_symbol.get(pure)
+            if symbol is not None and symbol not in wanted:
+                wanted.append(symbol)
+        empty: dict[str, list[Bar]] = {code: [] for code in (codes or [])}
+        if not wanted or self._daily.height == 0:
+            return empty
+        cutoff: str | None = None
+        if max_rows:
+            cutoff = store._recent_cutoff(int(max_rows) + _WINDOW_BUFFER, as_of_text)
+        daily = self._daily.filter(pl.col("date") <= as_of_text)
+        if cutoff:
+            daily = daily.filter(pl.col("date") >= cutoff)
+        if daily.height == 0:
+            return {**empty, **{symbol: [] for symbol in wanted}}
+        adjusted = store._adjust_frame(
+            daily, wanted, as_of_text, cutoff, adj_frame=self._adj,
+        )
+        adjusted = store._tail_frame(adjusted, max_rows)
+        result: dict[str, list[Bar]] = {}
+        for group_key, frame in adjusted.sort(["code", "date"]).group_by(
+            "code", maintain_order=True,
+        ):
+            # polars 的 group_by 迭代键在部分版本里是 1 元 tuple。
+            pure = group_key[0] if isinstance(group_key, tuple) else group_key
+            symbol = self._pure_to_symbol.get(pure)
+            if symbol is None:
+                continue
+            rows = list(frame.iter_rows(named=True))
+            bars: list[Bar] = []
+            previous: float | None = None
+            for row in rows:
+                bar = store._bar_from_row(row, symbol, "daily", previous)
+                bars.append(bar)
+                previous = bar.close
+            if max_rows and len(bars) > max_rows:
+                bars = bars[-int(max_rows):]
+            result[symbol] = bars
+        for symbol in wanted:
+            result.setdefault(symbol, [])
+        return result
 
 
 def _previous_day(value: str) -> str:

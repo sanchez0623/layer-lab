@@ -1,12 +1,48 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from bisect import bisect_left, bisect_right
 from datetime import datetime, time as dtime
 from statistics import mean
 
 from .broker import BrokerAccount
 from .domain import Bar, Fill, OrderRequest, Position, StrategyConfig
 from .trading_rules import rules_for
+
+
+class _ChainedBars:
+    """只读序列视图：把 ``base + extra`` 拼成一根「逻辑日线序列」，不复制 base。
+
+    盘中（on_intraday / _tail_add_requests）需要把「截至当前的合成日线」追加到
+    全量 history 尾部再喂给 _risk_requests / _add_signal。旧实现用
+    ``list(history) + [today_bar]`` 每根 5 分钟 bar 都完整复制一份（~1500-2000 个
+    Bar 引用），是 6 年回测的主要热点之一。这里用一个 O(1) 的视图替代复制：
+    仅当被索引到时才取元素，且 _risk_requests / _add_signal 只读有界尾部
+    （[-20:] / [-6:-1] / _atr 窗口）与 ``len``，故整段读取成本恒定。
+
+    仅实现调用方用到的协议：``__len__`` / ``__getitem__``（int 与 slice）。
+    bisect（_holding_days）只依赖这两者，可直接作用于本视图。
+    """
+
+    __slots__ = ("_base", "_extra", "_base_len", "_total")
+
+    def __init__(self, base: list[Bar], extra: tuple[Bar, ...]) -> None:
+        self._base = base
+        self._extra = extra
+        self._base_len = len(base)
+        self._total = self._base_len + len(extra)
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[i] for i in range(*index.indices(self._total))]
+        if index < 0:
+            index += self._total
+        if index < self._base_len:
+            return self._base[index]
+        return self._extra[index - self._base_len]
 
 
 def board_buy_quantity(symbol: str, amount: float, price: float) -> int:
@@ -216,6 +252,10 @@ class LayeredTStrategy(Strategy):
         # live-tick 可能在同一根已收盘 5 分钟 K 线上重复触发；按 bar 时间去重，
         # 避免背离/VWAP 确认计数被同一根 bar 叠加。
         self.last_intraday_timestamp: datetime | None = None
+        # 大盘门当日 memo：门只依赖「严格早于当日」的指数日线，全天不随 5 分钟 bar 变化。
+        # 按 (当日日期, 指数序列长度) 记一笔，避免每根 5 分钟 bar 重扫 ~4000 根指数 bar。
+        self._index_gate_memo_key: tuple[str, int] | None = None
+        self._index_gate_memo_value: bool = False
 
     def state_dict(self) -> dict:
         dump: dict = {"state_version": STATE_VERSION}
@@ -337,10 +377,19 @@ class LayeredTStrategy(Strategy):
         """本轮持有交易日数：history 里严格晚于建仓日的 bar 数量。
 
         history 是升序日线，建仓次日起算第 1 天；未记录入口日期返回 0。
+
+        性能：原实现 ``sum(1 for item in history if item.date > entry)`` 是每根
+        5 分钟 bar 一次 O(n) 全量扫描（~7 万 bar × ~1500 = ~2 亿次比较）。这里改用
+        ``bisect_right``（按 Bar.date 升序）定位建仓日的插入点，晚于建仓日的 bar 数
+        即 ``len(history) - 插入点``，O(log n)，结果与原 sum 逐字一致（含建仓日不在
+        history / 早于 history 起点 / 晚于 history 终点的边界）。
         """
         if not self.round_entry_date:
             return 0
-        return sum(1 for item in history if item.date > self.round_entry_date)
+        entry = self.round_entry_date
+        # bisect_right 按 date 升序找「最后一个 <= entry 的位置」：其右侧全部 > entry。
+        index = bisect_right(history, entry, key=lambda item: item.date)
+        return len(history) - index
 
     def _effective_take_profit(self, holding_days: int) -> tuple[float, bool]:
         """返回 (有效止盈阈值, 是否因超期降阈)。
@@ -562,34 +611,58 @@ class LayeredTStrategy(Strategy):
         交易日数 = history ∪ {bar} 中 (成交日, bar.date] 的交易日数，按成交日期
         动态换算，天然免疫数据集刷新导致的行数漂移；无成交记录的老账户回退
         旧行序号口径（last_add_session）。
+
+        性能：history 升序且每日一根（date 去重），(last_date, bar.date] 区间内的
+        交易日数 = ``bisect_right(bar.date) - bisect_right(last_date)``；再补上当且仅当
+        bar.date 未落在 history 里时的那 1 天（盘中路径 history 不含当日日线）。
+        与旧的全量 set 推导逐字一致，但 O(log n) 而非 O(n)。
         """
         last_date = self._last_add_date(account)
         if last_date is not None:
-            dates = {
-                item.date for item in (history or [])
-                if last_date < item.date <= bar.date
-            }
-            if bar.date > last_date:
-                dates.add(bar.date)
-            return len(dates) < self.config.min_add_gap_days
+            history = history or []
+            # 升序日线中 (last_date, bar.date] 的根数 = 右端插入点 - 左端插入点。
+            count = (
+                bisect_right(history, bar.date, key=lambda item: item.date)
+                - bisect_right(history, last_date, key=lambda item: item.date)
+            )
+            # bar.date 本身是否已在 history 里：在（日线 on_daily 路径，history 含当日）
+            # 则已被上面区间计入；不在（盘中路径，history=history[:-1] 不含当日）则补 1 天。
+            pos = bisect_left(history, bar.date, key=lambda item: item.date)
+            bar_in_history = pos < len(history) and history[pos].date == bar.date
+            if bar.date > last_date and not bar_in_history:
+                count += 1
+            return count < self.config.min_add_gap_days
         if session_index is None or self.last_add_session is None:
             return False
         return session_index - self.last_add_session < self.config.min_add_gap_days
 
-    @staticmethod
-    def _index_gate_open(index_history: list[Bar] | None, bar: Bar) -> bool:
+    def _index_gate_open(self, index_history: list[Bar] | None, bar: Bar) -> bool:
         """盘中大盘门：只用**严格早于当日**的指数日线，避免盘中读到当日未收盘的指数价。
 
         与 ``on_daily`` 同一口径：21 根以上按 20 日收益 < 0 开门；数据存在但不足
         21 根保守关门；完全没有指数数据时降级开门（与日线降级路径一致）。
+
+        性能：门只随「日」变化（prior = 严格早于当日的指数日线，全天不变），旧实现
+        每根 5 分钟 bar 都重扫整个 index_history（~4000 根）。这里按
+        ``(当日日期, 指数序列长度)`` memo 当日结果，全天只算一次；长度入 key 是为了
+        在指数序列当日被替换/补齐时自动失效，结果仍与逐 bar 重算逐字一致。
         """
-        prior = [item for item in (index_history or []) if item.date < bar.date]
+        index_history = index_history or []
+        memo_key = (bar.date, len(index_history))
+        if self._index_gate_memo_key == memo_key:
+            return self._index_gate_memo_value
+        prior = [item for item in index_history if item.date < bar.date]
         if len(prior) >= 21:
             base = prior[-21].close
             if base <= 0:
-                return True
-            return prior[-1].close / base - 1 < 0
-        return not prior
+                result = True
+            else:
+                result = prior[-1].close / base - 1 < 0
+        else:
+            result = not prior
+        self._index_gate_memo_key = memo_key
+        self._index_gate_memo_value = result
+        return result
 
     def _tail_entry_requests(
         self, bar: Bar, account: BrokerAccount, index_history: list[Bar] | None,
@@ -714,7 +787,11 @@ class LayeredTStrategy(Strategy):
         clock = bar.timestamp.time()
         if not (TAIL_ENTRY_START <= clock < TAIL_ENTRY_END):
             return []
-        full_history = list(history) + [self._today_daily_bar(history, bar, recent_bars)]
+        # 同 on_intraday：用 O(1) 视图拼接 history+当日合成日线，避免每根 5 分钟 bar
+        # 复制整条 history。_add_signal 仅读 history[-1]/[-10:]/[-4:-1]/[-6:-1]。
+        full_history = _ChainedBars(
+            history, (self._today_daily_bar(history, bar, recent_bars),),
+        )
         signal = self._add_signal(full_history, account)
         if not signal:
             return []
@@ -838,7 +915,10 @@ class LayeredTStrategy(Strategy):
         today_bar = self._today_daily_bar(
             history, bar, recent_bars, volume_caliber=self.config.risk_volume_caliber,
         )
-        risk_history = list(history) + [today_bar]
+        # 只读有界尾部的合成日线序列：用 O(1) 视图拼接 history+today_bar，不再每根
+        # 5 分钟 bar 复制整条 history（~1500-2000 引用）。_risk_requests 仅读
+        # history[-20:]/[-6:-1]/_atr 窗口与 len，视图语义与完整 list 逐字一致。
+        risk_history = _ChainedBars(history, (today_bar,))
         risk = self._risk_requests(risk_history, today_bar, account, recent_bars, "NEXT_BAR")
         if risk:
             return risk

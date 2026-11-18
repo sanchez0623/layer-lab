@@ -34,7 +34,12 @@ def test_state_fields_are_single_source_of_truth():
     config 不算策略状态（由账户配置注入、不进 state_dict），排除在外。
     """
     strategy = LayeredTStrategy(StrategyConfig())
-    attrs = set(vars(strategy).keys()) - {"config"}
+    # config 不算策略状态；下划线前缀的属性是运行时 memo/缓存（如 _index_gate_memo_*），
+    # 不落库、不进 state_dict，同样排除。哨兵只看「会持久化的策略状态字段」。
+    attrs = {
+        name for name in vars(strategy)
+        if name != "config" and not name.startswith("_")
+    }
     spec_names = {name for name, _kind, _default in STRATEGY_STATE_FIELDS}
     assert attrs == spec_names, (
         f"字段表与实例属性不一致: 未登记={attrs - spec_names}, 多余={spec_names - attrs}"

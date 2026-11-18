@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import os
 import uuid
+from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -658,6 +659,17 @@ class FunnelRotationBacktest:
         # 持仓标的日线惰性缓存：任意时刻最多驻留一只标的的历史。
         self._held_code: str | None = None
         self._held_bars: list[Bar] = []
+        # 与 _held_bars 平行的加速结构（换票时一起重建）：
+        #   _held_dates：升序 date 字符串数组（供 bisect 切「截至某日」的历史）；
+        #   _held_bar_by_date：{date: 当日日线 bar}（供 O(1) 取当日 bar）。
+        self._held_dates: list[str] = []
+        self._held_bar_by_date: dict[str, Bar] = {}
+        # 板块指数升序 date 数组（供 bisect 切「<= 某日」的指数历史，替代逐元素
+        # .timestamp.date().isoformat() 过滤）。
+        self._index_dates: dict[str, list[str]] = {
+            board: [item.date for item in bars]
+            for board, bars in self.index_history.items()
+        }
         # 日线换手率缓存 {code: {date: turn}}，来自 turnover_daily.parquet（做 T 准入）。
         self._turnover_cache: dict[str, dict[str, float]] | None = None
 
@@ -726,7 +738,14 @@ class FunnelRotationBacktest:
         return self._turnover_cache.get(code, {})
 
     def _bars_for(self, code: str | None) -> list[Bar]:
-        """当前持仓标的的日线，带单条目缓存（换票时自然替换）。"""
+        """当前持仓标的的日线，带单条目缓存（换票时自然替换）。
+
+        同时维护两个平行加速结构（换票时一起重建）：
+        - ``_held_dates``：升序 date 数组，供 run 循环用 bisect 切「截至某日」历史，
+          替代每根 5 分钟 bar 对全量 bars 的线性重过滤；
+        - ``_held_bar_by_date``：{date: bar}，供 O(1) 取当日日线，
+          替代 run 循环里 ``next((i for i in bars if i.date==date), None)`` 的全量扫描。
+        """
         if not code:
             return []
         if self._held_code == code:
@@ -734,6 +753,9 @@ class FunnelRotationBacktest:
         bars = self._load_bars(code)
         self._held_code = code
         self._held_bars = bars
+        # bars 由 load_history 返回即按日期升序（每日一根），直接建平行索引。
+        self._held_dates = [item.date for item in bars]
+        self._held_bar_by_date = {item.date: item for item in bars}
         return bars
 
     def _intraday_for(self, code: str | None) -> list[Bar]:
@@ -972,19 +994,25 @@ class FunnelRotationBacktest:
             if current_symbol is not None:
                 self.strategy.start_day(False)
                 bars = self._bars_for(current_symbol)
-                bar = next((item for item in bars if item.date == date_str), None)
+                # O(1) 取当日日线（_bars_for 已建 {date: bar}），替代逐元素线性查找。
+                bar = self._held_bar_by_date.get(date_str)
                 if bar is not None:
                     # 日线 bar 只负责隔夜 NEXT_OPEN 撮合（漏斗建仓/加仓/清仓信号次开执行，
                     # 保留漏斗原有建仓语义）；随后 5 分钟 bar 走 NEXT_BAR 做日内 T。
                     fills = self.account.process_bar(bar, modes={"NEXT_OPEN"})
                     self._handle_fills(fills, session_index, bar)
                     self.account.cancel_open_orders("T+1开盘未成交取消", modes={"NEXT_OPEN"})
-                    history = [item for item in bars if item.date <= date_str]
+                    # 「截至当日」的日线历史：bars 升序，用 bisect 一次切到当日（含），
+                    # 替代每根 5 分钟 bar 都对全量 bars 的线性重过滤。切片含当日日线，
+                    # 与旧 `item.date <= date_str` 完全一致（on_daily 用 history[-1]=当日）。
+                    history = bars[: bisect_right(self._held_dates, date_str)]
                     board = self.board_by_code.get(current_symbol, "")
-                    index_history = [
-                        item for item in self.index_history.get(board, [])
-                        if item.timestamp.date().isoformat() <= date_str
-                    ]
+                    # 指数历史同样一次切片到当日（含）：用预计算的升序 date 数组 bisect，
+                    # 替代旧逐元素 .timestamp.date().isoformat() <= date_str 过滤（等价，
+                    # 因 Bar.date 即 timestamp.date().isoformat() 的缓存值）。
+                    index_dates = self._index_dates.get(board, [])
+                    index_bars = self.index_history.get(board, [])
+                    index_history = index_bars[: bisect_right(index_dates, date_str)]
                     # 5 分钟做 T：逐根喂 on_intraday（信号下一 5 分钟 bar 开盘撮合）。
                     m5_today = intraday_by_date.get(date_str, [])
                     if m5_today:

@@ -345,13 +345,23 @@ class Bar:
     prev_close: float | None = None
     bid: float | None = None
     ask: float | None = None
+    # date 计算结果缓存（timestamp 构造后不变）。compare/repr/init 均关闭，
+    # 不影响相等性、repr 与既有构造点。slots=True 下用 object.__setattr__ 写入。
+    _date_cache: str | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     @property
     def date(self) -> str:
-        return self.timestamp.date().isoformat()
+        cached = self._date_cache
+        if cached is None:
+            cached = self.timestamp.date().isoformat()
+            object.__setattr__(self, "_date_cache", cached)
+        return cached
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
+        result.pop("_date_cache", None)
         result["timestamp"] = self.timestamp.isoformat()
         result["date"] = self.date
         return result

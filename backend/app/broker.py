@@ -129,6 +129,16 @@ class BrokerAccount:
         self.withdrawals: list[Withdrawal] = []
         self._next_withdrawal_number = 1
         self._last_month_eval: str | None = None
+        # 性能索引（派生状态，不参与快照/序列化，restore/from_dict 时按 orders 重建）：
+        # - _open_by_symbol：每标的「未结」（PENDING/PARTIALLY_FILLED）委托桶，桶内保持
+        #   创建顺序。让 process_bar 只扫该标的的小桶，而不是每次遍历 append-only 的
+        #   self.orders 全表（6 年回测会积累数千笔，O(n_bars×n_orders) → O(n_bars×桶)）。
+        # - _open_orders：全部未结委托，保持全局创建顺序。reserved_cash 按它求和，
+        #   与旧实现「遍历 self.orders 全表但跳过已结」的浮点累加顺序逐项一致，保证
+        #   reserved_cash 数值 bit 级不变；且只扫未结（通常个位数）而非全表数千笔。
+        #   orders 本身保持完整（含终态）用于报表/序列化，snapshot_state 照旧全量输出。
+        self._open_by_symbol: dict[str, list[Order]] = {}
+        self._open_orders: list[Order] = []
 
     # -- 快照 / 恢复（供回测断点续传使用） --------------------------------
     #
@@ -143,6 +153,10 @@ class BrokerAccount:
         out: dict[str, Any] = {}
         for key, value in self.__dict__.items():
             if key == "config":
+                continue
+            # 未结委托索引是 orders 的派生状态（内含 Order 对象，非 JSON 友好），
+            # 不序列化；restore_state 会按还原后的 orders 重建，故这里直接跳过。
+            if key in ("_open_by_symbol", "_open_orders"):
                 continue
             if key == "positions" and isinstance(value, dict):
                 out[key] = {code: asdict(pos) for code, pos in value.items()}
@@ -166,6 +180,8 @@ class BrokerAccount:
                 self.positions = {code: Position(**pos) for code, pos in value.items()}
             elif key == "orders" and isinstance(value, list):
                 self.orders = [Order(**item) for item in value]
+                # orders 被整体替换，派生的未结索引必须按新 orders 重建。
+                self._rebuild_open_index()
             elif key == "trades" and isinstance(value, list):
                 self.trades = [Fill(**item) for item in value]
             elif key == "withdrawals" and isinstance(value, list):
@@ -174,11 +190,55 @@ class BrokerAccount:
                 setattr(self, key, value)
         self.config = current_config
 
+    # -- 未结委托索引（性能） ------------------------------------------------
+    #
+    # self.orders 是 append-only、从不清理的（6 年回测会积累数千笔）。若每次都
+    # 遍历全表找未结委托，process_bar 会退化成 O(n_bars×n_orders)。这里额外维护
+    # 两份**派生**索引（不参与快照/序列化，restore/from_dict 时按 orders 重建）：
+    #   _open_by_symbol —— 每标的未结委托桶（桶内创建顺序），供 process_bar 精确取用；
+    #   _open_orders   —— 全部未结委托（全局创建顺序），供 reserved_cash 求和。
+    # 终态（FILLED/CANCELLED/REJECTED）委托一旦离开未结集合就从索引摘除；orders
+    # 本身保持完整，snapshot_state/to_dict 仍全量输出每一笔。
+
+    def _index_add(self, order: Order) -> None:
+        """订单进入未结集合（PENDING/PARTIALLY_FILLED）时登记到两份索引。"""
+        if order.status not in {"PENDING", "PARTIALLY_FILLED"}:
+            return
+        self._open_orders.append(order)
+        self._open_by_symbol.setdefault(order.symbol, []).append(order)
+
+    def _index_remove(self, order: Order) -> None:
+        """订单离开未结集合（成交完/撤单/拒绝）时从两份索引摘除。"""
+        try:
+            self._open_orders.remove(order)
+        except ValueError:
+            pass
+        bucket = self._open_by_symbol.get(order.symbol)
+        if bucket is not None:
+            try:
+                bucket.remove(order)
+            except ValueError:
+                pass
+            if not bucket:
+                del self._open_by_symbol[order.symbol]
+
+    def _rebuild_open_index(self) -> None:
+        """按 self.orders（创建顺序）重建两份未结索引；restore/from_dict 后调用。"""
+        self._open_orders = []
+        self._open_by_symbol = {}
+        for order in self.orders:
+            self._index_add(order)
+
     @property
     def reserved_cash(self) -> float:
+        # 只遍历未结买单（_open_orders，通常个位数），不再全表扫描数千笔委托。
+        # 每笔的预留仍按「限价或该标的最新价」现算——因为 reference 依赖会随行情
+        # 变动的 last_price，无法用纯增量标量维护；但遍历集合从「全部历史委托」
+        # 收敛到「当前未结委托」，复杂度从 O(n_orders) 降到 O(n_open)。遍历保持
+        # 创建顺序，与旧实现逐项累加顺序一致，浮点结果 bit 级相同。
         reserved = 0.0
-        for order in self.orders:
-            if order.side != "BUY" or order.status not in {"PENDING", "PARTIALLY_FILLED"}:
+        for order in self._open_orders:
+            if order.side != "BUY":
                 continue
             reference = order.limit_price
             if reference is None and order.symbol in self.positions:
@@ -365,6 +425,7 @@ class BrokerAccount:
                 order.status = "REJECTED"
                 order.message = f"T+1可卖数量不足: 请求{quantity}, 可卖{sellable}"
         self.orders.append(order)
+        self._index_add(order)  # 仅 PENDING/PARTIALLY_FILLED 会真正入索引（REJECTED 自动跳过）
         return order
 
     def submit_split(self, request: OrderRequest, timestamp: datetime | str | None = None) -> list[Order]:
@@ -391,15 +452,24 @@ class BrokerAccount:
             if order.id == order_id and order.status in {"PENDING", "PARTIALLY_FILLED"}:
                 order.status = "CANCELLED"
                 order.message = "用户撤单"
+                self._index_remove(order)  # 离开未结集合，从索引摘除
                 return True
         return False
 
     def cancel_open_orders(self, message: str = "日终取消", modes: Iterable[str] | None = None) -> None:
         allowed = set(modes) if modes is not None else None
-        for order in self.orders:
-            if order.status in {"PENDING", "PARTIALLY_FILLED"} and (allowed is None or order.execution_mode in allowed):
-                order.status = "CANCELLED"
-                order.message = message
+        # 只遍历未结索引（_open_orders 保持创建顺序、且成员状态恒为 PENDING/PARTIALLY_
+        # FILLED），与旧实现遍历 self.orders 全表再过滤未结完全等价，但不再扫数千笔历史。
+        cancelled = [
+            order for order in self._open_orders
+            if allowed is None or order.execution_mode in allowed
+        ]
+        for order in cancelled:
+            order.status = "CANCELLED"
+            order.message = message
+        # 遍历 _open_orders 时不能边遍历边改索引，撤完统一从索引摘除。
+        for order in cancelled:
+            self._index_remove(order)
 
     def _fees(self, side: str, amount: float, symbol: str = "") -> FeeBreakdown:
         """五项费用分项计算后相加；最低佣金只兜底佣金项。
@@ -476,11 +546,15 @@ class BrokerAccount:
         previous_close = bar.prev_close or position.last_price
         position.last_price = bar.close
         allowed = set(modes) if modes is not None else None
+        # 只取该标的的未结委托桶（桶内保持创建顺序，与旧实现遍历 self.orders 全表
+        # 过滤出的顺序一致），再套 execution_mode 过滤。先快照成 list：下面的成交
+        # 循环会把成交完的委托从索引摘除（改动 bucket），不能边遍历 bucket 边删。
         pending = [
-            order for order in self.orders
-            if order.symbol == bar.symbol and order.status in {"PENDING", "PARTIALLY_FILLED"}
-            and (allowed is None or order.execution_mode in allowed)
+            order for order in self._open_by_symbol.get(bar.symbol, ())
+            if allowed is None or order.execution_mode in allowed
         ]
+        if not pending:
+            return []
         filled: list[Fill] = []
         used_volume = 0.0
         for order in pending:
@@ -552,6 +626,9 @@ class BrokerAccount:
             order.total_fee = money(order.total_fee + fees.total_fee)
             order.status = "FILLED" if order.remaining == 0 else "PARTIALLY_FILLED"
             order.message = ""
+            if order.status == "FILLED":
+                # 全部成交 → 离开未结集合，从两份索引摘除（部分成交仍留在索引里）。
+                self._index_remove(order)
             if order.side == "BUY" and order.purpose == "PERMANENT" and not order.sequence_counted:
                 self.sequence_index += 1
                 order.sequence_counted = True
@@ -710,6 +787,8 @@ class BrokerAccount:
             symbol: Position(**value) for symbol, value in data.get("_positions_internal", {}).items()
         }
         account.orders = [Order(**item) for item in data.get("orders", [])]
+        # orders 被整体替换，派生的未结索引必须按新 orders 重建（快照不含索引）。
+        account._rebuild_open_index()
         account.trades = [Fill(**item) for item in data.get("trades", [])]
         account.withdrawals = [Withdrawal(**item) for item in data.get("withdrawals", [])]
         account._next_withdrawal_number = data.get(

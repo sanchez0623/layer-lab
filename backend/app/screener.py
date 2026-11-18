@@ -529,12 +529,18 @@ def run_screener(
     as_of: str | None = None,
     include_realtime: bool = False,
     index_history: dict[str, list[Bar]] | None = None,
+    daily_panel: Any | None = None,
 ) -> ScreeningResult:
     """``index_history``：按板块名预加载的指数日线（升序，截至最新交易日）。
 
     回测时间旅行场景必须传入：store.load_index(max_rows=260) 只回「截至最新日」
     的最近 260 根，回测 early as_of 一切窗口就不足 21 根（误报 L0 降级）。
     传入后 L0 直接复用，_bar_window(as_of) 切出的是 as_of 往前 260 根。
+
+    ``daily_panel``：可选的预加载日线面板（``QuanStore.load_daily_panel`` 产出）。
+    回测逐日选股时传入可把「每天重扫 parquet + 重跑复权」收敛为一次加载 + 逐日内存
+    切片，逐日窗口与 ``store.load_history(end=as_of)`` 逐字节一致。缺省（实盘 /
+    其他调用方）为 ``None``，走原有 per-call 加载，行为完全不变。
     """
     started = time.perf_counter()
     cfg = config or ScreenerConfig()
@@ -674,9 +680,16 @@ def run_screener(
     if target_rows:
         # end=当次选股时点：历史回看（回测/指定 as_of）必须取「截至 as_of 的最近
         # 260 根」，否则 tail 会落在 as_of 之后 → 早期时点窗口为空、永远选不出票。
-        history = store.load_history(
-            [row.code for row in target_rows], max_rows=260, end=as_of_text,
-        )
+        # daily_panel（回测逐日选股）命中时走内存切片，逐日窗口与下面 load_history
+        # 逐字节一致，但不再每天重扫 parquet + 重跑复权。
+        if daily_panel is not None:
+            history = daily_panel.history(
+                [row.code for row in target_rows], as_of_text, max_rows=260,
+            )
+        else:
+            history = store.load_history(
+                [row.code for row in target_rows], max_rows=260, end=as_of_text,
+            )
         for row in target_rows:
             bars = _bar_window(history.get(row.code, []), as_of_text)
             if len(bars) < 21:
