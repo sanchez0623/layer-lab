@@ -259,6 +259,31 @@ class LayeredTStrategy(Strategy):
         # 清仓信号诊断（见 _set_close_signal）：本轮首次判定清仓的 K 线快照。
         self._close_signal: dict | None = None
 
+    def _installment_amount(self, account: BrokerAccount, index: int) -> float:
+        """取第 ``index`` 笔的实际下注金额（应用 16 笔规模口径）。
+
+        - ``fixed``（默认）：直接取配置的绝对金额，行为与历史完全一致。
+        - ``equity``：按「(当前权益 + 已提现) / 初始本金」等比缩放。
+          把已提现的盈利加回，避免「提现越多次、相对仓位越被稀释」
+          （4M 阶梯在权益 6.5M 时只覆盖 ~62%）；
+          再套 ``installment_scale_floor`` 下限（默认 0.5），防止权益大幅回撤时
+          把下单金额压到尘粒（``board_buy_quantity`` 仍保证 ≥ 板块最小申报）。
+
+        四处读 ``installment_amounts``（首仓/加仓/尾盘首笔/做T）统一走这里，
+        单一真相源（架构原则 1）；新增口径时只改这一处。
+        """
+        index = max(0, min(int(index), len(self.config.installment_amounts) - 1))
+        base = float(self.config.installment_amounts[index])
+        if self.config.installment_scale_mode != "equity":
+            return base
+        withdrawn = float(getattr(account, "total_withdrawn", 0.0) or 0.0)
+        base_equity = float(account.equity) + withdrawn
+        initial = float(getattr(account, "initial_cash", 0.0) or 0.0)
+        if initial <= 0 or base_equity <= 0:
+            return base
+        scale = base_equity / initial
+        return base * max(scale, float(self.config.installment_scale_floor))
+
     def state_dict(self) -> dict:
         dump: dict = {"state_version": STATE_VERSION}
         for name, kind, _default in STRATEGY_STATE_FIELDS:
@@ -542,7 +567,7 @@ class LayeredTStrategy(Strategy):
                     return []
             elif index_history:
                 return []
-            return [self._buy_request(bar, self.config.installment_amounts[0], "换票日首笔")]
+            return [self._buy_request(bar, self._installment_amount(account, 0), "换票日首笔")]
         if (
             position.permanent_qty <= 0 or self.last_add_price is None
             or self.last_add_session is None or account.sequence_index >= 16
@@ -555,7 +580,7 @@ class LayeredTStrategy(Strategy):
             return []
         signal = self._add_signal(history, account)
         if signal:
-            amount = self.config.installment_amounts[account.sequence_index]
+            amount = self._installment_amount(account, account.sequence_index)
             return [self._buy_request(bar, amount, signal)]
         return []
 
@@ -716,7 +741,7 @@ class LayeredTStrategy(Strategy):
             return []
         if not self._index_gate_open(index_history, bar):
             return []
-        amount = self.config.installment_amounts[0]
+        amount = self._installment_amount(account, 0)
         # board_buy_quantity 已保证 ≥ 板块最小申报（方案 2：金额不足最小申报也按最小申报建仓）
         quantity = board_buy_quantity(bar.symbol, amount, bar.close)
         self.entry_submitted_date = bar.date
@@ -842,7 +867,7 @@ class LayeredTStrategy(Strategy):
         （最后一笔金额），保证满仓阶段做T体量与最大加仓档一致。
         """
         index = min(account.sequence_index, len(self.config.installment_amounts) - 1)
-        return self.config.installment_amounts[index]
+        return self._installment_amount(account, index)
 
     def _t_roundtrip_cost(self) -> float:
         """一次完整做T往返的成本率估算（占投入金额的比例，小数）。

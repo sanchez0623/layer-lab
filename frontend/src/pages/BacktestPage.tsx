@@ -84,6 +84,11 @@ const fallbackConfig: StrategyConfig = {
   risk_volume_caliber: 'annualized',
   // 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
   risk_volume_ratio: 0.8,
+  // 16 笔金额的规模口径：fixed=绝对金额（默认，向后兼容）/
+  // equity=按「(当前权益+已提现)/初始本金」等比缩放，避免账户增长后相对仓位被稀释。
+  // 必须登记在 fallbackConfig 里，否则 mergeKnown 在「带入回测」时会静默丢弃报告快照里的值。
+  installment_scale_mode: 'fixed',
+  installment_scale_floor: 0.5,
 };
 
 /** 回测仅保留漏斗轮动模式（清仓后重跑选股换票）；旧的单标的模式已下线。 */
@@ -902,6 +907,18 @@ export default function BacktestPage() {
                 <div className="rounded-xl border bg-muted/25 p-3">
                   <strong className="mb-2 block text-[12px] font-semibold text-foreground/80">加仓</strong>
                   <SwitchRow label="加仓按档位先松后紧" description="A3 浮亏信号逐档加严：档1（10万）最松（浮亏+缩量），档4（40万）最严（= 原始 A3）；浮盈右侧回撤不变。关闭 = 全档统一原始 A3" checked={config.add_tier_strict ?? true} onCheckedChange={(checked) => updateConfig('add_tier_strict', checked)} />
+                  {/* 16 笔金额的规模口径：equity 模式按账户权益等比缩放，避免账户增长后相对仓位被稀释 */}
+                  <FormGrid className="mt-2">
+                    <Field label="16 笔金额口径" hint="fixed=绝对金额（默认，向后兼容）；equity=按「(当前权益+已提现)/初始本金」等比缩放，账户增长时同步放大仓位、回撤时同步缩小（研究报告：敞口与 TWR 年化双升，代价 maxDD 放大）" error={configIssues.installment_scale_mode}>
+                      <SelectField value={config.installment_scale_mode ?? 'fixed'} onValueChange={(value) => updateConfig('installment_scale_mode', value as StrategyConfig['installment_scale_mode'])} options={[
+                        { value: 'fixed', label: 'fixed · 绝对金额（默认）' },
+                        { value: 'equity', label: 'equity · 按权益等比缩放' },
+                      ]} />
+                    </Field>
+                    <Field label="缩放下限（倍）" hint="equity 模式下的放大倍数下限：权益跌到初始本金一半以下也至少按半仓规模下注，防止尘粒单（0~1 小数）" error={configIssues.installment_scale_floor}>
+                      <NumberInput unit="×" min={0.1} max={1} step={0.1} value={config.installment_scale_floor ?? 0.5} onChange={(value) => updateConfig('installment_scale_floor', Number(value))} />
+                    </Field>
+                  </FormGrid>
                 </div>
 
                 {/* 止盈分组 */}

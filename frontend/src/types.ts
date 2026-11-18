@@ -106,6 +106,11 @@ export interface StrategyConfig {
   risk_volume_caliber?: string;
   /** 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（小数，0.8 = 80%） */
   risk_volume_ratio?: number;
+  /** 16 笔金额的规模口径：fixed=绝对金额（默认，向后兼容）/
+   *  equity=按「(当前权益+已提现)/初始本金」等比缩放，账户增长后同步放大仓位、回撤时同步缩小 */
+  installment_scale_mode?: 'fixed' | 'equity';
+  /** equity 口径下的放大倍数下限（小数，0.5 = 权益跌到初始本金一半以下也至少按半仓规模下注） */
+  installment_scale_floor?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {

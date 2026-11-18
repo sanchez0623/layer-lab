@@ -169,5 +169,15 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
     issue('risk_volume_ratio', '须为 0~100%（不含 0）的百分数');
   }
 
+  // ---- 16 笔金额的规模口径 --------------------------------------------------
+  const scaleMode = config.installment_scale_mode;
+  if (scaleMode !== undefined && !['fixed', 'equity'].includes(scaleMode)) {
+    issue('installment_scale_mode', '须为 fixed / equity 之一');
+  }
+  const scaleFloor = config.installment_scale_floor;
+  if (scaleMode === 'equity' && !(isNum(scaleFloor) && scaleFloor > 0 && scaleFloor <= 1)) {
+    issue('installment_scale_floor', '须为 0~100%（不含 0）的倍数（放大倍数下限）');
+  }
+
   return issues;
 }
