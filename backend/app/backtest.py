@@ -353,6 +353,17 @@ def cashflow_adjusted_series(
     return adjusted, returns
 
 
+def cashflow_adjusted_curve(
+    equity_curve: list[dict[str, Any]], adjusted_equities: list[float],
+) -> list[dict[str, Any]]:
+    """把调整后权益序列拼回一条带日期的曲线（供水下统计等按行取 equity/date）。
+
+    复用原始 equity_curve 的所有字段（date/cash/market_value…），只把 ``equity``
+    换成 TWR 口径的调整后权益——提现日的负台阶被抹平，水下时长不再被提现污染。
+    """
+    return [{**item, "equity": adj} for item, adj in zip(equity_curve, adjusted_equities)]
+
+
 def cashflow_adjusted_metrics(
     equity_curve: list[dict[str, Any]], initial_cash: float,
     withdrawals: list[dict[str, Any]] | None = None,
@@ -392,11 +403,8 @@ def cashflow_adjusted_metrics(
         twr_total_return = 0.0
         annualized = 0.0
     calmar = annualized / max_drawdown if max_drawdown > 0 else 0.0
-    # 水下统计按调整后权益重算：把提现台阶临时替换为调整后权益，复用同一函数。
-    adjusted_curve = [
-        {**item, "equity": adj} for item, adj in zip(equity_curve, adjusted)
-    ]
-    underwater = underwater_stats(adjusted_curve)
+    # 水下统计按调整后权益重算：复用同一构造，把提现台阶替换为调整后权益。
+    underwater = underwater_stats(cashflow_adjusted_curve(equity_curve, adjusted))
     return {
         "annualized_return": annualized,
         "total_return": twr_total_return,
@@ -516,8 +524,12 @@ def performance_metrics(
     # 敞口拆分：总敞口含 ETF beta 仓；个股/ETF 分项 + 完全空仓占比，避免误读
     # 「exposure 23% = 个股只用 23%」。
     exposure_parts = exposure_breakdown(equity_curve)
-    # 净值曲线水下时长：最长连续低于此前峰值的交易日区间。
-    underwater = underwater_stats(equity_curve)
+    # 顶层水下时长改用现金流调整（TWR）后的曲线：提现日在原始 equity 曲线上是负台阶，
+    # 会被误判为「水下一天」。与下方 cashflow_adjusted 块复用同一次 underwater 计算，
+    # 保证两个口径一致（不再算两遍）。顶层口径即用户看到的「当前水下/最长水下」。
+    underwater = cashflow_adjusted["underwater"]
+    # 注意区分：逐行写回 equity_curve 的 item["drawdown"]（上方 L~491）保持**原始口径**，
+    # 供前端画原始净值曲线的回撤着色，不受提现调整影响；只有 underwater 块换成了调整口径。
     # 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后重算，看收益是否靠少数极端项撑起。
     monthly_list = monthly_breakdown(equity_curve, initial_cash, withdrawals)
     best_month_pnl = max((float(row["pnl"]) for row in monthly_list), default=0.0)
