@@ -2,7 +2,8 @@
 
 - 现金流调整：把提现视为外部现金流而非亏损，重建 annualized/volatility/sharpe/maxDD/calmar。
   期望：无提现时与顶层口径一致；有提现时 Sharpe 显著高于「提现当亏损」口径、maxDD 更小。
-- 权益等比缩放（installment_scale_mode=equity）：16 笔金额随 (权益+已提现)/初始本金 缩放。
+- 权益等比缩放（installment_scale_mode=equity）：16 笔金额随 当前权益/初始本金 缩放
+  （已提现金额不再加回，见 bugfix/equity-scale-no-withdraw）。
   期望：fixed 模式金额不变（向后兼容）；equity 模式放大/缩小、且受 scale_floor 兜底。
 """
 from __future__ import annotations
@@ -115,10 +116,11 @@ def test_installment_amount_equity_mode_scales_with_account() -> None:
     halved = BrokerAccount(initial_cash=4_000_000.0, config=config)
     halved.cash = 1_000_000.0
     assert strategy._installment_amount(halved, 0) == pytest.approx(50_000.0, rel=1e-9)
-    # 已提现的盈利加回：equity 4M + withdrawn 4M = 8M → 与「权益翻倍」同额。
+    # 已提现的盈利不再加回（bugfix：提现已离场，不作为加仓依据）：
+    # equity 4M / initial 4M → scale 1.0 → 与 fixed 模式同额。
     withdrawn = BrokerAccount(initial_cash=4_000_000.0, config=config)
     withdrawn.total_withdrawn = 4_000_000.0
-    assert strategy._installment_amount(withdrawn, 0) == pytest.approx(200_000.0, rel=1e-9)
+    assert strategy._installment_amount(withdrawn, 0) == pytest.approx(100_000.0, rel=1e-9)
 
 
 def test_installment_scale_mode_validation() -> None:
