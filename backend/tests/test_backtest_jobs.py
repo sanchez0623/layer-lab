@@ -344,3 +344,54 @@ def test_cancel_before_first_day_returns_cancelled_report():
     assert report["status"] == "CANCELLED"
     assert report["equity_curve"] == []
     assert report["trades"] == []
+
+
+# --------------------------------------------------------------------------
+# 7. 放弃删除（前端「放弃」按钮 → DELETE /backtests/jobs/{id}）
+# --------------------------------------------------------------------------
+
+
+def test_delete_removes_terminal_job_and_checkpoint(tmp_path):
+    """放弃删除：终态作业（含检查点）被彻底清掉，list_jobs 不再返回。"""
+    storage = SQLiteStorage(tmp_path / "delete.db")
+    cancelled = _seed_orphan_job(storage, "CANCELLED")
+    storage.save_checkpoint(cancelled, "2025-01-24", 12, {}, {}, {"cursor_index": 12})
+    assert storage.get_checkpoint(cancelled) is not None
+
+    def builder(params, hooks, resume_state, checkpoint):  # pragma: no cover
+        raise AssertionError("本用例不应真正运行引擎")
+
+    manager = BacktestJobManager(storage, builder)
+    result = manager.delete(cancelled)
+
+    assert result["deleted"] is True
+    assert result["status"] == "CANCELLED"
+    assert storage.get_job(cancelled) is None           # 作业行已删
+    assert storage.get_checkpoint(cancelled) is None    # 检查点一并清掉
+    assert all(job["id"] != cancelled for job in manager.list_jobs(50))
+
+
+def test_delete_refuses_running_job(tmp_path):
+    """RUNNING 作业不可放弃删除：可能真有 worker 在跑，删了会失去唯一状态账本。"""
+    storage = SQLiteStorage(tmp_path / "delete_running.db")
+
+    def builder(params, hooks, resume_state, checkpoint):  # pragma: no cover
+        raise AssertionError("本用例不应真正运行引擎")
+
+    manager = BacktestJobManager(storage, builder)
+    running = _seed_orphan_job(storage, "RUNNING")
+
+    with pytest.raises(ValueError):
+        manager.delete(running)
+    assert storage.get_job(running) is not None   # 未被删除
+
+
+def test_delete_missing_job_raises_key_error(tmp_path):
+    storage = SQLiteStorage(tmp_path / "delete_missing.db")
+
+    def builder(params, hooks, resume_state, checkpoint):  # pragma: no cover
+        raise AssertionError("本用例不应真正运行引擎")
+
+    manager = BacktestJobManager(storage, builder)
+    with pytest.raises(KeyError):
+        manager.delete("no-such-job")

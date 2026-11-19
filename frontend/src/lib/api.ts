@@ -154,6 +154,9 @@ export const api = {
     request<{ jobs: BacktestJobView[] }>(`/backtests/jobs${query({ limit: limit === undefined ? undefined : String(limit) })}`),
   cancelBacktestJob: (jobId: string) =>
     request<{ job_id: string; status: string }>(`/backtests/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
+  /** 放弃并彻底删除一个已到终态的作业（作业行 + 检查点）；刷新后不再弹「可续传」横幅。 */
+  deleteBacktestJob: (jobId: string) =>
+    request<{ job_id: string; status: string; deleted: boolean }>(`/backtests/jobs/${encodeURIComponent(jobId)}`, { method: 'DELETE' }),
   resumeBacktestJob: (jobId: string) =>
     request<{ job_id: string; status: string; resumed: boolean }>(`/backtests/jobs/${encodeURIComponent(jobId)}/resume`, { method: 'POST' }),
   // 换票轨迹后台分页：主报告已瘦身不含全量 trail，列表按页拉取。

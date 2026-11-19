@@ -552,6 +552,47 @@ def test_backtest_job_flow_submit_progress_complete(tmp_path, monkeypatch):
     assert client.get("/api/backtests/jobs/nope").status_code == 404
 
 
+def test_abandon_deletes_terminal_job(tmp_path, monkeypatch):
+    """「放弃」删除终态作业：DELETE 后 list_jobs 不再返回，刷新不再弹「可续传」横幅。
+
+    回归：旧「放弃」只清前端状态 + 写 sessionStorage（刷新即丢），服务端那行
+    CANCELLED/FAILED 任务永远还在，一刷新又被 list_jobs 拉回来重新弹横幅。
+    """
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "test.db"))
+    application = create_app()
+    client = TestClient(application)
+    storage = application.state.storage
+    # 直接落一条 CANCELLED 终态作业（模拟「已撤单」的残留任务）。
+    storage.create_job({
+        "id": "job-cancelled", "name": "残留任务", "status": "CANCELLED", "progress": 29.31,
+        "total_days": 58, "params": {}, "created_at": "2026-11-19T09:00:00",
+        "updated_at": "2026-11-19T09:05:00",
+    })
+    storage.save_checkpoint("job-cancelled", "2025-01-24", 12, {}, {}, {"cursor_index": 12})
+    assert any(j["id"] == "job-cancelled" for j in client.get("/api/backtests/jobs").json()["jobs"])
+
+    # 放弃 → DELETE 删掉作业行 + 检查点。
+    deleted = client.delete("/api/backtests/jobs/job-cancelled")
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["deleted"] is True
+    assert all(j["id"] != "job-cancelled" for j in client.get("/api/backtests/jobs").json()["jobs"])
+    assert storage.get_job("job-cancelled") is None
+    assert storage.get_checkpoint("job-cancelled") is None
+
+    # 再删一次 → 404（已不存在）。
+    assert client.delete("/api/backtests/jobs/job-cancelled").status_code == 404
+
+    # RUNNING 作业不可删 → 409（可能真有 worker 在跑）。
+    storage.create_job({
+        "id": "job-running", "name": "在跑", "status": "RUNNING", "progress": 0.0,
+        "total_days": None, "params": {}, "created_at": "2026-11-19T09:10:00",
+        "updated_at": "2026-11-19T09:10:00",
+    })
+    assert client.delete("/api/backtests/jobs/job-running").status_code == 409
+    assert storage.get_job("job-running") is not None
+
+
 def test_auto_strategy_toggle_keeps_round_state(tmp_path, monkeypatch):
     """关闭自动策略=暂停调度：strategy_state 必须保留（64f692bb 加仓卡死事故回归）。
 

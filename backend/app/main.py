@@ -542,7 +542,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.10.0",
+        version="2.10.1",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1698,6 +1698,21 @@ def create_app() -> FastAPI:
             return backtest_jobs.cancel(job_id)
         except KeyError:
             raise HTTPException(status_code=404, detail="任务不存在")
+
+    @application.delete("/api/backtests/jobs/{job_id}")
+    def delete_backtest_job(job_id: str):
+        """放弃并彻底删除一个已到终态的作业（作业行 + 检查点）。
+
+        前端「放弃」按钮调用。只允许删 CANCELLED/FAILED/INTERRUPTED 终态作业；
+        RUNNING/CANCELLING 一律 409（RUNNING 可能真有 worker 在跑，CANCELLING 应等
+        它落到终态再删）。删掉后 list_jobs 不再返回，刷新页面不会再弹「可续传」横幅。
+        """
+        try:
+            return backtest_jobs.delete(job_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
 
     @application.post("/api/backtests/jobs/{job_id}/resume", status_code=202)
     def resume_backtest_job(job_id: str):

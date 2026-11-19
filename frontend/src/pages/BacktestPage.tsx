@@ -513,17 +513,26 @@ export default function BacktestPage() {
     finally { setJobBusy(false); }
   };
 
-  /** 放弃在途作业：仅清空前端在途状态并记入 sessionStorage（刷新后不再重新弹出），服务端作业本身不受影响。 */
-  const dismissJob = () => {
+  /** 放弃在途作业：清空前端在途状态，并删除服务端作业行 + 检查点。
+   *
+   * 旧实现只清前端状态 + 写 sessionStorage（刷新即丢），服务端那行 CANCELLED/FAILED
+   * 任务永远还在，一刷新又被 list_jobs 拉回来重新弹「可续传」横幅。现在真正调
+   * DELETE /backtests/jobs/{id} 删掉服务端作业，刷新后不再复现。删除失败（如网络/
+   * 已被并发删除）不阻塞前端收尾，仅提示。
+   */
+  const dismissJob = async () => {
     stopPolling();
     const id = jobIdRef.current || jobView?.id;
-    if (id) {
-      settledJobIdsRef.current.add(id);
-      rememberDismissedJob(id);
-    }
     jobIdRef.current = null;
     setJobView(null);
     setRunning(false);
+    if (!id) return;
+    settledJobIdsRef.current.add(id);
+    try {
+      await api.deleteBacktestJob(id);
+    } catch {
+      // 删除失败不阻塞前端收尾：作业已到终态，最坏情况是刷新后再看到一次横幅。
+    }
   };
 
   // 进度轮询：作业在途时每秒拉一次，直到终态；卸载即清 interval，导航离开后服务端继续跑。
@@ -1086,7 +1095,7 @@ export default function BacktestPage() {
                     <span className="text-[12px] font-semibold">{jobView.status === 'RUNNING' ? '回测进行中' : `回测${statusLabel(jobView.status)}`} · {jobView.name || '后台回测'}</span>
                     <div className="flex items-center gap-1.5">
                       {jobView.status === 'RUNNING' && <Button variant="outline" size="sm" onClick={() => void cancelJob()} disabled={jobBusy}><Square className="size-3.5" />停止</Button>}
-                      {JOB_RESUMABLE_STATUSES.includes(jobView.status) && <><Button variant="outline" size="sm" onClick={() => void resumeJob()} disabled={jobBusy}><Play />继续</Button><Button variant="ghost" size="sm" onClick={dismissJob} disabled={jobBusy}>放弃</Button></>}
+                      {JOB_RESUMABLE_STATUSES.includes(jobView.status) && <><Button variant="outline" size="sm" onClick={() => void resumeJob()} disabled={jobBusy}><Play />继续</Button><Button variant="ghost" size="sm" onClick={() => void dismissJob()} disabled={jobBusy}>放弃</Button></>}
                     </div>
                   </div>
                   <Progress value={Math.max(0, Math.min(100, jobView.progress))} className="mt-2" />

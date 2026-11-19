@@ -355,6 +355,11 @@ class SQLiteStorage:
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM backtest_checkpoints WHERE job_id=?", (job_id,))
 
+    def delete_job(self, job_id: str) -> None:
+        """删除一条后台作业行（「放弃」用）。调用方负责只对终态作业调用。"""
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM backtest_jobs WHERE id=?", (job_id,))
+
     def find_paper_by_order(self, order_id: str, account_id: str) -> dict[str, Any] | None:
         """按 (account_id, order_id) 精确定位账户。
 

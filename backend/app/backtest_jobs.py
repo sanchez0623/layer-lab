@@ -119,6 +119,36 @@ class BacktestJobManager:
             self._cancel_event.set()
             return {"job_id": job_id, "status": "CANCELLING", "cancelled": True}
 
+    def delete(self, job_id: str) -> dict[str, Any]:
+        """放弃并彻底删除一个已到终态的作业（作业行 + 检查点）。
+
+        背景：前端「放弃」原本只清前端在途状态 + 写 sessionStorage（刷新即丢），
+        服务端那行 CANCELLED/FAILED/INTERRUPTED 永远还在，一刷新又被 list_jobs
+        拉回来重新弹「可续传」横幅。这里提供真正的删除，供「放弃」调用。
+
+        安全边界：
+        - 只允许删终态作业（CANCELLED / FAILED / INTERRUPTED）。RUNNING / CANCELLING
+          一律拒绝——RUNNING 可能真有 worker 在跑（删了会失去唯一的状态账本），
+          CANCELLING 应走 cancel() 等它落到终态再删。
+        - 删作业行时一并清检查点，避免留下孤儿检查点。
+        - 作业行 id 即报告 id，但「放弃」针对的是没跑出报告的终态作业，正常无报告
+          可删；即便同 id 报告存在也不在此处删报告（报告有自己的删除入口）。
+        """
+        with self._lock:
+            if self._current_job_id == job_id:
+                raise ValueError("该任务正在运行，请先取消再放弃。")
+            job = self._storage.get_job(job_id)
+            if not job:
+                raise KeyError(job_id)
+            if job["status"] not in RESUMABLE_STATUSES:
+                raise ValueError(
+                    f"任务状态为 {job['status']}，不可放弃删除（仅 "
+                    f"{sorted(RESUMABLE_STATUSES)} 可删）。"
+                )
+            self._storage.delete_checkpoint(job_id)
+            self._storage.delete_job(job_id)
+            return {"job_id": job_id, "status": job["status"], "deleted": True}
+
     def recover_interrupted(self) -> int:
         """进程启动时清理遗留任务（worker 线程与取消事件都在内存里，重启后不会再跑）：
         - RUNNING → INTERRUPTED：容器重启=被打断，可从检查点续传。
