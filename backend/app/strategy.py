@@ -894,6 +894,16 @@ class LayeredTStrategy(Strategy):
                     live_bid: float | None = None, live_ask: float | None = None,
                     daily_amplitude: float | None = None,
                     daily_turnover_rate: float | None = None) -> bool:
+        # 与永久仓加仓同日互斥（永久仓优先、做T让位）：当日已发永久仓加仓
+        # （add_submitted_date == bar.date）则不做T。反向不锁（已做T 不阻止后续加仓）。
+        # 说明阻挡机制：做T新开窗口 09:35–14:00，尾盘加仓窗口 14:30–14:50，两者不重叠。
+        # 在当前窗口布局下，"当日已加仓→同日再做T" 主要由 on_intraday 的结构挡住——
+        # ①加仓 bar 上 _tail_add_requests 命中即 return，早于做T块；②加仓只在 14:30+ 发生，
+        # 此时做T窗口已关（on_intraday 对 ≥14:00 直接 return）。本闸是把"永久仓优先"写成
+        # 显式不变式的 defense-in-depth：一旦当日发过加仓，_t_eligible 恒 False，即使将来
+        # 做T/加仓窗口调整到重叠、或有同日更晚的做T决策，也不会再发做T单。
+        if self.add_submitted_date == bar.date:
+            return False
         position = account.position(bar.symbol)
         # 深跌幅当日做T旁路：当日盘中跌幅（相对前收盘）≥ t_deep_drop_pct 时，
         # 绕过底仓笔数门槛（sequence_index ≥ t_min_base_entries）。20cm 板日内 -10% 是
