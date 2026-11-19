@@ -263,9 +263,12 @@ class LayeredTStrategy(Strategy):
         """取第 ``index`` 笔的实际下注金额（应用 16 笔规模口径）。
 
         - ``fixed``（默认）：直接取配置的绝对金额，行为与历史完全一致。
-        - ``equity``：按「(当前权益 + 已提现) / 初始本金」等比缩放。
-          把已提现的盈利加回，避免「提现越多次、相对仓位越被稀释」
-          （4M 阶梯在权益 6.5M 时只覆盖 ~62%）；
+        - ``equity``：按「当前权益 / 初始本金」等比缩放。
+          分母只用当前在场权益（cash + 持仓市值），**不含已提现金额**：
+          提现已经离场，不再承担波动、也不参与后续加仓的规模口径，
+          若把它加回会虚高 scale、在权益并未真正增长时放大加仓敞口
+          （如 equity 5.5M + 已提现 3.5M、initial 4M 时，加回提现得 scale 2.25，
+          剔除后为 1.375，后者才反映真实的在场资金规模）；
           再套 ``installment_scale_floor`` 下限（默认 0.5），防止权益大幅回撤时
           把下单金额压到尘粒（``board_buy_quantity`` 仍保证 ≥ 板块最小申报）。
 
@@ -276,8 +279,9 @@ class LayeredTStrategy(Strategy):
         base = float(self.config.installment_amounts[index])
         if self.config.installment_scale_mode != "equity":
             return base
-        withdrawn = float(getattr(account, "total_withdrawn", 0.0) or 0.0)
-        base_equity = float(account.equity) + withdrawn
+        # 缩放基数只用当前在场权益（cash + 持仓市值），不含已提现金额：
+        # 提现已离场，不再承担波动，也不应作为加仓规模的依据；加回它会虚高 scale。
+        base_equity = float(account.equity)
         initial = float(getattr(account, "initial_cash", 0.0) or 0.0)
         if initial <= 0 or base_equity <= 0:
             return base
