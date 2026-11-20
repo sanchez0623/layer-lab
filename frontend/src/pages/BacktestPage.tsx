@@ -1203,15 +1203,15 @@ export default function BacktestPage() {
                         { icon: RotateCcw, label: '做 T 净贡献', value: signedMoney(metrics.t_net_profit), note: `${integer(metrics.t_trade_count)} 笔`, tone: metrics.t_net_profit >= 0 ? 'text-destructive' : 'text-success' },
                         ...(betaInfo?.enabled ? [{ icon: Layers3, label: 'ETF beta 净贡献', value: signedMoney(Number(betaInfo.pnl ?? 0)), note: `${integer(Number(betaInfo.trade_count ?? 0))} 笔 · ${betaInfo.exit_reason || '持仓中'}`, tone: Number(betaInfo.pnl ?? 0) >= 0 ? 'text-destructive' : 'text-success' }] : []),
                         { icon: CircleDollarSign, label: '累计交易费用', value: money(metrics.total_fees), note: '五項分项相加，滑点另计' },
-                        ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: `${metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔 · ` : ''}已真实离场${metrics.profit_withdrawn != null && metrics.profit_withdrawn > 0 ? ` · 其中盈利出金 ${money(metrics.profit_withdrawn)}` : ''}`, tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
+                        ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: `${metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔` : '未提取'}${metrics.profit_withdrawn != null && metrics.profit_withdrawn > 0 ? ' · 盈利' : ''}`, tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
                         { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
                       ].map(({ icon: Icon, label, value, note, tone }) => (
                         <div key={label} className="rounded-lg border bg-card px-2.5 py-2">
                           <div className="flex items-center gap-2">
                             <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
                             <div className="min-w-0 flex-1"><small className="block text-[10px] text-muted-foreground">{label}</small><strong className={cn('block font-mono text-[13px]', tone)}>{value}</strong></div>
-                            <span className="shrink-0 text-right text-[10px] text-muted-foreground">{note}</span>
                           </div>
+                          {note && <div className="mt-1 whitespace-normal break-words text-right text-[10px] text-muted-foreground">{note}</div>}
                         </div>
                       ))}
                     </div>
