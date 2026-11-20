@@ -853,7 +853,12 @@ class LayeredTStrategy(Strategy):
         signal = self._add_signal(full_history, account)
         if not signal:
             return []
-        amount = self.config.installment_amounts[account.sequence_index]
+        # 下注额统一走 _installment_amount（单一真相源）：与 on_daily 日线加仓、
+        # _tail_entry_requests 首仓、做T 同一口径，应用 16 笔规模口径
+        # （fixed=裸档位；equity=按在场权益等比缩放）。此前这里直接读
+        # installment_amounts[seq]，equity 模式下尾盘加仓会系统性偏小（漏乘
+        # 权益缩放系数），与其它三条路径口径分裂——违反架构原则 1。
+        amount = self._installment_amount(account, account.sequence_index)
         # 同上：board_buy_quantity 保证 ≥ 板块最小申报，方案 2 下不再因买不起整手而跳过
         quantity = board_buy_quantity(bar.symbol, amount, bar.close)
         self.add_submitted_date = bar.date
