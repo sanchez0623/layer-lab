@@ -9,6 +9,24 @@ from typing import Any
 from .domain import Dataset, utc_now
 from .pagination import paginate
 
+# 模拟盘净值快照的两种来源：实时 tick 与 /advance 缓存回放。回放数据不能混进
+# live 序列（否则回放历史会把「真实净值曲线」污染成当初的模拟结果）。
+PAPER_EQUITY_SOURCES = ("live", "replay")
+
+# 与回测 equity_curve 对齐的字段（回测见 backtest.py 的 equity_curve.append）。
+PAPER_EQUITY_FIELDS = (
+    "date", "ts", "equity", "cash", "market_value", "beta_value",
+    "invested", "position_qty", "beta_qty",
+)
+
+
+def _equity_number(value: Any) -> float | None:
+    return None if value is None else float(value)
+
+
+def _equity_quantity(value: Any) -> int | None:
+    return None if value is None else int(value)
+
 
 class SQLiteStorage:
     def __init__(self, path: str | Path) -> None:
@@ -44,6 +62,15 @@ class SQLiteStorage:
                 );
                 CREATE INDEX IF NOT EXISTS idx_paper_orders_account ON paper_orders(account_id);
                 CREATE INDEX IF NOT EXISTS idx_paper_trades_account ON paper_trades(account_id);
+                CREATE TABLE IF NOT EXISTS paper_equity (
+                    account_id TEXT NOT NULL, date TEXT NOT NULL, ts TEXT NOT NULL,
+                    equity REAL, cash REAL, market_value REAL, beta_value REAL,
+                    invested REAL, position_qty INTEGER, beta_qty INTEGER,
+                    source TEXT NOT NULL DEFAULT 'live',
+                    PRIMARY KEY (account_id, date, ts)
+                );
+                CREATE INDEX IF NOT EXISTS idx_paper_equity_account_source
+                    ON paper_equity(account_id, source, date);
                 CREATE TABLE IF NOT EXISTS app_settings (
                     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
@@ -196,6 +223,103 @@ class SQLiteStorage:
                 "SELECT payload FROM paper_accounts ORDER BY updated_at DESC,id DESC"
             ).fetchall()
         return [json.loads(row["payload"]) for row in rows]
+
+    # -- 模拟盘逐日/逐笔净值快照 ------------------------------------------
+    # paper_accounts 只存「当前状态」，会被每次 save_paper 覆盖；逐日净值必须独立
+    # 落库才能算 max_drawdown/sharpe/volatility/…。越早开始积累越好（历史不可回补）。
+
+    @staticmethod
+    def _check_equity_source(source: str) -> str:
+        if source not in PAPER_EQUITY_SOURCES:
+            raise ValueError(
+                f"未知的净值来源: {source}（仅支持 {'/'.join(PAPER_EQUITY_SOURCES)}）"
+            )
+        return source
+
+    def save_paper_equity(
+        self, account_id: str, row: dict[str, Any], source: str = "live",
+    ) -> None:
+        """写入一条权益快照（同一 ``(account_id, date, ts)`` 幂等覆盖）。
+
+        ``row`` 至少给 ``date`` / ``ts``，其余字段与回测 ``equity_curve`` 同名；
+        缺失的数值列存 NULL。``source`` 区分实时（live）与缓存回放（replay）。
+        """
+        self._check_equity_source(source)
+        day = str(row.get("date") or "")
+        ts = str(row.get("ts") or "")
+        if not day or not ts:
+            raise ValueError("净值快照必须包含 date 与 ts")
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO paper_equity("
+                "account_id,date,ts,equity,cash,market_value,beta_value,invested,"
+                "position_qty,beta_qty,source) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    account_id, day, ts,
+                    _equity_number(row.get("equity")),
+                    _equity_number(row.get("cash")),
+                    _equity_number(row.get("market_value")),
+                    _equity_number(row.get("beta_value")),
+                    _equity_number(row.get("invested")),
+                    _equity_quantity(row.get("position_qty")),
+                    _equity_quantity(row.get("beta_qty")),
+                    source,
+                ),
+            )
+
+    def list_paper_equity(
+        self, account_id: str, source: str = "live",
+        start: str | None = None, end: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """逐笔快照（按 date,ts 升序）；``start``/``end`` 为交易日闭区间（YYYY-MM-DD）。"""
+        self._check_equity_source(source)
+        clauses = ["account_id=?", "source=?"]
+        args: list[Any] = [account_id, source]
+        if start:
+            clauses.append("date>=?")
+            args.append(str(start)[:10])
+        if end:
+            clauses.append("date<=?")
+            args.append(str(end)[:10])
+        query = (
+            "SELECT " + ",".join(PAPER_EQUITY_FIELDS) + " FROM paper_equity "
+            "WHERE " + " AND ".join(clauses) + " ORDER BY date ASC, ts ASC"
+        )
+        with self._connect() as connection:
+            rows = connection.execute(query, args).fetchall()
+        return [{field: row[field] for field in PAPER_EQUITY_FIELDS} for row in rows]
+
+    def list_paper_equity_daily(
+        self, account_id: str, source: str = "live",
+        start: str | None = None, end: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """每交易日只取当日最后一条（ts 最大）——下游指标/曲线默认用这个口径。
+
+        跨日首条不补齐：曲线连续性（如停牌/未 tick 日）由消费方按需 forward-fill。
+        """
+        by_date: dict[str, dict[str, Any]] = {}
+        for row in self.list_paper_equity(account_id, source=source, start=start, end=end):
+            by_date[row["date"]] = row
+        return list(by_date.values())
+
+    def paper_equity_coverage(self, account_id: str, source: str = "live") -> dict[str, Any]:
+        """该账户在某来源下已落库的覆盖区间（按交易日）：``{start,end,count}``。
+
+        无数据时 ``start``/``end`` 为 None、``count`` 为 0；前端可据此标注
+        「自 YYYY-MM-DD 起，样本 N 天」。区间不受查询 start/end 过滤影响。
+        """
+        self._check_equity_source(source)
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT MIN(date) AS start, MAX(date) AS end, COUNT(DISTINCT date) AS count "
+                "FROM paper_equity WHERE account_id=? AND source=?",
+                (account_id, source),
+            ).fetchone()
+        return {
+            "start": row["start"] if row else None,
+            "end": row["end"] if row else None,
+            "count": int(row["count"] or 0) if row else 0,
+        }
 
     def save_screener_run(self, payload: dict[str, Any]) -> None:
         """保存一次完整的选股结果（payload 即 ScreeningResult.to_dict()）。"""

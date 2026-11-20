@@ -108,6 +108,17 @@ def latest_closed_intraday_bar(bars: list[Bar], now: datetime) -> Bar | None:
     return closed[-1] if closed else None
 
 
+def is_daily_close_bar(bar: Bar) -> bool:
+    """是否日终 bar：日线数据集一律算；盘中 bar 以 15:00 收盘后为界。
+
+    模拟盘净值快照只在日终写一条（同日多次由 ts 区分、读取取最后一条），
+    live-tick 与 /ticks 共用这个口径，避免两处各写一个收盘判定。
+    """
+    if bar.timeframe == "daily":
+        return True
+    return bar.timestamp.hour >= 15
+
+
 def snapshot_execution_bar(
     bar: Bar, bar_volume: float | None = None, bar_amount: float | None = None,
 ) -> Bar:
@@ -659,6 +670,34 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="模拟账户不存在")
         return BrokerAccount.from_dict(state)
 
+    def record_paper_equity(
+        account: BrokerAccount, when: datetime | str, *, source: str = "live",
+    ) -> None:
+        """日终/收盘落一条权益快照（字段与回测 ``equity_curve`` 对齐）。
+
+        ``when`` 是行情时间（bar.timestamp 或 ISO 字符串）：``date`` 取交易日、
+        ``ts`` 取行情时间戳。同一 ``(account_id,date,ts)`` 幂等覆盖；同一天多次写入
+        由 ts 区分，读取端用 ``list_paper_equity_daily`` 取当日最后一条。
+        ``source="replay"`` 只用于 /advance 缓存回放，绝不写进 live 序列。
+
+        字段口径：``invested`` = 全部永久仓成本（与回测单标的 ``permanent_cost`` 同义），
+        ``position_qty`` = 个股总持仓（永久+T，用于 exposure/均值），
+        ``beta_value``/``beta_qty`` = ETF beta 腿当日市值/股数。
+        """
+        timestamp = when if isinstance(when, str) else when.isoformat(timespec="seconds")
+        positions = list(account.positions.values())
+        storage.save_paper_equity(account.id, {
+            "date": str(timestamp)[:10],
+            "ts": str(timestamp),
+            "equity": account.equity,
+            "cash": account.cash,
+            "market_value": account.market_value,
+            "beta_value": account.beta_market_value,
+            "invested": account.permanent_cost,
+            "position_qty": sum(position.total_qty for position in positions),
+            "beta_qty": sum(position.beta_qty for position in positions),
+        }, source=source)
+
     def load_fee_config() -> FeeConfig:
         raw = storage.get_setting(FEE_SETTING_KEY)
         if not raw:
@@ -799,12 +838,16 @@ def create_app() -> FastAPI:
         index_history: list[Bar] | None = None, recent_bars: list[Bar] | None = None,
         daily_close: bool = False, execution_bar: Bar | None = None,
         signal_bar: Bar | None = None, detect_intraday: bool = True,
+        source: str = "live",
     ) -> None:
         """推进一根行情。
 
         live-tick 路径把「最近一根已收盘 5 分钟 bar」作为 ``signal_bar`` 交给策略，
         快照 ``bar`` 只负责撮合与日终信号；``detect_intraday=False`` 时（当日还没有
         已收盘 5 分钟 bar）跳过盘中检测，避免用未完成 bar 反复计数。
+
+        ``daily_close=True`` 的日终分支会额外落一条净值快照；``source`` 区分实时
+        （live，默认）与 /advance 缓存回放（replay，不能混进真实净值序列）。
         """
         strategy: LayeredTStrategy | None = None
         is_new_day = account.current_date != bar.date
@@ -887,6 +930,10 @@ def create_app() -> FastAPI:
                         if request.quantity > 0:
                             account.submit_split(request, bar.timestamp)
                     account.last_daily_signal_date = bar.date
+            if daily_close:
+                # 日终净值快照：策略信号已出、委托已挂（尚未成交，不改权益），
+                # 记录的是当日收盘后的账户状态。
+                record_paper_equity(account, bar.timestamp, source=source)
             account.strategy_state = strategy.state_dict()
             account.armed_state = "ARMED" if strategy.armed else ("EXIT" if strategy.liquidating else "OFF")
             return
@@ -899,6 +946,8 @@ def create_app() -> FastAPI:
                 account.armed_state = "ARMED"
             elif permanent_return < account.config.price_disarm:
                 account.armed_state = "OFF"
+        if daily_close:
+            record_paper_equity(account, bar.timestamp, source=source)
 
     # ------------------------------------------------------------------
     # 后端定时驱动：live-tick 由进程内调度器推进，不再依赖前端定时器
@@ -1061,6 +1110,10 @@ def create_app() -> FastAPI:
         account.new_day(bar.date)
         account.process_bar(bar, modes={"NEXT_BAR", "NEXT_OPEN"})
         account.mark(bar.symbol, bar.close)
+        if is_daily_close_bar(bar):
+            # beta 腿日终快照（与个股 apply_bar 的日终钩子同口径）：先 tick ETF 再 tick
+            # 个股时，后一条（同日更晚 ts 或覆盖同 ts）会带上完整账户状态。
+            record_paper_equity(account, bar.timestamp)
         if not account.config.etf_beta_enabled:
             return
         config = account.config
@@ -1239,7 +1292,7 @@ def create_app() -> FastAPI:
             except (requests.RequestException, ValueError):
                 recent_bars = []
 
-        daily_close = bar.timestamp.hour >= 15
+        daily_close = is_daily_close_bar(bar)
         # 盘中检测只看最近一根**已收盘**的 5 分钟 K 线；当日尚无收盘 bar 时跳过检测。
         closed_bar = latest_closed_intraday_bar(recent_bars, bar.timestamp)
         execution_bar = snapshot_execution_bar(
@@ -1927,6 +1980,36 @@ def create_app() -> FastAPI:
     def paper_account(account_id: str):
         return get_paper(account_id).to_dict()
 
+    @application.get("/api/paper/accounts/{account_id}/equity")
+    def paper_equity_history(
+        account_id: str,
+        source: Literal["live", "replay"] = "live",
+        start: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+        end: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    ):
+        """模拟盘逐日净值（字段与回测 ``equity_curve`` 对齐）。
+
+        - ``items``：每交易日取当日最后一条快照（date 升序），不是逐笔原始行；
+        - ``coverage``：该 source 已落库的**完整**覆盖区间 ``{start, end, count}``
+          （按交易日），前端可标注「自 YYYY-MM-DD 起，样本 N 天」。历史账户不回补，
+          区间从第一次落库那天开始；跨日首条不补齐，由消费方决定是否 forward-fill；
+        - ``source=replay`` 只返回 /advance 缓存回放行，默认 live 序列不含回放数据。
+
+        账户不存在 → 404；source 非法 / start、end 格式非法 / start > end → 422。
+        """
+        get_paper(account_id)  # 账户不存在时抛 404
+        if start and end and start > end:
+            raise HTTPException(status_code=422, detail="start 不能晚于 end")
+        items = storage.list_paper_equity_daily(
+            account_id, source=source, start=start, end=end,
+        )
+        return {
+            "items": items,
+            "source": source,
+            "count": len(items),
+            "coverage": storage.paper_equity_coverage(account_id, source=source),
+        }
+
     @application.post("/api/paper/accounts/{account_id}/reset")
     def reset_paper_account(account_id: str):
         previous = get_paper(account_id)
@@ -2134,7 +2217,9 @@ def create_app() -> FastAPI:
         )
         if bar.high < max(bar.open, bar.close, bar.low) or bar.low > min(bar.open, bar.close, bar.high):
             raise ValueError("tick OHLC关系不合法")
-        apply_bar(account, bar)
+        # 手工 tick 与 live-tick 同一日终口径：15:00 后（或日线 bar）视为日终，
+        # 由 apply_bar 的日终分支落一条 live 净值快照。
+        apply_bar(account, bar, daily_close=is_daily_close_bar(bar), source="live")
         return save_paper(account)
 
     @application.post("/api/paper/accounts/{account_id}/live-tick")
@@ -2195,7 +2280,7 @@ def create_app() -> FastAPI:
             recent = bars[session_start:account.cursor + 1]
             apply_bar(
                 account, bar, daily_history=daily_history, index_history=index_history,
-                recent_bars=recent, daily_close=daily_close,
+                recent_bars=recent, daily_close=daily_close, source="replay",
             )
             account.cursor += 1
             account.status = "ACTIVE" if account.cursor < len(bars) else "COMPLETED"
