@@ -157,7 +157,9 @@ def test_limit_price_and_partial_fill():
     order = account.submit(request(quantity=200, order_type="LIMIT", limit_price=9.9))
     bar = make_bar(1, 10.2, volume=1_000)
     bar.low = 9.8
-    account.config.volume_participation = 0.1
+    # 容量 = volume(手)×100(股/手)×参与度 = 1000×100×0.001 = 100 股，
+    # 只够成交 100 股 → 部分成交（限价单撮合 + 索引行为的被测意图）。
+    account.config.volume_participation = 0.001
     fills = account.process_bar(bar)
     assert len(fills) == 1
     assert fills[0].price == 9.9
