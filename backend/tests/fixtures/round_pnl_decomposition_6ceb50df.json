@@ -1,0 +1,828 @@
+{
+ "report_id": "6ceb50df-da91-414b-94ed-851b604b3280",
+ "note": "真实报告 6ceb50df 的派生子集：仅保留 5 个轮次所在净值区间（date/beta_value）、相关轮次/提现/ETF 成交，用于 decompose_round_pnl 回归测试。",
+ "rounds": [
+  {
+   "id": "R001",
+   "symbol": "sh.688012",
+   "name": "中微公司",
+   "board": "科创板",
+   "start_date": "2020-08-10",
+   "end_date": "2020-09-21",
+   "status": "CLOSED",
+   "pnl": -192112.33,
+   "max_invested": 2405956.47,
+   "close_reason": "最大持仓30日强平"
+  },
+  {
+   "id": "R002",
+   "symbol": "sh.688981",
+   "name": "中芯国际",
+   "board": "科创板",
+   "start_date": "2020-09-23",
+   "end_date": "2020-10-15",
+   "status": "CLOSED",
+   "pnl": 31615.19,
+   "max_invested": 801257.35,
+   "close_reason": "Armed量价背离三选二_3根5分钟K线"
+  },
+  {
+   "id": "R003",
+   "symbol": "sh.688981",
+   "name": "中芯国际",
+   "board": "科创板",
+   "start_date": "2021-02-08",
+   "end_date": "2021-03-04",
+   "status": "CLOSED",
+   "pnl": 23369.62,
+   "max_invested": 401507.25,
+   "close_reason": "Armed量价背离三选二_3根5分钟K线"
+  },
+  {
+   "id": "R005",
+   "symbol": "sz.300677",
+   "name": "英科医疗",
+   "board": "创业板",
+   "start_date": "2021-07-28",
+   "end_date": "2021-09-08",
+   "status": "CLOSED",
+   "pnl": -189409.63,
+   "max_invested": 2381362.42,
+   "close_reason": "最大持仓30日强平"
+  },
+  {
+   "id": "R006",
+   "symbol": "sz.300376",
+   "name": "易事特",
+   "board": "创业板",
+   "start_date": "2021-09-10",
+   "end_date": "2021-10-25",
+   "status": "CLOSED",
+   "pnl": 29994.55,
+   "max_invested": 1794353.31,
+   "close_reason": "超期持仓24日_止盈降至3%"
+  }
+ ],
+ "equity_curve": [
+  {
+   "date": "2020-08-07",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-10",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-11",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-12",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-13",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-14",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-17",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-18",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-19",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-20",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-21",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-24",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-25",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-26",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-27",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-28",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-08-31",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-01",
+   "beta_value": 1074629.4
+  },
+  {
+   "date": "2020-09-02",
+   "beta_value": 1081906.8
+  },
+  {
+   "date": "2020-09-03",
+   "beta_value": 1072607.9
+  },
+  {
+   "date": "2020-09-04",
+   "beta_value": 1066543.4
+  },
+  {
+   "date": "2020-09-07",
+   "beta_value": 1030560.7
+  },
+  {
+   "date": "2020-09-08",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-09",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-10",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-11",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-14",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-15",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-16",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-17",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-18",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-21",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-22",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-23",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-24",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-25",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-28",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-29",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-09-30",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-10-09",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-10-12",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2020-10-13",
+   "beta_value": 1343193.6
+  },
+  {
+   "date": "2020-10-14",
+   "beta_value": 1333199.6
+  },
+  {
+   "date": "2020-10-15",
+   "beta_value": 1324205.0
+  },
+  {
+   "date": "2021-02-05",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-08",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-09",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-10",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-18",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-19",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-22",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-23",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-24",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-25",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-02-26",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-03-01",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-03-02",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-03-03",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-03-04",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-07-27",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-07-28",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-07-29",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-07-30",
+   "beta_value": 1370470.4
+  },
+  {
+   "date": "2021-08-02",
+   "beta_value": 1397237.4
+  },
+  {
+   "date": "2021-08-03",
+   "beta_value": 1384883.4
+  },
+  {
+   "date": "2021-08-04",
+   "beta_value": 1419062.8
+  },
+  {
+   "date": "2021-08-05",
+   "beta_value": 1407944.2
+  },
+  {
+   "date": "2021-08-06",
+   "beta_value": 1394354.8
+  },
+  {
+   "date": "2021-08-09",
+   "beta_value": 1378706.4
+  },
+  {
+   "date": "2021-08-10",
+   "beta_value": 231244.2
+  },
+  {
+   "date": "2021-08-11",
+   "beta_value": 228496.2
+  },
+  {
+   "date": "2021-08-12",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-13",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-16",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-17",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-18",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-19",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-20",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-23",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-24",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-25",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-26",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-27",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-30",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-08-31",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-01",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-02",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-03",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-06",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-07",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-08",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-09",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-10",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-13",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-14",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-15",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-16",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-17",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-22",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-23",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-24",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-27",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-28",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-29",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-09-30",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-08",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-11",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-12",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-13",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-14",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-15",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-18",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-19",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-20",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-21",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-22",
+   "beta_value": 0.0
+  },
+  {
+   "date": "2021-10-25",
+   "beta_value": 0.0
+  }
+ ],
+ "withdrawals": [
+  {
+   "id": "W00000006",
+   "date": "2020-10-15",
+   "amount": 46370.74,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 92741.48,
+   "trigger": "F00000033",
+   "cash_after": 2758495.67
+  },
+  {
+   "id": "W00000007",
+   "date": "2020-11-03",
+   "amount": 2507.68,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 5015.36,
+   "trigger": "F00000038",
+   "cash_after": 3323680.24
+  },
+  {
+   "id": "W00000008",
+   "date": "2020-11-12",
+   "amount": 858.2,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 1716.39,
+   "trigger": "F00000039",
+   "cash_after": 4002848.34
+  },
+  {
+   "id": "W00000009",
+   "date": "2020-12-04",
+   "amount": 874.66,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 1749.32,
+   "trigger": "F00000043",
+   "cash_after": 3324180.63
+  },
+  {
+   "id": "W00000010",
+   "date": "2021-01-29",
+   "amount": 63980.59,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 127961.17,
+   "trigger": "F00000044",
+   "cash_after": 4062884.61
+  },
+  {
+   "id": "W00000011",
+   "date": "2021-03-04",
+   "amount": 23369.62,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 46739.24,
+   "trigger": "F00000049",
+   "cash_after": 4086254.23
+  },
+  {
+   "id": "W00000012",
+   "date": "2021-06-17",
+   "amount": 47832.37,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 95664.74,
+   "trigger": "F00000066",
+   "cash_after": 3527742.95
+  },
+  {
+   "id": "W00000013",
+   "date": "2021-06-18",
+   "amount": 24958.99,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 49917.98,
+   "trigger": "F00000067",
+   "cash_after": 4100203.04
+  },
+  {
+   "id": "W00000014",
+   "date": "2021-10-25",
+   "amount": 7977.28,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 15954.55,
+   "trigger": "F00000094",
+   "cash_after": 2601639.0
+  },
+  {
+   "id": "W00000015",
+   "date": "2021-10-25",
+   "amount": 7977.28,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 15954.56,
+   "trigger": "F00000095",
+   "cash_after": 3086837.9
+  },
+  {
+   "id": "W00000016",
+   "date": "2021-10-25",
+   "amount": 7977.28,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 15954.55,
+   "trigger": "F00000096",
+   "cash_after": 3572036.8
+  },
+  {
+   "id": "W00000017",
+   "date": "2021-10-25",
+   "amount": 6062.74,
+   "mode": "per_trade",
+   "method": "ratio",
+   "period_profit": 12125.47,
+   "trigger": "F00000097",
+   "cash_after": 3940787.96
+  }
+ ],
+ "beta_fills": [
+  {
+   "date": "2020-09-01",
+   "side": "BUY",
+   "quantity": 404300,
+   "price": 2.6283,
+   "fee": 90.75,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2020-09-08",
+   "side": "SELL",
+   "quantity": 404300,
+   "price": 2.5537,
+   "fee": 88.18,
+   "realized_pnl": -30339.71
+  },
+  {
+   "date": "2020-10-13",
+   "side": "BUY",
+   "quantity": 499700,
+   "price": 2.6793,
+   "fee": 114.34,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2020-10-26",
+   "side": "SELL",
+   "quantity": 499700,
+   "price": 2.4998,
+   "fee": 106.68,
+   "realized_pnl": -89917.17
+  },
+  {
+   "date": "2020-10-30",
+   "side": "BUY",
+   "quantity": 505600,
+   "price": 2.6073,
+   "fee": 112.58,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2020-11-02",
+   "side": "BUY",
+   "quantity": 261400,
+   "price": 2.5703,
+   "fee": 57.38,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2020-11-02",
+   "side": "SELL",
+   "quantity": 316800,
+   "price": 2.5697,
+   "fee": 69.52,
+   "realized_pnl": -8056.58
+  },
+  {
+   "date": "2020-11-03",
+   "side": "SELL",
+   "quantity": 188800,
+   "price": 2.6217,
+   "fee": 42.27,
+   "realized_pnl": 5015.36
+  },
+  {
+   "date": "2020-11-12",
+   "side": "SELL",
+   "quantity": 261400,
+   "price": 2.6017,
+   "fee": 58.08,
+   "realized_pnl": 1716.39
+  },
+  {
+   "date": "2020-12-02",
+   "side": "BUY",
+   "quantity": 507700,
+   "price": 2.6023,
+   "fee": 112.82,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2020-12-03",
+   "side": "BUY",
+   "quantity": 259900,
+   "price": 2.5833,
+   "fee": 57.33,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2020-12-03",
+   "side": "SELL",
+   "quantity": 354100,
+   "price": 2.5827,
+   "fee": 78.1,
+   "realized_pnl": -4818.97
+  },
+  {
+   "date": "2020-12-04",
+   "side": "SELL",
+   "quantity": 153600,
+   "price": 2.6077,
+   "fee": 34.21,
+   "realized_pnl": 1749.32
+  },
+  {
+   "date": "2021-01-29",
+   "side": "SELL",
+   "quantity": 259900,
+   "price": 3.0887,
+   "fee": 68.56,
+   "realized_pnl": 127961.17
+  },
+  {
+   "date": "2021-04-23",
+   "side": "BUY",
+   "quantity": 607400,
+   "price": 2.8243,
+   "fee": 146.5,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2021-04-26",
+   "side": "BUY",
+   "quantity": 100900,
+   "price": 2.9103,
+   "fee": 25.07,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2021-06-17",
+   "side": "SELL",
+   "quantity": 515300,
+   "price": 3.0227,
+   "fee": 133.01,
+   "realized_pnl": 95664.74
+  },
+  {
+   "date": "2021-06-18",
+   "side": "SELL",
+   "quantity": 193000,
+   "price": 3.0957,
+   "fee": 51.02,
+   "realized_pnl": 49917.98
+  },
+  {
+   "date": "2021-07-30",
+   "side": "BUY",
+   "quantity": 411800,
+   "price": 3.3403,
+   "fee": 117.47,
+   "realized_pnl": 0.0
+  },
+  {
+   "date": "2021-08-10",
+   "side": "SELL",
+   "quantity": 343100,
+   "price": 3.3397,
+   "fee": 97.86,
+   "realized_pnl": -401.59
+  },
+  {
+   "date": "2021-08-12",
+   "side": "SELL",
+   "quantity": 68700,
+   "price": 3.3197,
+   "fee": 19.48,
+   "realized_pnl": -1454.3
+  }
+ ]
+}

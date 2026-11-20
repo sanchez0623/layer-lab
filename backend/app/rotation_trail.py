@@ -31,7 +31,8 @@ TRAIL_CSV_FIELDS = [
     "chg20d_at_select", "gate_open", "reason", "bottleneck",
     "after_l0", "after_l1", "after_l2", "after_l3", "eligible",
     "pnl", "return_rate", "holding_days", "entry_delay_days",
-    "max_invested", "t_net_profit", "close_reason",
+    "max_invested", "t_net_profit", "stock_pnl", "beta_pnl", "withdraw_in_round",
+    "close_reason",
     "beta_symbol",
 ]
 
@@ -106,7 +107,8 @@ def enrich_trail(
 
     - ``kind``：WAITING / BETA 之外一律 ROUND（含「选中但未建仓」的 OPEN）；
     - 轮次成果从 ``rounds``（按 round id 关联）补齐：``close_reason`` /
-      ``max_invested`` / ``t_net_profit`` / ``return_rate``；
+      ``max_invested`` / ``t_net_profit`` / ``stock_pnl`` / ``beta_pnl`` /
+      ``withdraw_in_round`` / ``return_rate``；
     - ``holding_days``：建仓 → 出场之间的交易日数（含首尾）；BETA 逐日项为 1；
     - ``entry_delay_days``：选股 → 建仓之间的交易日数；
     - WAITING 行补 ``reason``（gate_closed / no_candidate）与 ``bottleneck``。
@@ -138,6 +140,11 @@ def enrich_trail(
             entry["close_reason"] = round_row.get("close_reason")
             entry["max_invested"] = round_row.get("max_invested")
             entry["t_net_profit"] = round_row.get("t_net_profit")
+            # 轮次盈亏分腿（个股腿 / ETF 腿 / 轮内提现）：新报告闭合时写入，
+            # 旧报告由 main._decompose_report_rounds 读时离线补齐后透传。
+            entry["stock_pnl"] = round_row.get("stock_pnl")
+            entry["beta_pnl"] = round_row.get("beta_pnl")
+            entry["withdraw_in_round"] = round_row.get("withdraw_in_round")
             entry["return_rate"] = _round_return_rate(round_row)
             _apply_close_diagnostic(entry, round_row)
         else:
@@ -495,6 +502,9 @@ def flatten_for_csv(items: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
             "entry_delay_days": "" if item.get("entry_delay_days") is None else item["entry_delay_days"],
             "max_invested": "" if item.get("max_invested") is None else item["max_invested"],
             "t_net_profit": "" if item.get("t_net_profit") is None else item["t_net_profit"],
+            "stock_pnl": "" if item.get("stock_pnl") is None else item["stock_pnl"],
+            "beta_pnl": "" if item.get("beta_pnl") is None else item["beta_pnl"],
+            "withdraw_in_round": "" if item.get("withdraw_in_round") is None else item["withdraw_in_round"],
             "close_reason": item.get("close_reason") or "",
             "beta_symbol": item.get("beta_symbol") or "",
         })
