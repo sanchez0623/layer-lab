@@ -159,7 +159,8 @@ def _parse_tencent_batch(text: str) -> dict[str, dict[str, Any]]:
         if close <= 0:
             continue
         prev_close = _float(fields[4], close)
-        volume = _float(fields[36])
+        # 腾讯 volume 单位=手（1 手=100 股），×100 转成股，与 quan parquet / 撮合口径统一。
+        volume = _float(fields[36]) * 100
         amount = _float(fields[37]) * 10000.0
         if amount <= 0 and volume > 0:
             amount = close * volume
@@ -243,7 +244,8 @@ class MarketDataService:
         open_ = _float(fields[5], close)
         high = _float(fields[33], close)
         low = _float(fields[34], close)
-        volume = _float(fields[36])
+        # 腾讯 volume 单位=手（1 手=100 股），×100 转成股，与 quan parquet / 撮合容量口径统一。
+        volume = _float(fields[36]) * 100
         amount = _float(fields[37]) * 10000.0
         turnover = _float(fields[38]) / 100.0 if fields[38] else None
         bid = _float(fields[9]) if len(fields) > 9 and fields[9] else None
@@ -555,7 +557,9 @@ class MarketDataService:
             open_ = _float(row[1]) if len(row) > 1 else close
             high = _float(row[3]) if len(row) > 3 else close
             low = _float(row[4]) if len(row) > 4 else close
-            volume = _float(row[5]) if len(row) > 5 else 0.0
+            # 腾讯 volume 单位=手（1 手=100 股），×100 转成股；amount 回退 close*volume
+            # 也随之修正（旧值因「手」偏小 100 倍）。
+            volume = _float(row[5]) * 100 if len(row) > 5 else 0.0
             amount = _float(row[6]) if len(row) > 6 else 0.0
             if min(open_, high, low, close) <= 0:
                 previous_close = close
@@ -615,7 +619,9 @@ class MarketDataService:
             close = _float(row[2])
             high = _float(row[3])
             low = _float(row[4])
-            volume = _float(row[5])
+            # 腾讯 volume 单位=手（1 手=100 股），×100 转成股；amount=close*volume 用换算后
+            # 的股量，修正旧实现因「手」偏小 100 倍的问题。
+            volume = _float(row[5]) * 100
             if min(open_, high, low, close) <= 0:
                 continue
             amount = close * volume

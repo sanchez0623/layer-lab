@@ -53,7 +53,7 @@ def test_fetch_tencent_intraday_uses_m5_endpoint_and_parses(monkeypatch, tmp_pat
     assert bars[0].timestamp == datetime(2026, 11, 12, 9, 35)
     assert bars[0].open == pytest.approx(239.20)
     assert bars[-1].close == pytest.approx(239.78)
-    assert bars[-1].amount == pytest.approx(239.78 * 125_309)
+    assert bars[-1].amount == pytest.approx(239.78 * 125_309 * 100)  # volume 已 ×100 转股
     assert quote["prev_close"] == pytest.approx(231.2)
     # 只有最后一根 bar 挂当前快照的盘口/换手，不伪造历史盘口。
     assert bars[0].bid is None and bars[0].ask is None
