@@ -22,6 +22,9 @@ import type {
   Paginated,
   PaperBetaResponse,
   PaperMetricsResponse,
+  PaperRound,
+  PaperStrategyMetricsResponse,
+  PaperSwitchesResponse,
   PrepareResponse,
   RefreshStatus,
   Report,
@@ -194,6 +197,19 @@ export const api = {
   // ETF beta 腿摘要：与回测 data_info.beta 同键同口径。
   accountBeta: (id: string) =>
     request<PaperBetaResponse>(`/paper/accounts/${encodeURIComponent(id)}/beta`),
+  // 轮次明细：后台分页，行与回测 rounds 同构（含三腿分拆 + 止盈执行诊断）。
+  accountRounds: (id: string, page = 1, pageSize = 20) =>
+    request<Paginated<PaperRound>>(
+      `/paper/accounts/${encodeURIComponent(id)}/rounds${query({
+        page: String(page), page_size: String(pageSize),
+      })}`,
+    ),
+  // 策略指标汇总（胜率 / 盈亏比 / 平均单轮 / 加仓与退出原因分布）：只吃轮次 + 成交。
+  accountRoundsSummary: (id: string) =>
+    request<PaperStrategyMetricsResponse>(`/paper/accounts/${encodeURIComponent(id)}/rounds/summary`),
+  // 策略开关状态：来自账户自己的 config 快照（在途逻辑定格，不读全局配置）。
+  accountSwitches: (id: string) =>
+    request<PaperSwitchesResponse>(`/paper/accounts/${encodeURIComponent(id)}/switches`),
   resetAccount: (id: string) => request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/reset`, { method: 'POST' }),
   applyAccountFees: (id: string, fees: FeeConfig) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/fees`, { method: 'POST', body: JSON.stringify({ fees }) }),

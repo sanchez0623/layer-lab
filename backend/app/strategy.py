@@ -131,6 +131,10 @@ STRATEGY_STATE_FIELDS: list[tuple[str, str, object]] = [
     ("add_submitted_date", "date", None),
     ("round_entry_date", "date", None),
     ("last_intraday_timestamp", "ts", None),
+    # 轮次闭合时的清仓信号快照（trigger/signal_price/signal_time/price_return）：
+    # 模拟盘没有独立的收尾事件，轮次明细是读时从成交流水重建的，所以必须把「决策
+    # 瞬间」的信号落进账户状态，下一次轮次开始时才清空（见 on_fill 首笔建仓分支）。
+    ("last_close_signal", "json", None),
 ]
 
 
@@ -155,6 +159,10 @@ def _coerce(kind: str, raw: object, default: object) -> object:
             return str(raw) if raw else default
         if kind == "ts":
             return datetime.fromisoformat(str(raw)) if raw else default
+        if kind == "json":
+            # 嵌套 dict 状态（如 last_close_signal）：落库后是 JSON 对象；显式 null /
+            # 非对象脏数据回落缺省，避免下游 .get() 炸在非 dict 上。
+            return dict(raw) if isinstance(raw, dict) else default
     except (TypeError, ValueError):
         pass
     return default
@@ -258,6 +266,10 @@ class LayeredTStrategy(Strategy):
         self._index_gate_memo_value: bool = False
         # 清仓信号诊断（见 _set_close_signal）：本轮首次判定清仓的 K 线快照。
         self._close_signal: dict | None = None
+        # 已落库的清仓信号（跨 tick 保留）：回测在轮次闭合时直接读 _close_signal；
+        # 模拟盘轮次是事后从成交流水重建的，只能把信号留在账户状态里，等 paper_rounds
+        # 读走后再由下一轮首笔建仓清空（见 on_fill）。
+        self.last_close_signal: dict | None = None
 
     def _installment_amount(self, account: BrokerAccount, index: int) -> float:
         """取第 ``index`` 笔的实际下注金额（应用 16 笔规模口径）。
@@ -344,23 +356,34 @@ class LayeredTStrategy(Strategy):
 
         信号价 = 决策 K 线的 close；成交价 = 下一根 bar 开盘（含滑点）。两者之差
         就是「信号 +15%、落袋 +8.8%」里执行落差的来源，报告据此做止盈执行诊断。
-        仅首次触发记录（``_close_signal`` 已存在则不覆盖），保证拿到的是最初信号价。
-        不进 ``STRATEGY_STATE_FIELDS``：这是逐轮诊断信息，轮次闭合时由 backtest 读走
-        写进 round，无需跨重启持久化。
+        只记录首次触发（``_close_signal`` 已存在则不覆盖），保证拿到的是最初信号价。
+        ``_close_signal`` 只活在内存、轮次闭合时由回测读走；另写一份
+        ``last_close_signal`` 进 ``STRATEGY_STATE_FIELDS``（并同步到
+        ``account.strategy_state``），让模拟盘的读时轮次重建也能拿到「决策瞬间」的
+        信号价——这是历史无法回补、只能从现在开始落库的字段。
         """
         if self._close_signal is not None:
             return
         price_return, _ = self._returns(account, bar.symbol, bar.close, self.round_t_start)
         timestamp = bar.timestamp
-        self._close_signal = {
+        signal = {
             "trigger": trigger,
             "signal_price": bar.close,
             "signal_time": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
             "price_return": price_return,
         }
+        self._close_signal = signal
+        self.last_close_signal = dict(signal)
+        # 立即写一份到账户状态（本 tick 结束还会由 state_dict() 整体覆盖，双写保证
+        # 即使本轮 tick 后续提前返回也不会丢信号）。
+        account.strategy_state["last_close_signal"] = dict(signal)
 
     def on_fill(self, fill: Fill, session_index: int) -> None:
         if fill.side == "BUY" and fill.purpose == "PERMANENT":
+            if self.round_entry_date is None and self.last_close_signal is not None:
+                # 新一轮首笔建仓：上一轮的清仓信号已完成使命，清空避免被 paper_rounds
+                # 误挂到新轮（轮次是读时重建的，只能保留最近一次闭合的信号）。
+                self.last_close_signal = None
             self.last_add_price = fill.price
             self.last_add_session = session_index
             self.had_new_low = False
