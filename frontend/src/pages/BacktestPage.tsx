@@ -1337,6 +1337,10 @@ export default function BacktestPage() {
                           const status = String(item.status || '').toUpperCase();
                           const gateBoards = Object.entries(item.gate?.boards ?? {});
                           const candidates = item.candidates ?? [];
+                          // 轮次盈亏拆分（个股腿 / ETF 腿 / 轮内提现）：仅在读时派生成功后展示。
+                          const pnlSplit = !isSpan && item.stock_pnl != null && item.beta_pnl != null
+                            ? `个股 ${signedMoney(item.stock_pnl)} · ETF ${signedMoney(item.beta_pnl)}${(item.withdraw_in_round ?? 0) > 0 ? ` · 提现 ${money(item.withdraw_in_round)}` : ''}`
+                            : null;
                           return (
                             <Fragment key={trailKey}>
                               <TableRow className={isSpan ? 'bg-muted/25' : ''}>
@@ -1350,7 +1354,12 @@ export default function BacktestPage() {
                                 <TableCell>{isSpan ? '—' : item.entry_date || item.exit_date ? <span className="font-mono text-[11px]">{item.entry_date ? shortDate(item.entry_date) : '—'} → {item.exit_date ? shortDate(item.exit_date) : '持仓中'}</span> : '—'}</TableCell>
                                 <TableCell className="text-right font-mono text-[12px]">{isWaitingSpan ? '—' : item.holding_days ?? '—'}</TableCell>
                                 <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{isWaitingSpan ? '—' : item.return_rate != null ? signedPercent(item.return_rate) : '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{isWaitingSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}</TableCell>
+                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>
+                                  {isWaitingSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}
+                                  {pnlSplit && (
+                                    <small className="mt-0.5 block whitespace-nowrap text-[9px] font-normal leading-3 text-muted-foreground">{pnlSplit}</small>
+                                  )}
+                                </TableCell>
                                 <TableCell>{isBeta || isBetaSpan ? <div><Badge tone="indigo">ETF持仓</Badge><small className="ml-1 text-[10px] text-muted-foreground">个股空仓期间覆盖</small></div> : isSpan ? <span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span> : <div><Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>{item.close_reason && <small className="ml-1 text-[10px] text-muted-foreground">{item.close_reason}</small>}</div>}</TableCell>
                               </TableRow>
                               {expanded && (
@@ -1385,11 +1394,14 @@ export default function BacktestPage() {
                                           ))}
                                         </div>
                                       )}
-                                      {!isSpan && (item.entry_delay_days != null || item.max_invested != null || item.t_net_profit != null) && (
+                                      {!isSpan && (item.entry_delay_days != null || item.max_invested != null || item.t_net_profit != null || item.stock_pnl != null || item.beta_pnl != null) && (
                                         <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
                                           {item.entry_delay_days != null && <span>建仓延迟 <b className="font-mono text-foreground">{integer(item.entry_delay_days)}</b> 天</span>}
                                           {item.max_invested != null && <span>峰值投入 <b className="font-mono text-foreground">{money(item.max_invested)}</b></span>}
                                           {item.t_net_profit != null && <span>做 T 净贡献 <b className="font-mono text-foreground">{signedMoney(item.t_net_profit)}</b></span>}
+                                          {item.stock_pnl != null && <span>个股腿盈亏 <b className={cn('font-mono', item.stock_pnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(item.stock_pnl)}</b></span>}
+                                          {item.beta_pnl != null && <span>ETF 腿盈亏 <b className={cn('font-mono', item.beta_pnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(item.beta_pnl)}</b></span>}
+                                          {(item.withdraw_in_round ?? 0) > 0 && <span>轮内提现 <b className="font-mono text-foreground">{money(item.withdraw_in_round)}</b></span>}
                                         </div>
                                       )}
                                       {!isSpan && item.close_signal_price != null && (
@@ -1402,7 +1414,7 @@ export default function BacktestPage() {
                                             {item.close_fill_price != null && <span><span className="text-muted-foreground">成交价 </span><b className="font-mono text-foreground">{money(item.close_fill_price)}</b></span>}
                                             {item.close_fill_time != null && <span><span className="text-muted-foreground">成交时间 </span><b className="font-mono text-foreground">{shortDate(item.close_fill_time)}</b></span>}
                                             {item.close_execution_gap != null && <span><span className="text-muted-foreground">执行落差 </span><b className={cn('font-mono', item.close_execution_gap < 0 ? 'text-success' : 'text-muted-foreground')}>{signedPercent(item.close_execution_gap)}</b></span>}
-                                            {item.close_round_return != null && <span><span className="text-muted-foreground">轮次收益 </span><b className="font-mono text-foreground">{signedPercent(item.close_round_return)}</b></span>}
+                                            {item.close_round_return != null && <span><span className="text-muted-foreground">轮次收益 </span><b className="font-mono text-foreground">{signedPercent(item.close_round_return)}</b><small className="ml-1 text-muted-foreground">含 ETF 腿与轮内提现</small></span>}
                                             {item.close_return_gap != null && <span><span className="text-muted-foreground">总落差 </span><b className={cn('font-mono', item.close_return_gap < 0 ? 'text-success' : 'text-muted-foreground')}>{signedPercent(item.close_return_gap)}</b></span>}
                                           </div>
                                         </div>

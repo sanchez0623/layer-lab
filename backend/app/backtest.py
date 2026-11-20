@@ -581,6 +581,143 @@ def performance_metrics(
     }
 
 
+# -- 轮次盈亏分腿（个股腿 / ETF beta 腿 / 轮内提现） --------------------------
+# 口径（已用报告 6ceb50df 的 R001 与成交明细互相验证）：
+#   rounds[].pnl = stock_pnl + beta_pnl - withdraw_in_round
+# rounds[].pnl 是「轮内权益变化」，混合了个股腿真实盈亏、ETF beta 腿盈亏（含未实现）
+# 与轮内提现。ETF 腿用「资本账户法」计算：
+#   beta_pnl = beta_value_end - beta_value_start
+#              - Σ(买入金额 + 买入费用) + Σ(卖出金额 - 卖出费用)
+# 个股腿用恒等式取残差：stock_pnl = pnl + withdraw_in_round - beta_pnl。
+# R001（688012，2020-08-10~09-21）：pnl=-192112.33、轮内提现 0、ETF 腿=-30339.71
+# → 个股腿 = -161772.62，与成交明细里的个股已实现盈亏完全一致。
+
+
+def _beta_fill_cash_flows(
+    beta_fills: list[Any] | None, start_date: str, end_date: str,
+) -> tuple[float, float]:
+    """汇总轮次区间 ``[start_date, end_date]`` 内 ETF beta 腿的买入 / 卖出现金流。
+
+    兼容两种成交形态：引擎的 ``Fill`` 对象（``account.trades``，带 purpose）与
+    报告 ``data_info.beta.fills`` 的紧凑 dict（quantity/price/fee）。买入计
+    「成交金额 + 费用」、卖出计「成交金额 - 费用」。区间左闭右闭：互斥模式下
+    「选到个股换仓」的 ETF 卖出在轮次建仓日开盘成交，属于本轮 beta 腿的退出。
+    """
+    buy_total = 0.0
+    sell_total = 0.0
+    for fill in beta_fills or []:
+        if isinstance(fill, dict):
+            day = str(fill.get("date") or "")
+            side = fill.get("side")
+            amount = fill.get("amount")
+            if amount is None:
+                amount = float(fill.get("quantity") or 0.0) * float(fill.get("price") or 0.0)
+            fee = fill.get("total_fee", fill.get("fee", 0.0)) or 0.0
+        else:
+            if getattr(fill, "purpose", None) != "BETA":
+                continue
+            day = str(getattr(fill, "timestamp", "") or "")[:10]
+            side = getattr(fill, "side", None)
+            amount = getattr(fill, "amount", 0.0)
+            fee = getattr(fill, "total_fee", 0.0)
+        if not day or not (start_date <= day <= end_date):
+            continue
+        amount = float(amount or 0.0)
+        fee = float(fee or 0.0)
+        if side == "BUY":
+            buy_total += amount + fee
+        elif side == "SELL":
+            sell_total += amount - fee
+    return money(buy_total), money(sell_total)
+
+
+def _round_withdraw_total(
+    withdrawals: list[Any] | None, start_date: str, end_date: str,
+) -> float:
+    """轮次区间 ``(start_date, end_date]`` 内的提现合计。
+
+    左开右闭：建仓日 ``new_day`` 的月度提现发生在建仓撮合之前，属于上一轮；
+    轮次结束日当天的提现算本轮。兼容 ``Withdrawal`` 对象与已落库的 dict。
+    """
+    total = 0.0
+    for item in withdrawals or []:
+        if isinstance(item, dict):
+            day = str(item.get("date") or "")
+            amount = item.get("amount")
+        else:
+            day = str(getattr(item, "date", "") or "")
+            amount = getattr(item, "amount", 0.0)
+        if start_date < day <= end_date:
+            total += float(amount or 0.0)
+    return money(total)
+
+
+def decompose_round_pnl(
+    rounds: list[dict[str, Any]] | None,
+    equity_curve: list[dict[str, Any]] | None,
+    withdrawals: list[dict[str, Any]] | None,
+    beta_fills: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """给缺少分腿字段的轮次就地补齐 ``stock_pnl`` / ``beta_pnl`` / ``withdraw_in_round``。
+
+    新回测在轮次闭合时已写好这三个字段；历史报告没有，这里用报告自带的
+    ``equity_curve`` + ``withdrawals`` + ``data_info.beta.fills`` 离线重算，
+    幂等（已有 ``stock_pnl`` 的轮次跳过）。一趟扫描净值曲线建「日期→序号 /
+    日期→beta_value」映射，单轮 O(1) 取前一日基准，买卖成交与提现按区间过滤。
+
+    未结束（OPEN）轮次没有 ``end_date``：用净值曲线最后一个交易日作区间终点
+    （其 ``pnl`` 本来就是截至该日的权益变化）；CLOSED 却缺 ``end_date`` 的脏数据
+    跳过，不瞎补。返回同一个 ``rounds`` 列表（便于调用方直接使用）。
+    """
+    rows = [row for row in (rounds or []) if isinstance(row, dict)]
+    if not rows:
+        return []
+    dates: list[str] = []
+    beta_by_date: dict[str, float] = {}
+    for point in equity_curve or []:
+        day = str(point.get("date") or "")
+        if not day:
+            continue
+        dates.append(day)
+        beta_by_date[day] = float(point.get("beta_value") or 0.0)
+    index = {day: position for position, day in enumerate(dates)}
+    last_day = dates[-1] if dates else None
+
+    def beta_value_on(day: str) -> float:
+        position = index.get(day)
+        if position is not None:
+            return beta_by_date[dates[position]]
+        # 不在曲线上（停牌 / 脏数据）：退到不晚于该日的最后一个净值点。
+        before = bisect_right(dates, day) - 1
+        return beta_by_date[dates[before]] if before >= 0 else 0.0
+
+    for row in rows:
+        if row.get("stock_pnl") is not None:
+            continue
+        start = str(row.get("start_date") or "")
+        end = str(row.get("end_date") or "")
+        if not start:
+            continue
+        if not end:
+            if str(row.get("status") or "").upper() == "CLOSED":
+                continue
+            end = last_day or ""
+        pnl = row.get("pnl")
+        if not end or pnl is None:
+            continue
+        position = index.get(start)
+        previous = dates[position - 1] if position is not None and position > 0 else None
+        beta_start = money(beta_by_date.get(previous, 0.0)) if previous else 0.0
+        beta_end = money(beta_value_on(end))
+        buy, sell = _beta_fill_cash_flows(beta_fills, start, end)
+        beta_pnl = money(beta_end - beta_start - buy + sell)
+        withdraw = _round_withdraw_total(withdrawals, start, end)
+        row["withdraw_in_round"] = withdraw
+        row["beta_pnl"] = beta_pnl
+        row["stock_pnl"] = money(float(pnl) + withdraw - beta_pnl)
+    return rows
+
+
 class FunnelRotationBacktest:
     """选股漏斗轮动回测：每次清仓后重新跑 L0→L4，取当时第一名换票。
 
@@ -627,6 +764,9 @@ class FunnelRotationBacktest:
         self.etf_bars: list[Bar] = []
         self.etf_bars_by_date: dict[str, Bar] = {}
         self._beta_fills: list[dict[str, Any]] = []
+        # 轮次分腿的「前一日 beta 市值」基准：日期 → 当日收盘 beta_value。
+        # 建仓/续传时由 equity_curve 重建，之后随每日净值点滚动更新。
+        self._beta_value_by_date: dict[str, float] = {}
         self._beta_entry_cost = 0.0
         self._beta_entry_date: str | None = None
         self._beta_last_exit_reason: str | None = None
@@ -1147,6 +1287,47 @@ class FunnelRotationBacktest:
             ):
                 item["deep_loss_recovery_days"] = session_index - item["_deep_loss_start_session"]
 
+    # -- 轮次盈亏分腿（个股 / ETF beta / 轮内提现）------------------------
+
+    def _previous_trading_day(self, day: str) -> str | None:
+        """轮次建仓日的前一交易日（beta 市值基准取该日收盘）。"""
+        position = self._timeline_index.get(day)
+        if position is None or position <= 0:
+            return None
+        return self.timeline[position - 1]
+
+    def _current_beta_value(self) -> float:
+        """当前 ETF beta 腿市值（按最近一次 ETF 收盘价盯市）。"""
+        position = self._beta_position()
+        if position is None:
+            return 0.0
+        return money(position.beta_qty * position.last_price)
+
+    def _decompose_round(self, item: dict[str, Any], end_date: str | None) -> None:
+        """轮次闭合 / 收尾时写入三行分腿字段（口径见 ``decompose_round_pnl``）。
+
+        与读时离线重算同一套恒等式：``stock_pnl = pnl + 轮内提现 - ETF腿``，
+        ETF 腿 = 末日市值 - 前一日市值 - 买入现金流 + 卖出现金流。
+        """
+        start = str(item.get("start_date") or "")
+        end = str(end_date or item.get("end_date") or "")
+        if not start or not end or item.get("pnl") is None:
+            return
+        previous = self._previous_trading_day(start)
+        beta_start = money(self._beta_value_by_date.get(previous, 0.0)) if previous else 0.0
+        if end in self._beta_value_by_date:
+            beta_end = money(self._beta_value_by_date[end])
+        else:
+            # 轮次在当天盘中闭合：当日净值点尚未追加，用当前 beta 持仓市值
+            # （已按 ETF 当日收盘价盯市，与随后写入 equity_curve 的值一致）。
+            beta_end = self._current_beta_value()
+        buy, sell = _beta_fill_cash_flows(self._beta_fills, start, end)
+        beta_pnl = money(beta_end - beta_start - buy + sell)
+        withdraw = _round_withdraw_total(self.account.withdrawals, start, end)
+        item["withdraw_in_round"] = withdraw
+        item["beta_pnl"] = beta_pnl
+        item["stock_pnl"] = money(float(item["pnl"]) + withdraw - beta_pnl)
+
     def _build_close_diagnostic(self, close_fill: Fill | None, bar: Bar) -> dict[str, Any]:
         """轮次闭合时的「止盈执行诊断」：拆出信号价 → 成交价 的落差。
 
@@ -1204,6 +1385,7 @@ class FunnelRotationBacktest:
             item["close_reason"] = self.strategy.close_reason or "整体止盈/事件熔断"
             item["t_net_profit"] = money(self.account.t_net_profit - item["t_net_profit_start"])
             item["close_diagnostic"] = self._build_close_diagnostic(close_fill, bar)
+            self._decompose_round(item, bar.date)
             item.pop("_deep_loss_start_session", None)
             self.events.append({
                 "date": bar.date, "type": "ROUND_CLOSED", "round_id": item["id"],
@@ -1312,6 +1494,12 @@ class FunnelRotationBacktest:
 
         equity_curve: list[dict[str, Any]] = list(resume_state.get("equity_curve", []))
         used_dates: list[str] = list(resume_state.get("used_dates", []))
+        # 轮次分腿基准：续传时从已跑完的净值曲线重建，保证闭合轮次的
+        # beta_value_start（轮次前一日）在恢复后仍可查。
+        self._beta_value_by_date = {
+            str(point.get("date")): float(point.get("beta_value") or 0.0)
+            for point in equity_curve if point.get("date")
+        }
         total = len(self.timeline)
         for date_str in self.timeline:
             session_index += 1
@@ -1508,6 +1696,7 @@ class FunnelRotationBacktest:
             held = current_symbol if current_symbol else None
             position = self.account.position(held) if held else None
             beta_position = self._beta_position()
+            beta_value = money(beta_position.beta_qty * beta_position.last_price) if beta_position else 0.0
             equity_curve.append({
                 "date": date_str, "equity": self.account.equity, "cash": self.account.cash,
                 "market_value": self.account.market_value,
@@ -1516,9 +1705,11 @@ class FunnelRotationBacktest:
                 "position_qty": position.total_qty if position else 0,
                 "symbol": held,
                 "beta_qty": beta_position.beta_qty if beta_position else 0,
-                "beta_value": money(beta_position.beta_qty * beta_position.last_price) if beta_position else 0.0,
+                "beta_value": beta_value,
                 "beta_symbol": self.etf_symbol if (beta_position and beta_position.beta_qty) else None,
             })
+            # 供后续轮次闭合时查「轮次前一日」的 beta 市值基准（O(1)，不扫曲线）。
+            self._beta_value_by_date[date_str] = beta_value
             if self.hooks.get("on_progress"):
                 self.hooks["on_progress"](len(used_dates), total, date_str, self._engine_snapshot(
                     session_index, date_str, equity_curve, used_dates,
@@ -1558,6 +1749,7 @@ class FunnelRotationBacktest:
             item = self.current_round
             item["pnl"] = money(self.account.equity - item["start_equity"])
             item["close_reason"] = None
+            self._decompose_round(item, used_dates[-1] if used_dates else None)
             item.pop("_deep_loss_start_session", None)
             self.rounds.append(item)
             self.current_round = None

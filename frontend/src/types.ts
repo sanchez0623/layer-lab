@@ -243,6 +243,10 @@ export interface RotationTrailItem {
   close_reason?: string | null;
   max_invested?: number | null;
   t_net_profit?: number | null;
+  /** 轮次盈亏分腿（读时派生，旧报告可能缺省）：个股腿 / ETF 腿 / 轮内提现。 */
+  stock_pnl?: number | null;
+  beta_pnl?: number | null;
+  withdraw_in_round?: number | null;
   /** 选股日候选前三（按 Chg20D 升序），仅选中标的的轮次行有。 */
   candidates?: RotationCandidate[];
   /** 各板块 ret20 / 开门状态，解释「为什么空仓」。 */
@@ -504,6 +508,12 @@ export interface Round {
   max_invested?: number;
   pnl?: number;
   net_profit?: number;
+  /** 轮次盈亏分腿：个股腿真实盈亏 = pnl + 轮内提现 - ETF 腿（新报告 / 读时派生）。 */
+  stock_pnl?: number;
+  /** 轮内 ETF beta 腿盈亏（含未实现）。 */
+  beta_pnl?: number;
+  /** 轮次区间 (start_date, end_date] 内的提现合计。 */
+  withdraw_in_round?: number;
   return_rate?: number;
   total_return?: number;
   trade_count?: number;

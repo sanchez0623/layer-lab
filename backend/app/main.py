@@ -17,7 +17,8 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .backtest import (
-    FunnelRotationBacktest, monthly_breakdown, performance_metrics, run_funnel_backtest,
+    FunnelRotationBacktest, decompose_round_pnl, monthly_breakdown, performance_metrics,
+    run_funnel_backtest,
 )
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
 from .beta_sleeve import entry_allowed, exit_reason, reentry_cooldown_ready, target_quantity
@@ -450,6 +451,26 @@ def _ensure_extended_metrics(report: dict) -> dict:
         for key in ("xirr_annualized", "robustness", "underwater"):
             metrics.setdefault(key, full.get(key))
     return report
+
+
+def _decompose_report_rounds(report: dict) -> list[dict]:
+    """按需给轮次补齐盈亏分腿字段（个股腿 / ETF 腿 / 轮内提现）。
+
+    历史报告没有 ``stock_pnl`` 等字段：读取时用报告自带的 ``equity_curve`` +
+    ``withdrawals`` + ``data_info.beta.fills`` 离线重算（``decompose_round_pnl``
+    幂等，新报告已写好的轮次直接跳过）。调用方拿到的就是报告里的 ``rounds`` 列表。
+    """
+    rounds = report.get("rounds")
+    if not isinstance(rounds, list) or not rounds:
+        return []
+    beta = (report.get("data_info") or {}).get("beta") or {}
+    withdrawals = report.get("withdrawals")
+    return decompose_round_pnl(
+        rounds,
+        report.get("equity_curve") or [],
+        withdrawals if isinstance(withdrawals, list) else [],
+        beta.get("fills") or [],
+    )
 
 
 # 用途（purpose）的中文展示标签，与前端 lib/format.ts purposeLabel 口径一致；
@@ -1751,6 +1772,8 @@ def create_app() -> FastAPI:
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
+        # 旧报告离线补齐轮次盈亏分腿（幂等）；必须在 _slim_records 抽走 rounds 之前。
+        _decompose_report_rounds(report)
         return _slim_records(
             _slim_rotation_trail(_ensure_extended_metrics(_ensure_monthly(report)))
         )
@@ -1775,8 +1798,9 @@ def create_app() -> FastAPI:
         info = report.get("data_info") or {}
         raw = info.get("rotation_trail") or []
         trading_dates = [str(point.get("date")) for point in (report.get("equity_curve") or [])]
-        enriched = enrich_trail(raw, report.get("rounds") or [], trading_dates)
-        enriched = enrich_trail(raw, report.get("rounds") or [], trading_dates)
+        # 明细页/轨迹共用：旧报告先离线补齐轮次分腿，再派生轨迹行。
+        rounds = _decompose_report_rounds(report) or (report.get("rounds") or [])
+        enriched = enrich_trail(raw, rounds, trading_dates)
         # 传 beta 汇总（含逐笔 fills）：给 BETA_SPAN 区间行补「持仓区间 / 持有交易日 /
         # 本轮收益率 / 净盈亏」，补齐用户看到的四个空列。
         items = (
@@ -1813,7 +1837,11 @@ def create_app() -> FastAPI:
         report = storage.get_backtest(backtest_id)
         if report is None:
             raise HTTPException(status_code=404, detail="回测不存在")
-        rows = report.get(kind) or []
+        if kind == "rounds":
+            # 轮次卡片/明细展示盈亏分腿：旧报告读取时离线补齐（幂等）。
+            rows = _decompose_report_rounds(report)
+        else:
+            rows = report.get(kind) or []
         symbol_q = (symbol or "").strip().lower()
         purpose_q = ""
         if (purpose or "").strip():
@@ -1849,8 +1877,9 @@ def create_app() -> FastAPI:
             # 但保留原始逐日粒度（便于 Excel 透视空仓天数），不合并区间。
             info = report.get("data_info") or {}
             trading_dates = [str(point.get("date")) for point in (report.get("equity_curve") or [])]
+            rounds = _decompose_report_rounds(report) or (report.get("rounds") or [])
             rows = flatten_for_csv(enrich_trail(
-                info.get("rotation_trail") or [], report.get("rounds") or [], trading_dates,
+                info.get("rotation_trail") or [], rounds, trading_dates,
             ))
             fields = list(TRAIL_CSV_FIELDS)
         else:
