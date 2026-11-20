@@ -609,6 +609,40 @@ export default function PaperPage() {
       setSavingTier(false);
     }
   };
+  // 16 笔金额口径 + 缩放下限（与回测页同口径：fixed=绝对金额 / equity=按权益等比缩放）。
+  const [scaleModeInput, setScaleModeInput] = useState('');
+  const [scaleFloorInput, setScaleFloorInput] = useState('');
+  const [savingScale, setSavingScale] = useState(false);
+  const scaleMode = account?.config?.installment_scale_mode ?? 'fixed';
+  const scaleFloor = account?.config?.installment_scale_floor ?? 0.5;
+  const saveScale = async () => {
+    if (!account) return;
+    setSavingScale(true); setError('');
+    try {
+      const patch: Record<string, unknown> = {};
+      if (scaleModeInput && scaleModeInput !== scaleMode) patch.installment_scale_mode = scaleModeInput;
+      if (scaleFloorInput !== '') {
+        const floor = Number(scaleFloorInput);
+        if (!Number.isFinite(floor) || floor <= 0 || floor > 1) {
+          setError('缩放下限需为 0~1 之间的小数（默认 0.5）。');
+          return;
+        }
+        if (Math.abs(floor - scaleFloor) > 1e-9) patch.installment_scale_floor = floor;
+      }
+      if (Object.keys(patch).length === 0) {
+        setError('没有需要保存的改动。');
+        return;
+      }
+      const next = await api.updateAccountConfig(account.id, patch);
+      setAccount(next);
+      setScaleModeInput(''); setScaleFloorInput('');
+      toast.success('16 笔金额口径已更新，下一笔加仓起生效。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '16 笔金额口径更新失败。');
+    } finally {
+      setSavingScale(false);
+    }
+  };
   // 深跌幅当日做T：日内跌幅 ≥ 阈值时绕过底仓笔数门槛（关闭传 0，后端归一化为 None）。
   const [deepDropInput, setDeepDropInput] = useState('');
   const [savingDeepDrop, setSavingDeepDrop] = useState(false);
@@ -1189,6 +1223,18 @@ export default function PaperPage() {
                 <div className="rounded-lg border bg-muted/20 px-2.5 py-1.5"><strong className="text-foreground">档4 · 40万</strong> · 最严：+ 缩量 &lt; 5日均量 × 0.5（原始 A3）</div>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">开关保存后下一根 K 线起生效；仅影响浮亏 A3 分支。对应配置字段 add_tier_strict（回测页同步可调，可先回测验证）。</p>
+              <div className="mt-2 flex flex-wrap items-end gap-2 border-t pt-2">
+                <Field label="16 笔金额口径" hint="fixed=绝对金额（默认，向后兼容）；equity=按权益等比缩放" className="w-52">
+                  <SelectField value={scaleModeInput || scaleMode} onValueChange={setScaleModeInput} disabled={savingScale} options={[
+                    { value: 'fixed', label: 'fixed · 绝对金额（默认）' },
+                    { value: 'equity', label: 'equity · 按权益等比缩放' },
+                  ]} ariaLabel="16 笔金额口径" />
+                </Field>
+                <Field label="缩放下限（倍）" hint="equity 模式下的放大倍数下限：权益回撤时最少按该倍数下注（默认 0.5）" className="w-40">
+                  <NumberInput step={0.1} min={0.05} max={1} allowEmpty placeholder={number(scaleFloor, 2)} value={scaleFloorInput} onChange={setScaleFloorInput} disabled={savingScale || scaleMode !== 'equity'} />
+                </Field>
+                <Button size="sm" className="h-8" onClick={() => void saveScale()} disabled={savingScale}>{savingScale ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingScale ? '正在保存' : '保存金额口径'}</Button>
+              </div>
             </Panel>
           )}
 
