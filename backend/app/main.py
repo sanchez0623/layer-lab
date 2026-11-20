@@ -575,7 +575,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.11.1",
+        version="2.12.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -2029,7 +2029,6 @@ def create_app() -> FastAPI:
             "coverage": storage.paper_equity_coverage(account_id, source=source),
         }
 
->>>>>>> feat/paper-equity-snapshots
     @application.post("/api/paper/accounts/{account_id}/reset")
     def reset_paper_account(account_id: str):
         previous = get_paper(account_id)
