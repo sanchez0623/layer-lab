@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+# ⚠️ v3.0.0 起此脚本不再必需：登录鉴权已改用应用内登录（默认账号 owner/owner123，
+# 可用环境变量 LAYERLAB_ADMIN_USER / LAYERLAB_ADMIN_PASSWORD 覆盖，登录后可用
+# change-password 端点改密）。nginx 层 HTTP Basic 认证已移除，htpasswd 不再被挂载。
+# 本脚本仅保留供仍想手动维护 /root/layer-lab-auth.txt 的场景；正常运行无需执行。
+#
 # 设置/更新 layer-lab HTTPS Basic 认证密码（幂等）。
 # 用法： AUTH_USER=owner AUTH_PASSWORD='你的密码' bash deploy/set_auth_password.sh
 #   或： bash deploy/set_auth_password.sh            # 用已有 /root/layer-lab-auth.txt 的用户名，交互不会发生（需预置 AUTH_PASSWORD）
