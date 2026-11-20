@@ -35,6 +35,7 @@ from .market import (
     normalize_symbol,
 )
 from .pagination import paginate, page_params
+from .paper_analytics import paper_account_metrics, paper_beta_summary
 from .quan_data import QuanRefresher, QuanStore, quan_data_dir
 from .rotation import rescreen_and_advance, set_from_run as set_rotation_from_run, set_pool as set_rotation_pool
 from .rotation_trail import (
@@ -1926,6 +1927,24 @@ def create_app() -> FastAPI:
     @application.get("/api/paper/accounts/{account_id}")
     def paper_account(account_id: str):
         return get_paper(account_id).to_dict()
+
+    # -- 读时派生指标（阶段 1） ------------------------------------------
+    # 刻意不放进轮询用的 to_dict()：账户 payload 每 15 秒全量拉一次，指标
+    # （尤其 max_invested 要重放成交流水）只在用户查看时按需计算，避免轮询变重。
+    @application.get("/api/paper/accounts/{account_id}/metrics")
+    def paper_account_metrics_endpoint(account_id: str):
+        account = get_paper(account_id)
+        return {
+            "metrics": paper_account_metrics(account),
+            "derived_from": "cashflow",
+            "note": "不含依赖逐日净值的指标（回撤/夏普/波动/Calmar/水下/敞口/空仓占比/每月盈亏），待净值落库后补齐",
+        }
+
+    @application.get("/api/paper/accounts/{account_id}/beta")
+    def paper_account_beta_endpoint(account_id: str):
+        """ETF beta 腿摘要：与回测 data_info.beta 同键名同口径（不含覆盖区间字段）。"""
+        account = get_paper(account_id)
+        return {"beta": paper_beta_summary(account), "derived_from": "cashflow"}
 
     @application.post("/api/paper/accounts/{account_id}/reset")
     def reset_paper_account(account_id: str):

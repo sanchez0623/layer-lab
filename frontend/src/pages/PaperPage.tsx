@@ -18,7 +18,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { AccountState, BoardRules, Dataset, FeeConfig, OrderPurpose, OrderSide, OrderType, PositionQuote, RotationPoolItem, SchedulerStatus, StrategyConfig, TradingRulesResponse, TradingSession } from '../types';
+import type { AccountState, BoardRules, Dataset, FeeConfig, OrderPurpose, OrderSide, OrderType, PaperBetaSummary, PaperMetrics, PositionQuote, RotationPoolItem, SchedulerStatus, StrategyConfig, TradingRulesResponse, TradingSession } from '../types';
 
 const POOL_PREVIEW_LIMIT = 10;
 
@@ -66,6 +66,22 @@ const msUntilAutoSyncResume = (
 };
 const AMOUNT_TIERS = [100_000, 200_000, 300_000, 400_000] as const;
 
+/**
+ * 本轮持有自然日数：自「本轮入口日」起算（当日算第 1 天）。
+ *
+ * 模拟盘没有逐日持仓快照，前端只拿得到入口日，因此按自然日计；口径与后端的
+ * 交易日指标（回测 holding_days）不同，标签上明确写「自然日」。
+ */
+const holdingDaysSince = (entryDate?: string | null): number | null => {
+  if (!entryDate) return null;
+  const start = new Date(`${entryDate.slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(start.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const elapsed = Math.round((today.getTime() - start.getTime()) / 86_400_000);
+  return Math.max(0, elapsed) + 1;
+};
+
 const defaultConfig: StrategyConfig = {
   enable_t: true, commission_rate: 0.00005, min_commission: 5, stamp_tax_rate: 0.0005,
   handling_fee_rate: 0.0000341, regulatory_fee_rate: 0.00002, transfer_fee_rate: 0.00001,
@@ -110,6 +126,9 @@ export default function PaperPage() {
   const [tradingSession, setTradingSession] = useState<TradingSession | null>(null);
   // 记录已知成交笔数：轮询发现新增成交时给一条提示，避免「成交了但页面没反应」。
   const knownTradeCountRef = useRef<number | null>(null);
+  // 读时派生指标（/metrics、/beta）：单独端点按需拉取，不塞进轮询用的账户 payload。
+  const [accountMetrics, setAccountMetrics] = useState<PaperMetrics | null>(null);
+  const [betaSummary, setBetaSummary] = useState<PaperBetaSummary | null>(null);
   const [side, setSide] = useState<OrderSide>('buy');
   const [purpose, setPurpose] = useState<OrderPurpose>('PERMANENT');
   const [orderType, setOrderType] = useState<OrderType>('market');
@@ -217,6 +236,31 @@ export default function PaperPage() {
   };
 
   useEffect(() => { void load(); }, []);
+
+  // 读时派生指标：`/metrics`（净收益/总收益率/盈利出金/ETF 盈亏/做T笔数/max_invested）
+  // 与 `/beta`（ETF beta 腿摘要）都不在账户 payload 里，避免 15 秒轮询变重，这里按需拉取。
+  // 触发键 = 账户 + 成交/提现笔数 + 权益（盯市后净利与收益率会变）+ ETF 配置。
+  const derivedAccountId = account?.id ?? '';
+  const derivedKey = account
+    ? [
+      account.id, account.trades.length, account.withdrawals?.length ?? 0,
+      account.equity, account.config.etf_beta_enabled, account.config.etf_symbol,
+    ].join('|')
+    : '';
+  useEffect(() => {
+    if (!derivedAccountId) { setAccountMetrics(null); setBetaSummary(null); return; }
+    let cancelled = false;
+    Promise.all([api.accountMetrics(derivedAccountId), api.accountBeta(derivedAccountId)])
+      .then(([metricsBody, betaBody]) => {
+        if (cancelled) return;
+        setAccountMetrics(metricsBody.metrics);
+        setBetaSummary(betaBody.beta);
+      })
+      .catch(() => {
+        // 派生指标失败不阻塞账户面板：卡片显示「—」，下一轮同步/刷新会重试。
+      });
+    return () => { cancelled = true; };
+  }, [derivedAccountId, derivedKey]);
 
   // 六板块规则全表：进页面拉一次，供「全部板块」对比视图使用。
   useEffect(() => {
@@ -977,6 +1021,9 @@ export default function PaperPage() {
 
   const currentDataset = datasets.find((item) => item.id === account?.dataset_id);
   const canCancel = (status: string) => ['open', 'pending', 'partial', 'partially_filled', 'new'].includes(status.toLowerCase());
+  // 本轮入口日（后端从 strategy_state 只读投影）：用于「本轮持有自然日」卡片。
+  const roundEntryDate = account?.round_entry_date ?? null;
+  const roundHoldingDays = holdingDaysSince(roundEntryDate);
 
   return (
     <div className="animate-[page-in_.22s_ease-out]">
@@ -1019,10 +1066,55 @@ export default function PaperPage() {
 
           <MetricGrid columns={4}>
             <Metric label="账户权益" value={money(account.equity)} icon={<Wallet className="size-3.5" />} sub={`初始资金 ${money(account.initial_cash, 0)}`} />
+            <Metric
+              label="净收益"
+              value={signedMoney(accountMetrics?.net_profit)}
+              tone={accountMetrics ? (accountMetrics.net_profit >= 0 ? 'positive' : 'negative') : ''}
+              sub={accountMetrics && accountMetrics.profit_withdrawn > 0
+                ? `含盈利出金 ${money(accountMetrics.profit_withdrawn)}（已落袋）`
+                : '权益 − 初始资金（盈利提现加回）'}
+            />
+            <Metric
+              label="总收益率"
+              value={signedPercent(accountMetrics?.total_return)}
+              tone={accountMetrics ? (accountMetrics.total_return >= 0 ? 'positive' : 'negative') : ''}
+              sub="净收益 / 初始资金"
+            />
+            <Metric
+              label="盈利出金"
+              value={money(accountMetrics?.profit_withdrawn)}
+              tone={accountMetrics && accountMetrics.profit_withdrawn > 0 ? 'positive' : ''}
+              sub={`累计提现 ${money(accountMetrics?.total_withdrawn ?? account.total_withdrawn)} · ${integer(accountMetrics?.withdrawn_count ?? account.withdrawals?.length ?? 0)} 笔`}
+            />
             <Metric label="可用资金" value={money(account.available_cash)} sub={`账面现金 ${money(account.cash)}`} />
             <Metric label="持仓市值" value={money(account.market_value)} sub={`敞口 ${account.equity ? number(account.market_value / account.equity * 100, 1) : '0.0'}%`} />
-            <Metric label="已实现盈亏" value={signedMoney(account.realized_pnl)} tone={account.realized_pnl >= 0 ? 'positive' : 'negative'} sub={`做 T 净贡献 ${signedMoney(account.t_net_profit)}`} />
+            <Metric
+              label="已实现盈亏"
+              value={signedMoney(account.realized_pnl)}
+              tone={account.realized_pnl >= 0 ? 'positive' : 'negative'}
+              sub={`${integer(accountMetrics?.total_trades ?? account.trades.length)} 笔成交 · 总费用 ${money(account.total_fees)}`}
+            />
             <Metric label="累计提现" value={money(account.total_withdrawn)} tone={account.total_withdrawn > 0 ? 'positive' : undefined} sub={account.total_withdrawn > 0 ? `${account.withdrawals?.length ?? 0} 笔已取出` : '盈利提现关闭'} />
+            <Metric
+              label="ETF beta 净盈亏"
+              value={signedMoney(accountMetrics?.beta_pnl)}
+              tone={accountMetrics ? (accountMetrics.beta_pnl >= 0 ? 'positive' : 'negative') : ''}
+              sub={betaSummary
+                ? (betaSummary.enabled
+                  ? `${integer(betaSummary.trade_count)} 笔成交 · 持仓 ${integer(betaSummary.position_qty)} 份`
+                  : 'ETF beta 腿未启用')
+                : '读时派生（BETA 卖出已实现）'}
+            />
+            <Metric
+              label="做 T 笔数"
+              value={integer(accountMetrics?.t_trade_count)}
+              sub={`做 T 净贡献 ${signedMoney(accountMetrics?.t_net_profit ?? account.t_net_profit)}`}
+            />
+            <Metric
+              label="本轮持有"
+              value={roundHoldingDays === null ? '—' : `${integer(roundHoldingDays)} 天`}
+              sub={roundEntryDate ? `入口日 ${shortDate(roundEntryDate)}（自然日）` : '本轮未建仓 / 已清仓'}
+            />
           </MetricGrid>
 
           {account.auto_strategy && (
@@ -1265,13 +1357,13 @@ export default function PaperPage() {
             </Panel>
           </div>
 
-          <Panel className="mb-3" title="持仓与双账本" description="永久仓和 T 仓分账记录，可卖数量遵循 T+1 约束；平均成本已含买入手续费" action={<span className="text-[10px] text-muted-foreground" title="佣金 + 印花税 + 经手费 + 证管费 + 过户费；滑点体现在成交价，不计入费用">累计费用 <b className="font-mono text-foreground">{money(account.total_fees)}</b>（五项合计）</span>} flush>
+          <Panel className="mb-3" title="持仓与双账本" description="永久仓和 T 仓分账记录，可卖数量遵循 T+1 约束；平均成本已含买入手续费；ETF 列为 beta 腿独立账本" action={<span className="text-[10px] text-muted-foreground" title="佣金 + 印花税 + 经手费 + 证管费 + 过户费；滑点体现在成交价，不计入费用">累计费用 <b className="font-mono text-foreground">{money(account.total_fees)}</b>（五项合计）</span>} flush>
             <Table>
-              <TableHeader><TableRow><TableHead>标的</TableHead><TableHead className="text-right">最新价</TableHead><TableHead className="text-right">总持仓</TableHead><TableHead className="text-right">可卖数量</TableHead><TableHead className="text-right">永久仓</TableHead><TableHead className="text-right">永久仓成本</TableHead><TableHead className="text-right" title="平均成本 = 总成本 / 总持仓，已包含买入手续费">平均成本（含费）</TableHead><TableHead className="text-right" title="当前持仓成本中仍包含的买入手续费；卖出费用计入已实现盈亏">买入费用</TableHead><TableHead className="text-right">T 仓在途</TableHead><TableHead className="text-right">持仓市值</TableHead><TableHead className="text-right">浮动盈亏</TableHead></TableRow></TableHeader>
+              <TableHeader><TableRow><TableHead>标的</TableHead><TableHead className="text-right">最新价</TableHead><TableHead className="text-right">总持仓</TableHead><TableHead className="text-right">可卖数量</TableHead><TableHead className="text-right">永久仓</TableHead><TableHead className="text-right">永久仓成本</TableHead><TableHead className="text-right" title="ETF beta 腿持仓份数（与个股永久仓/T 仓互不影响）">ETF 持仓</TableHead><TableHead className="text-right" title="ETF beta 腿成本（含买入费用）">ETF 成本</TableHead><TableHead className="text-right" title="平均成本 = 总成本 / 总持仓，已包含买入手续费">平均成本（含费）</TableHead><TableHead className="text-right" title="当前持仓成本中仍包含的买入手续费；卖出费用计入已实现盈亏">买入费用</TableHead><TableHead className="text-right">T 仓在途</TableHead><TableHead className="text-right">持仓市值</TableHead><TableHead className="text-right">浮动盈亏</TableHead></TableRow></TableHeader>
               <TableBody>
-                {holdingPositions.length === 0 ? <TableEmpty colSpan={11} message="暂无持仓，提交买入委托并推送行情后查看" /> : holdingPositions.map((position) => {
+                {holdingPositions.length === 0 ? <TableEmpty colSpan={13} message="暂无持仓，提交买入委托并推送行情后查看" /> : holdingPositions.map((position) => {
                   const floatPnl = position.float_pnl;
-                  return <TableRow key={position.symbol}><TableCell><strong className="font-mono text-[12px]" title={position.symbol}>{displaySymbol(position.symbol)}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.last_price)}</TableCell><TableCell className="text-right font-mono text-[12px]"><strong>{integer(position.total_qty)}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{integer(position.sellable_qty)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(position.permanent_qty)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.permanent_cost)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.average_cost)}</TableCell><TableCell className="text-right font-mono text-[12px]" title="已包含在平均成本内">{money(position.buy_fee ?? 0)}</TableCell><TableCell className="text-right font-mono text-[12px]">{position.t_active_qty > 0 ? <Badge tone="indigo">{integer(position.t_active_qty)}</Badge> : '0'}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.market_value)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', floatPnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(floatPnl)}</TableCell></TableRow>;
+                  return <TableRow key={position.symbol}><TableCell><strong className="font-mono text-[12px]" title={position.symbol}>{displaySymbol(position.symbol)}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.last_price)}</TableCell><TableCell className="text-right font-mono text-[12px]"><strong>{integer(position.total_qty)}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{integer(position.sellable_qty)}</TableCell><TableCell className="text-right font-mono text-[12px]">{integer(position.permanent_qty)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.permanent_cost)}</TableCell><TableCell className="text-right font-mono text-[12px]">{(position.beta_qty ?? 0) > 0 ? <Badge tone="indigo">{integer(position.beta_qty)}</Badge> : '0'}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.beta_cost ?? 0)}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.average_cost)}</TableCell><TableCell className="text-right font-mono text-[12px]" title="已包含在平均成本内">{money(position.buy_fee ?? 0)}</TableCell><TableCell className="text-right font-mono text-[12px]">{position.t_active_qty > 0 ? <Badge tone="indigo">{integer(position.t_active_qty)}</Badge> : '0'}</TableCell><TableCell className="text-right font-mono text-[12px]">{money(position.market_value)}</TableCell><TableCell className={cn('text-right font-mono text-[12px]', floatPnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(floatPnl)}</TableCell></TableRow>;
                 })}
               </TableBody>
             </Table>

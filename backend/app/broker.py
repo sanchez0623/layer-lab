@@ -24,6 +24,33 @@ from .trading_rules import (
 LOTS_PER_SHARE = 100
 
 
+def add_position_buy_cost(
+    cost: float, fee_in_cost: float, amount: float, total_fee: float,
+) -> tuple[float, float]:
+    """买入记入单个成本账本：成交金额 + 买入费用一并计入成本。
+
+    返回 ``(cost, fee_in_cost)``，两条口径都由本函数维护：``cost`` 是含买入费的
+    持仓成本（``permanent_cost`` / ``t_cost`` / ``beta_cost``），``fee_in_cost`` 是
+    单独曝光给前端的「买入费用」分项。撮合（``_apply_execution``）与读时成本重放
+    （``paper_analytics`` 的 ``max_invested``）共用同一份实现，不允许出现第二套
+    成本分配口径（AGENTS 架构原则 1）。
+    """
+    return money(cost + amount + total_fee), money(fee_in_cost + total_fee)
+
+
+def allocate_ledger_on_sell(
+    cost: float, fee_in_cost: float, quantity: int, held: int,
+) -> tuple[float, float]:
+    """按剩余持仓比例分摊一次卖出的成本与买入费用。
+
+    返回 ``(成本分摊, 买入费用分摊)``；与 ``add_position_buy_cost`` 配对，是成本
+    账本的唯一分配实现（撮合与读时重放共用）。
+    """
+    if held <= 0:
+        return 0.0, 0.0
+    return money(cost * quantity / held), money(fee_in_cost * quantity / held)
+
+
 def _replay_buy_fees(fills: Iterable[Fill]) -> tuple[float, float]:
     """按成交顺序重放，推算当前仍留在持仓成本内的买入手续费。
 
@@ -50,14 +77,14 @@ def _replay_buy_fees(fills: Iterable[Fill]) -> tuple[float, float]:
             if permanent_qty <= 0:
                 continue
             sold = min(fill.quantity, permanent_qty)
-            allocated = permanent_fee * sold / permanent_qty
+            _, allocated = allocate_ledger_on_sell(0.0, permanent_fee, sold, permanent_qty)
             permanent_qty -= sold
             permanent_fee = max(0.0, permanent_fee - allocated)
         else:
             if t_qty <= 0:
                 continue
             sold = min(fill.quantity, t_qty)
-            allocated = t_fee * sold / t_qty
+            _, allocated = allocate_ledger_on_sell(0.0, t_fee, sold, t_qty)
             t_qty -= sold
             t_fee = max(0.0, t_fee - allocated)
     return money(permanent_fee), money(t_fee)
@@ -100,6 +127,10 @@ class BrokerAccount:
             raise ValueError("initial_cash 必须为正数")
         self.id = account_id or str(uuid.uuid4())
         self.name = name
+        # 账户创建时间：读时派生指标（年化/XIRR 等）需要「起点」，不落独立表。
+        # 旧 payload 没有该字段时由 from_dict 回填并置 created_at_estimated=True。
+        self.created_at: str = utc_now()
+        self.created_at_estimated: bool = False
         self.initial_cash = money(initial_cash)
         self.cash = money(initial_cash)
         self.config = config or StrategyConfig()
@@ -661,19 +692,22 @@ class BrokerAccount:
             self.cash = money(self.cash - amount - total_fee)
             if order.purpose == "BETA":
                 position.beta_qty += quantity
-                position.beta_cost = money(position.beta_cost + amount + total_fee)
-                position.beta_fee = money(position.beta_fee + total_fee)
+                position.beta_cost, position.beta_fee = add_position_buy_cost(
+                    position.beta_cost, position.beta_fee, amount, total_fee,
+                )
                 position.today_beta_buy_qty += quantity
                 return 0.0
             if order.purpose == "PERMANENT":
                 position.permanent_qty += quantity
-                position.permanent_cost = money(position.permanent_cost + amount + total_fee)
-                position.permanent_fee = money(position.permanent_fee + total_fee)
+                position.permanent_cost, position.permanent_fee = add_position_buy_cost(
+                    position.permanent_cost, position.permanent_fee, amount, total_fee,
+                )
                 position.today_permanent_buy_qty += quantity
             else:
                 position.t_qty += quantity
-                position.t_cost = money(position.t_cost + amount + total_fee)
-                position.t_fee = money(position.t_fee + total_fee)
+                position.t_cost, position.t_fee = add_position_buy_cost(
+                    position.t_cost, position.t_fee, amount, total_fee,
+                )
                 position.today_t_buy_qty += quantity
             return 0.0
 
@@ -682,8 +716,9 @@ class BrokerAccount:
         if order.purpose == "BETA":
             if position.beta_qty < quantity:
                 raise RuntimeError("ETF beta 账本可卖数量校验失败")
-            cost_allocated = money(position.beta_cost * quantity / position.beta_qty)
-            fee_allocated = money(position.beta_fee * quantity / position.beta_qty)
+            cost_allocated, fee_allocated = allocate_ledger_on_sell(
+                position.beta_cost, position.beta_fee, quantity, position.beta_qty,
+            )
             position.beta_qty -= quantity
             position.beta_cost = money(max(0.0, position.beta_cost - cost_allocated))
             position.beta_fee = money(max(0.0, position.beta_fee - fee_allocated))
@@ -691,8 +726,9 @@ class BrokerAccount:
         elif order.purpose == "PERMANENT":
             if position.permanent_qty < quantity:
                 raise RuntimeError("永久仓账本可卖数量校验失败")
-            cost_allocated = money(position.permanent_cost * quantity / position.permanent_qty)
-            fee_allocated = money(position.permanent_fee * quantity / position.permanent_qty)
+            cost_allocated, fee_allocated = allocate_ledger_on_sell(
+                position.permanent_cost, position.permanent_fee, quantity, position.permanent_qty,
+            )
             position.permanent_qty -= quantity
             position.permanent_cost = money(max(0.0, position.permanent_cost - cost_allocated))
             position.permanent_fee = money(max(0.0, position.permanent_fee - fee_allocated))
@@ -700,8 +736,9 @@ class BrokerAccount:
         else:
             if position.t_qty < quantity or position.permanent_sellable_qty < quantity:
                 raise RuntimeError("T账本或旧仓可卖数量校验失败")
-            t_cost_allocated = money(position.t_cost * quantity / position.t_qty)
-            t_fee_allocated = money(position.t_fee * quantity / position.t_qty)
+            t_cost_allocated, t_fee_allocated = allocate_ledger_on_sell(
+                position.t_cost, position.t_fee, quantity, position.t_qty,
+            )
             permanent_cost_before = position.permanent_cost
             # 正T卖出旧仓，同时把等量当日T买入转入永久仓；永久仓原始成本不变。
             position.permanent_qty -= quantity
@@ -739,6 +776,11 @@ class BrokerAccount:
 
         result = {
             "id": self.id, "name": self.name, "initial_cash": self.initial_cash,
+            # 创建时间：读时派生指标（年化/XIRR）需要起点；旧账户回填时 estimated=True。
+            "created_at": self.created_at, "created_at_estimated": self.created_at_estimated,
+            # 当前轮入口日：只读派生字段（来自 strategy_state），前端据此显示「本轮持有天数」。
+            # 注意：strategy_state 本身仍只在 include_internal 里落库，不在这里整体暴露。
+            "round_entry_date": (self.strategy_state or {}).get("round_entry_date"),
             "cash": self.cash, "available_cash": self.available_cash,
             "equity": self.equity, "market_value": self.market_value,
             "realized_pnl": self.realized_pnl, "total_fees": self.total_fees,
@@ -781,6 +823,16 @@ class BrokerAccount:
         for field in ("cash", "cursor", "status", "armed_state", "sequence_index", "realized_pnl", "total_fees", "t_net_profit", "current_date", "auto_strategy", "last_daily_signal_date", "total_withdrawn", "_last_month_eval"):
             if field in data:
                 setattr(account, field, data[field])
+        # created_at 兼容旧 payload：新字段缺失时用 payload 里的 updated_at（若有）或当前
+        # 时间兜底，并标记为「推定」，供后续年化/XIRR 等指标标注「自该日起，样本可能不完整」。
+        stored_created_at = data.get("created_at")
+        if stored_created_at:
+            account.created_at = str(stored_created_at)
+            account.created_at_estimated = bool(data.get("created_at_estimated", False))
+        else:
+            fallback = data.get("updated_at")
+            account.created_at = str(fallback) if fallback else utc_now()
+            account.created_at_estimated = True
         account.strategy_state = dict(data.get("strategy_state", {}))
         rotation = data.get("rotation") or {}
         account.rotation_enabled = bool(rotation.get("enabled", data.get("rotation_enabled", False)))

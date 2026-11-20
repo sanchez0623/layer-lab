@@ -583,6 +583,10 @@ export interface Position {
   sellable_qty: number;
   permanent_qty: number;
   permanent_cost: number;
+  /** ETF beta 腿持仓（份）；旧后端不返回时为 undefined。 */
+  beta_qty?: number;
+  /** ETF beta 腿成本（含买入费用）。 */
+  beta_cost?: number;
   total_cost: number;
   average_cost: number;
   /** 当前持仓成本中包含的买入手续费（卖出费用计入已实现盈亏）。 */
@@ -620,6 +624,12 @@ export interface Withdrawal {
 export interface AccountState {
   id: string;
   name: string;
+  /** 账户创建时间（读时派生指标的时间起点）。 */
+  created_at?: string;
+  /** created_at 是否为「旧账户回填的推定值」（旧 payload 没有创建时间）。 */
+  created_at_estimated?: boolean;
+  /** 当前轮入口日（来自 strategy_state 的只读投影）；空仓/未开始一轮时为 null。 */
+  round_entry_date?: string | null;
   initial_cash: number;
   cash: number;
   available_cash: number;
@@ -655,6 +665,70 @@ export interface CreateAccountRequest {
   auto_strategy?: boolean;
   config?: Partial<StrategyConfig>;
   fees?: FeeConfig;
+}
+
+/**
+ * 模拟盘读时派生指标（`GET /api/paper/accounts/{id}/metrics`）。
+ *
+ * 只含**不依赖逐日净值序列**的字段；回撤 / 夏普 / 波动 / Calmar / 水下 / 敞口 /
+ * 空仓占比 / 每月盈亏等要等逐日净值落库后再补。
+ */
+export interface PaperMetrics {
+  initial_cash: number;
+  final_equity: number;
+  total_fees: number;
+  t_net_profit: number;
+  total_withdrawn: number;
+  withdrawn_count: number;
+  /** 盈利出金：提现明细里 period_profit > 0 的金额之和（已加回净利/总收益）。 */
+  profit_withdrawn: number;
+  /** 净利 = equity + profit_withdrawn − initial_cash（与回测同口径）。 */
+  net_profit: number;
+  total_return: number;
+  total_trades: number;
+  t_trade_count: number;
+  /** ETF beta 腿已实现盈亏（BETA 卖出 realized_pnl 求和）。 */
+  beta_pnl: number;
+  beta_trade_count: number;
+  /** 永久仓成本峰值（按成交流水重放成本账本）。 */
+  max_invested: number;
+}
+
+export interface PaperMetricsResponse {
+  metrics: PaperMetrics;
+  /** 数据来源口径标记：当前为 cashflow（只吃成交/委托/提现流水）。 */
+  derived_from: string;
+  note?: string;
+}
+
+/** 一笔 ETF beta 腿成交（与回测 data_info.beta.fills 同键）。 */
+export interface PaperBetaFill {
+  date: string;
+  side: OrderSide | string;
+  quantity: number;
+  price: number;
+  fee: number;
+  realized_pnl: number;
+}
+
+/** ETF beta 腿摘要（`GET /api/paper/accounts/{id}/beta`）：与回测 data_info.beta 同键同口径。 */
+export interface PaperBetaSummary {
+  enabled: boolean;
+  symbol: string;
+  trade_count: number;
+  buy_count: number;
+  sell_count: number;
+  entry_date: string | null;
+  last_exit_date: string | null;
+  exit_reason: string | null;
+  pnl: number;
+  position_qty: number;
+  fills: PaperBetaFill[];
+}
+
+export interface PaperBetaResponse {
+  beta: PaperBetaSummary;
+  derived_from: string;
 }
 
 export interface CreateOrderRequest {
