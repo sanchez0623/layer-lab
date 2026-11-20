@@ -3,7 +3,8 @@
 #   - 应用容器：宿主机 ${HOST_PORT:-3011} → 容器 3000（内嵌 nginx 同源服务前端 + 反代 uvicorn）
 #   - HTTPS 反代：layer-lab-https 容器，宿主机 3444 → 容器 443，复用 47.119.50.139 的
 #     Let's Encrypt IP 证书（只读挂载 dividend-alpha 的 letsencrypt 目录，不参与签发）
-#   - HTTP Basic 认证：nginx 层 htpasswd，随机强密码存 /root/layer-lab-auth.txt
+#   - 认证：v3.0.0 起改用应用内登录（默认账号 owner），nginx 层 HTTP Basic 已移除，
+#     不再生成/挂载 htpasswd，nginx 不因缺 htpasswd 起不来
 # 幂等：重复执行安全。数据落在命名卷 layerlab-data。
 # 前置：本脚本假定部署在 /root/layer-lab（HTTPS conf / 上传路径按此写）；其他目录请自行调整。
 set -euo pipefail
@@ -13,8 +14,6 @@ HTTPS_PORT="${HTTPS_PORT:-3444}"
 PUBLIC_IP="${PUBLIC_IP:-47.119.50.139}"
 COMPOSE="deploy/compose.server.yaml"
 HTTPS_CONF_DST="/root/layer-lab-nginx.conf"
-HTPASSWD_DST="/root/layer-lab.htpasswd"
-AUTH_TXT="/root/layer-lab-auth.txt"
 LETS_DIR="/root/dividend-alpha/infra/letsencrypt"     # 已有 IP 证书目录（只读复用）
 CERTBOT_DIR="/root/dividend-alpha/infra/certs"        # 续期 webroot
 
@@ -51,40 +50,17 @@ else
   echo "    swap 已存在"
 fi
 
-echo "==> [4/7] 配置 HTTP Basic 凭据（${AUTH_TXT}；显式传 AUTH_PASSWORD 则更新，否则复用已有）"
-# 规则：
-#   - 显式提供 AUTH_PASSWORD（环境变量）→ 始终用它（重）生成 htpasswd，长度不限、支持 @ 等符号。
-#   - 未提供且 htpasswd 已存在 → 沿用现有凭据。
-#   - 未提供且无 htpasswd → 生成随机强密码（仅作兜底），并存入 ${AUTH_TXT}。
-if [ -n "${AUTH_PASSWORD:-}" ]; then
-  AUTH_USER="${AUTH_USER:-$(grep -E '^AUTH_USER=' "$AUTH_TXT" 2>/dev/null | cut -d= -f2 || true)}"
-  AUTH_USER="${AUTH_USER:-owner}"
-  # nginx 镜像无 htpasswd，用 openssl 生成 apr1（MD5）哈希；openssl 会安全处理任意可打印字符。
-  HASH=$(openssl passwd -apr1 "$AUTH_PASSWORD")
-  printf '%s:%s\n' "$AUTH_USER" "$HASH" > "$HTPASSWD_DST"
-  printf 'AUTH_USER=%s\nAUTH_PASSWORD=%s\n' "$AUTH_USER" "$AUTH_PASSWORD" > "$AUTH_TXT"
-  echo "    已用显式 AUTH_PASSWORD 更新 Basic 凭据（用户 ${AUTH_USER}），存于 ${AUTH_TXT}"
-elif [ -f "$HTPASSWD_DST" ]; then
-  echo "    ${HTPASSWD_DST} 已存在且未传 AUTH_PASSWORD，沿用现有凭据（见 ${AUTH_TXT}）"
-else
-  # 先完整生成再截断，避免 pipefail 下 head 提前关管道触发 SIGPIPE
-  AUTH_PASSWORD=$(tr -dc 'A-Za-z0-9' </dev/urandom | fold -w 24 | head -1) || true
-  [ -n "$AUTH_PASSWORD" ] || AUTH_PASSWORD=$(date +%s | sha256sum | cut -c1-24)
-  AUTH_USER="${AUTH_USER:-owner}"
-  HASH=$(openssl passwd -apr1 "$AUTH_PASSWORD")
-  printf '%s:%s\n' "$AUTH_USER" "$HASH" > "$HTPASSWD_DST"
-  printf 'AUTH_USER=%s\nAUTH_PASSWORD=%s\n' "$AUTH_USER" "$AUTH_PASSWORD" > "$AUTH_TXT"
-  echo "    已生成随机 Basic 凭据，保存在 ${AUTH_TXT}"
-fi
-# htpasswd 必须 0644：nginx worker 以非特权 nginx 用户运行，0600 会 Permission denied → 502/500。
-# （文件只含 apr1 哈希，不含明文，0644 可接受。）密码明文文件保持 0600。
-chmod 644 "$HTPASSWD_DST" 2>/dev/null || true
-chmod 600 "$AUTH_TXT" 2>/dev/null || true
+echo "==> [4/7] 认证说明（v3.0.0）"
+# v3.0.0 起登录鉴权由应用自身完成（默认账号 owner，密码 owner123，可用环境变量
+# LAYERLAB_ADMIN_USER / LAYERLAB_ADMIN_PASSWORD 覆盖），nginx 层 HTTP Basic 已移除。
+# 不再生成/挂载 htpasswd，避免因缺文件导致 nginx 起不来。旧的
+# /root/layer-lab-auth.txt / layer-lab.htpasswd 保留在服务器上无害，可手动清理。
+echo "    登录鉴权已内置到应用（默认 owner），无需 htpasswd；首次登录后建议改密。"
 
 echo "==> [5/7] 构建并启动应用容器（宿主机 ${HOST_PORT} → 容器 3000）"
 HOST_PORT="$HOST_PORT" docker compose -f "$COMPOSE" up -d --build
 
-echo "==> [6/7] 启动 HTTPS 反代容器（宿主机 ${HTTPS_PORT} → 443，Basic 认证）"
+echo "==> [6/7] 启动 HTTPS 反代容器（宿主机 ${HTTPS_PORT} → 443，认证由应用处理）"
 # 先把 HTTPS conf 拷到宿主机约定位置（容器以 ro 挂载它，必须先存在）
 cp "$(dirname "$0")/nginx.https.conf" "$HTTPS_CONF_DST"
 chmod 644 "$HTTPS_CONF_DST"
@@ -103,7 +79,6 @@ else
     -p "${HTTPS_PORT}:443" \
     --add-host host.docker.internal:host-gateway \
     -v "${HTTPS_CONF_DST}:/etc/nginx/conf.d/default.conf:ro" \
-    -v "${HTPASSWD_DST}:/etc/nginx/layer-lab.htpasswd:ro" \
     -v "${LETS_DIR}:/etc/letsencrypt:ro" \
     -v "${CERTBOT_DIR}:/var/www/certbot:ro" \
     nginx:1.27-alpine
@@ -122,8 +97,8 @@ fi
 if docker ps --format '{{.Names}}' | grep -q '^layer-lab-https$'; then
   hcode=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
     "https://127.0.0.1:${HTTPS_PORT}/api/health" -k 2>/dev/null || echo 000)
-  # 401 = Basic 认证已生效（服务响应正常）；200 亦正常
-  echo "HTTPS /api/health → HTTP ${hcode}（401/200 均表示 TLS+服务正常）"
+  # 200 = TLS + 服务正常（应用 /api/health 已在应用内鉴权白名单）
+  echo "HTTPS /api/health → HTTP ${hcode}（200 表示 TLS+服务正常）"
 else
   echo "HTTPS 反代未运行；临时用 http://${PUBLIC_IP}:${HOST_PORT} 访问"
 fi
@@ -146,7 +121,6 @@ fi
 echo ""
 echo "完成。"
 echo "  应用容器 : 宿主机 ${HOST_PORT} → 容器 3000"
-echo "  HTTPS    : https://${PUBLIC_IP}:${HTTPS_PORT}  （Basic: $(grep AUTH_USER "$AUTH_TXT" | cut -d= -f2)）"
-echo "  凭据     : ${AUTH_TXT}"
+echo "  HTTPS    : https://${PUBLIC_IP}:${HTTPS_PORT}  （登录：应用内 owner / owner123，首次登录后建议改密）"
 echo "  数据卷   : layerlab-data（SQLite/CSV/行情缓存，持久化）"
 echo "  查看日志 : docker compose -f ${COMPOSE} logs -f layer-lab"

@@ -170,7 +170,20 @@ const trailWaitReason = (item: RotationTrailItem): string => {
   return `无候选（${stage}后为空）`;
 };
 
-export default function BacktestPage() {
+/** 把回测详情/列表同步进 URL hash：详情 #/backtest/<id>，列表 #/backtest。
+ *  目标与当前一致时不写，避免触发多余的 hashchange（防 App.tsx 重设 reportId prop 造成死循环）。 */
+const setBacktestHash = (reportId?: string) => {
+  const target = reportId ? `#/backtest/${encodeURIComponent(reportId)}` : '#/backtest';
+  if (window.location.hash !== target) window.location.hash = target;
+};
+
+/** 读取当前 hash 里的报告 id 段（#/backtest/<id> → id），用于区分「浏览器前进/后退」与「组件内点击」。 */
+const readBacktestHashId = (): string | undefined => {
+  const segments = window.location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
+  return segments[0] === 'backtest' && segments[1] ? decodeURIComponent(segments[1]) : undefined;
+};
+
+export default function BacktestPage({ initialReportId }: { initialReportId?: string } = {}) {
   const [config, setConfig] = useState<StrategyConfig>(fallbackConfig);
   const [fees, setFees] = useState<FeeConfig>(defaultFeeConfig);
   const [name, setName] = useState('分层双账本策略回测');
@@ -407,6 +420,7 @@ export default function BacktestPage() {
         setViewingReport(true);
         setWorkspaceTab('reports');
         setTableTab('trades');
+        setBacktestHash(result.id); // 新报告详情也映射进 URL，刷新可停留
         // 新报告是最新一份：清空搜索并刷新列表，返回列表时立即可见。
         setReportSearch('');
         setReportQuery('');
@@ -562,10 +576,44 @@ export default function BacktestPage() {
     setViewingReport(true);
     setReportLoading(true);
     setError('');
-    try { setReport(await api.backtest(id)); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : '报告读取失败。'); }
-    finally { setReportLoading(false); }
+    try {
+      setReport(await api.backtest(id));
+      setBacktestHash(id); // 成功：详情映射进 URL，刷新/分享可停留该报告
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : '报告读取失败。';
+      setError(message);
+      // 报告不存在/读取失败：优雅回落列表视图并清回 #/backtest，不白屏。
+      setReport(null);
+      setViewingReport(false);
+      setBacktestHash();
+      toast.error(`无法打开回测报告：${message}`);
+    } finally {
+      setReportLoading(false);
+    }
   };
+
+  /** 关闭详情回到列表：清详情态并把 hash 同步回 #/backtest（返回按钮 / 删除清理复用）。 */
+  const closeDetail = () => {
+    setViewingReport(false);
+    setReport(null);
+    setTrailData(null);
+    setRecordData(null);
+    setBacktestHash();
+  };
+
+  // 浏览器前进/后退：reportId prop 变化时打开或关闭详情。打开走 loadReport（内部已同步 hash），
+  // 关闭走 closeDetail。用「实时 hash」做守卫：组件内点击已自行写好 hash，此处不重复动作，
+  // 故 hash 由本组件写入触发的 reportId 回流不会再触发打开/关闭，避免死循环。
+  useEffect(() => {
+    if (initialReportId) {
+      if (initialReportId !== report?.id && readBacktestHashId() !== initialReportId) {
+        void loadReport(initialReportId);
+      }
+    } else if (viewingReport && !readBacktestHashId()) {
+      closeDetail();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialReportId]);
 
   /** 删除报告：二次确认后调用 DELETE，成功则清理当前详情 / 作业展示并刷新列表。 */
   const performDeleteReport = async () => {
@@ -577,10 +625,7 @@ export default function BacktestPage() {
       const result = await api.deleteBacktest(target.id);
       if (!result.deleted) setError('后端未找到该报告，可能已被其他会话删除。');
       if (report?.id === target.id) {
-        setReport(null);
-        setViewingReport(false);
-        setTrailData(null);
-        setRecordData(null);
+        closeDetail(); // 清详情态并把 hash 同步回 #/backtest
       }
       if (jobView?.id === target.id) {
         settledJobIdsRef.current.add(target.id);
@@ -1148,7 +1193,7 @@ export default function BacktestPage() {
             reportLoading ? <Panel><Loading label="正在读取回测报告" /></Panel> : report && metrics ? (
               <div>
                 <div className="mb-2 flex items-center justify-between gap-2">
-                  <Button variant="outline" size="sm" type="button" onClick={() => setViewingReport(false)}><ArrowLeft />返回报告列表</Button>
+                  <Button variant="outline" size="sm" type="button" onClick={closeDetail}><ArrowLeft />返回报告列表</Button>
                 </div>
                 <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                   <div>
@@ -1579,7 +1624,7 @@ export default function BacktestPage() {
               </div>
             ) : (
               <Panel>
-                <EmptyState icon={<BarChart3 className="size-6" />} title="报告数据不可用" description="该报告缺少指标数据，可能仍在生成或已被删除。" action={<Button variant="outline" size="sm" type="button" onClick={() => setViewingReport(false)}>返回报告列表</Button>} />
+                <EmptyState icon={<BarChart3 className="size-6" />} title="报告数据不可用" description="该报告缺少指标数据，可能仍在生成或已被删除。" action={<Button variant="outline" size="sm" type="button" onClick={closeDetail}>返回报告列表</Button>} />
               </Panel>
             )
           ) : (

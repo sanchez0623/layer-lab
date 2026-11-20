@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import {
-  Activity, BarChart3, BookOpenCheck, ChevronRight, Database, Filter, Layers3, Menu,
+  Activity, BarChart3, BookOpenCheck, ChevronRight, Database, Filter, Layers3, LogOut, Menu,
   MonitorDot, Wifi, WifiOff,
 } from 'lucide-react';
 import { API_BASE, api } from '../lib/api';
 import type { PageKey } from '../types';
 import { Badge } from '../components/Ui';
+import { useAuth } from '../context/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -23,7 +24,7 @@ const titles: Record<PageKey, string> = {
   screener: '选股漏斗', backtest: '回测工作台', paper: '模拟交易', data: '数据中心', strategy: '策略规则',
 };
 
-function SidebarContent({ page, onNavigate }: { page: PageKey; onNavigate: (page: PageKey) => void }) {
+function SidebarContent({ page, onNavigate, username, onLogout }: { page: PageKey; onNavigate: (page: PageKey) => void; username: string; onLogout: () => void }) {
   return (
     <>
       <div className="flex h-[70px] items-center gap-2.5 border-b px-2">
@@ -75,8 +76,20 @@ function SidebarContent({ page, onNavigate }: { page: PageKey; onNavigate: (page
           <div className="my-2.5 h-px bg-border" />
           <span className="text-[11px] leading-5 text-muted-foreground">所有交易均为虚拟撮合<br />不产生真实委托或收益</span>
         </div>
-        <div className="flex items-center justify-between px-1 font-mono text-[10px] tracking-wide text-muted-foreground">
-          <span>LAYERLAB DESKTOP</span><span>v2.0</span>
+        <div className="flex flex-col gap-2 px-1">
+          <div className="flex min-w-0 items-center gap-2 px-1">
+            <span className="grid size-7 shrink-0 place-items-center rounded-full border bg-card text-[12px] font-semibold text-primary">
+              {username.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-[12px] font-medium text-foreground">{username}</span>
+              <span className="text-[10px] text-muted-foreground">当前登录用户</span>
+            </span>
+          </div>
+          <Button variant="outline" size="sm" className="w-full" onClick={onLogout}>
+            <LogOut data-icon="inline-start" />
+            退出登录
+          </Button>
         </div>
       </div>
     </>
@@ -86,6 +99,14 @@ function SidebarContent({ page, onNavigate }: { page: PageKey; onNavigate: (page
 export default function Layout({ page, onNavigate, children }: { page: PageKey; onNavigate: (page: PageKey) => void; children: ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [online, setOnline] = useState<boolean | null>(null);
+  const { user, logout } = useAuth();
+
+  const handleLogout = () => {
+    setMenuOpen(false);
+    logout();
+    // 回到登录页；登出后 App 门禁只渲染 LoginPage。
+    if (window.location.hash) window.location.hash = '';
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -100,7 +121,7 @@ export default function Layout({ page, onNavigate, children }: { page: PageKey; 
   return (
     <div className="min-h-screen bg-background">
       <aside className="fixed inset-y-0 left-0 z-40 hidden w-[252px] flex-col border-r bg-sidebar px-4 lg:flex">
-        <SidebarContent page={page} onNavigate={navigate} />
+        <SidebarContent page={page} onNavigate={navigate} username={user?.username ?? ''} onLogout={handleLogout} />
       </aside>
 
       <Sheet open={menuOpen} onOpenChange={setMenuOpen}>
@@ -109,7 +130,7 @@ export default function Layout({ page, onNavigate, children }: { page: PageKey; 
             <SheetTitle>主导航</SheetTitle>
             <SheetDescription>切换工作空间页面</SheetDescription>
           </SheetHeader>
-          <SidebarContent page={page} onNavigate={navigate} />
+          <SidebarContent page={page} onNavigate={navigate} username={user?.username ?? ''} onLogout={handleLogout} />
         </SheetContent>
       </Sheet>
 

@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 import requests
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
+from . import auth
 from .backtest import (
     FunnelRotationBacktest, apply_repo_income, decompose_round_pnl, monthly_breakdown,
     performance_metrics, repo_rate_for_date, run_funnel_backtest,
@@ -380,6 +381,21 @@ class RotationRequest(BaseModel):
     pool: list[dict] | None = None
 
 
+class LoginRequest(BaseModel):
+    """POST /api/auth/login 请求体：用户名 / 密码 + 是否「记住我」（7 天）。"""
+
+    username: str
+    password: str
+    remember_me: bool = False
+
+
+class ChangePasswordRequest(BaseModel):
+    """POST /api/auth/change-password 请求体：当前密码 + 新密码。"""
+
+    current_password: str
+    new_password: str
+
+
 def _slim_rotation_trail(report: dict) -> dict:
     """把主报告里的大体积 ``rotation_trail`` 抽走，只留条数。
 
@@ -587,7 +603,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="2.14.10",
+        version="3.0.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -657,6 +673,75 @@ def create_app() -> FastAPI:
     @application.exception_handler(ValueError)
     async def value_error_handler(_, exc: ValueError):
         return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    # ------------------------------------------------------------------
+    # 统一鉴权中间件：除豁免名单外，全部 /api 路由要求有效 Bearer 令牌。
+    # 替代原先的 nginx HTTP Basic；豁免 /api/health（探活）与 /api/auth/login（登录本身）。
+    # LAYERLAB_DISABLE_AUTH=1（单测环境）时整体跳过，避免存量用例全部 401。
+    # ------------------------------------------------------------------
+    AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/login"}
+
+    @application.middleware("http")
+    async def auth_middleware(request: Request, call_next):
+        if os.environ.get("LAYERLAB_DISABLE_AUTH") == "1":
+            return await call_next(request)
+        path = request.url.path
+        if path.startswith("/api") and path not in AUTH_EXEMPT_PATHS:
+            storage = request.app.state.storage
+            header = request.headers.get("Authorization", "")
+            token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+            username = storage.get_session_username(token)
+            if not username:
+                return JSONResponse(status_code=401, content={"detail": "未登录或会话已过期"})
+            request.state.username = username
+        return await call_next(request)
+
+    # -- 应用级登录：登录 / 登出 / 校验 / 改密 ----------------------------
+    def _bearer_token(request: Request) -> str:
+        header = request.headers.get("Authorization", "")
+        return header[7:].strip() if header.lower().startswith("bearer ") else ""
+
+    @application.post("/api/auth/login")
+    def auth_login(payload: LoginRequest):
+        user = storage.get_user(payload.username.strip())
+        if user is None or not auth.verify_password(payload.password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="用户名或密码错误")
+        expires_at = (
+            auth.remember_expiry() if payload.remember_me else auth.default_expiry()
+        )
+        token = storage.create_session(user["username"], expires_at)
+        return {"token": token, "username": user["username"], "expires_at": expires_at}
+
+    @application.post("/api/auth/logout")
+    def auth_logout(request: Request):
+        storage.delete_session(_bearer_token(request))
+        return {"ok": True}
+
+    @application.get("/api/auth/me")
+    def auth_me(request: Request):
+        return {"username": request.state.username}
+
+    @application.post("/api/auth/change-password")
+    def auth_change_password(payload: ChangePasswordRequest, request: Request):
+        username = request.state.username
+        user = storage.get_user(username)
+        if user is None or not auth.verify_password(payload.current_password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="当前密码错误")
+        if not payload.new_password:
+            raise ValueError("新密码不能为空")
+        storage.change_password(username, auth.hash_password(payload.new_password))
+        return {"ok": True}
+
+    def seed_default_admin() -> None:
+        """users 表为空时播种默认管理员（环境变量可覆盖用户名 / 密码）。"""
+        if storage.count_users() > 0:
+            return
+        username = os.environ.get("LAYERLAB_ADMIN_USER", "owner")
+        password = os.environ.get("LAYERLAB_ADMIN_PASSWORD", "owner123")
+        storage.create_user(username, auth.hash_password(password))
+
+    seed_default_admin()
+    storage.purge_expired_sessions()
 
     def get_dataset(dataset_id: str):
         dataset = storage.get_dataset(dataset_id)

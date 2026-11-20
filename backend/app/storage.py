@@ -88,6 +88,14 @@ class SQLiteStorage:
                     account_state TEXT NOT NULL, strategy_state TEXT NOT NULL,
                     engine_state TEXT NOT NULL, updated_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS users (
+                    username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    token TEXT PRIMARY KEY, username TEXT NOT NULL,
+                    expires_at TEXT NOT NULL, created_at TEXT NOT NULL
+                );
             """)
 
     def get_setting(self, key: str) -> str | None:
@@ -510,3 +518,78 @@ class SQLiteStorage:
                 (account_id, f"{account_id}:{order_id}", order_id),
             ).fetchone()
         return self.get_paper(row["account_id"]) if row else None
+
+    # ------------------------------------------------------------------
+    # 应用级登录：用户 / 会话持久化（替代 nginx HTTP Basic 认证）
+    # ------------------------------------------------------------------
+    def count_users(self) -> int:
+        with self._connect() as connection:
+            row = connection.execute("SELECT COUNT(*) AS n FROM users").fetchone()
+        return int(row["n"]) if row else 0
+
+    def create_user(self, username: str, password_hash: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT OR REPLACE INTO users(username,password_hash,created_at) VALUES(?,?,?)",
+                (username, password_hash, utc_now()),
+            )
+
+    def get_user(self, username: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT username,password_hash,created_at FROM users WHERE username=?",
+                (username,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "username": row["username"],
+            "password_hash": row["password_hash"],
+            "created_at": row["created_at"],
+        }
+
+    def create_session(self, username: str, expires_at: str) -> str:
+        """新建一条会话并返回令牌；过期时间由调用方按 remember/默认口径算好传入。"""
+        from .auth import new_token
+
+        token = new_token()
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "INSERT INTO sessions(token,username,expires_at,created_at) VALUES(?,?,?,?)",
+                (token, username, expires_at, utc_now()),
+            )
+        return token
+
+    def get_session_username(self, token: str) -> str | None:
+        """返回令牌对应用户名；令牌不存在或已过期返回 None（过期会话顺手清掉）。"""
+        if not token:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT username,expires_at FROM sessions WHERE token=?", (token,)
+            ).fetchone()
+        if row is None:
+            return None
+        if str(row["expires_at"]) <= utc_now():
+            self.delete_session(token)
+            return None
+        return row["username"]
+
+    def delete_session(self, token: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute("DELETE FROM sessions WHERE token=?", (token,))
+
+    def change_password(self, username: str, password_hash: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "UPDATE users SET password_hash=? WHERE username=?",
+                (password_hash, username),
+            )
+
+    def purge_expired_sessions(self) -> int:
+        """清理已过期的会话行，返回删除条数（进程启动时调用，避免表无限膨胀）。"""
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE expires_at <= ?", (utc_now(),)
+            )
+        return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0

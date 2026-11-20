@@ -15,3 +15,8 @@ os.environ["WB_SCHEDULER"] = "0"
 
 # 单测不做「用实时快照探测今天是否交易日」的联网判断（会打腾讯行情）。
 os.environ["WB_TRADING_PROBE"] = "0"
+
+# 单测默认关闭应用级登录鉴权：新增全局鉴权中间件后，存量直接访问受保护路由的
+# 用例（test_api.py 等）会全部变 401。设此变量让中间件在单测环境跳过鉴权。
+# test_auth.py 会显式 monkeypatch.delenv 该变量，以真正测试登录 / 鉴权链路。
+os.environ["LAYERLAB_DISABLE_AUTH"] = "1"
