@@ -17,8 +17,8 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from .backtest import (
-    FunnelRotationBacktest, decompose_round_pnl, monthly_breakdown, performance_metrics,
-    run_funnel_backtest,
+    FunnelRotationBacktest, apply_repo_income, decompose_round_pnl, monthly_breakdown,
+    performance_metrics, repo_rate_for_date, run_funnel_backtest,
 )
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
 from .beta_sleeve import entry_allowed, exit_reason, reentry_cooldown_ready, target_quantity
@@ -291,6 +291,12 @@ class AccountConfigRequest(BaseModel):
     risk_volume_caliber: str | None = None
     # 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
     risk_volume_ratio: float | None = Field(default=None, gt=0, le=1)
+    # 闲置资金逆回购：空仓/未占用现金每日盘后结算模拟国债逆回购收益。
+    # repo_yield_min/max 为年化小数（0.010=1.00%）；合并进 StrategyConfig 后由
+    # __post_init__ 校验 0 <= min <= max 且都在 [0, 0.1]（年化最多 10%），非法值 400。
+    idle_cash_repo_enabled: bool | None = None
+    repo_yield_min: float | None = Field(default=None, ge=0, le=0.1)
+    repo_yield_max: float | None = Field(default=None, ge=0, le=0.1)
 
 
 class ApplyConfigRequest(BaseModel):
@@ -692,9 +698,24 @@ def create_app() -> FastAPI:
         ``beta_value``/``beta_qty`` = ETF beta 腿当日市值/股数。
         """
         timestamp = when if isinstance(when, str) else when.isoformat(timespec="seconds")
+        day = str(timestamp)[:10]
+        # 闲置资金逆回购（盘后结算，模拟盘与回测共用 apply_repo_income 同一套算法）：
+        # 收益直接加进 account.cash，随下方快照的 cash 字段落库（paper_equity 表结构
+        # 不含 repo_* 列，故明细只到「cash 已含收益」这层；rate/idle 明细仅回测提供）。
+        # 按 day 去重：同一天多次日终只计提一次。``source="replay"``（/advance 缓存回放）
+        # 绝不计提，避免污染真实净值。
+        if source != "replay" and account.repo_accrued_date != day \
+                and bool(getattr(account.config, "idle_cash_repo_enabled", False)):
+            # 计提当日闲置资金逆回购收益（盘后结算，进 cash）。按 repo_accrued_date 去重：
+            # 同一天多次日终只结算一次（收盘快照幂等覆盖，但现金计提不能重复）。
+            # ``source="replay"``（/advance 缓存回放）绝不计提，避免污染真实净值。
+            # 该字段随账户落库（include_internal），进程重启后同样去重。
+            apply_repo_income(account, account.config, day)
+            account.repo_accrued_date = day
+            storage.save_paper(account.to_dict(include_internal=True))
         positions = list(account.positions.values())
         storage.save_paper_equity(account.id, {
-            "date": str(timestamp)[:10],
+            "date": day,
             "ts": str(timestamp),
             "equity": account.equity,
             "cash": account.cash,
@@ -1883,6 +1904,44 @@ def create_app() -> FastAPI:
             enriched, len(trading_dates), beta=info.get("beta"),
         )
         return body
+
+    @application.get("/api/backtests/{backtest_id}/repo-daily")
+    def backtest_repo_daily(
+        backtest_id: str,
+        params: tuple[int, int] = Depends(page_params),
+        month: str | None = Query(
+            None, description="按自然月过滤，格式 YYYY-MM（如 2026-03）；不传返回全部计提日",
+        ),
+    ):
+        """闲置资金逆回购逐日计提明细（分页）：从报告 ``equity_curve`` 取 ``repo_income``
+        有值的交易日，返回 ``{date, idle_cash, rate, income}``。
+
+        仅开启逆回购的回测才有计提日；关闭时（或旧报告）返回空列表。``month`` 为
+        YYYY-MM 时只下发该自然月。旧报告 equity_curve 无 ``repo_income`` 键 → 空，
+        向后兼容。404 当回测不存在；page/page_size 非法 422（``page_params`` 校验）。
+        """
+        report = storage.get_backtest(backtest_id)
+        if report is None:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        month_filter = (month or "").strip()
+        if month_filter and (len(month_filter) != 7 or month_filter[4] != "-"):
+            raise HTTPException(status_code=422, detail="month 需为 YYYY-MM 格式（如 2026-03）")
+        rows: list[dict[str, Any]] = []
+        for point in (report.get("equity_curve") or []):
+            income = point.get("repo_income")
+            if income is None:
+                continue
+            day = str(point.get("date") or "")[:10]
+            if month_filter and not day.startswith(month_filter):
+                continue
+            rows.append({
+                "date": day,
+                "idle_cash": money(point.get("repo_idle") or 0.0),
+                "rate": float(point.get("repo_rate") or 0.0),
+                "income": money(income),
+            })
+        page, page_size = params
+        return paginate(rows, page=page, page_size=page_size)
 
     @application.get("/api/backtests/{backtest_id}/records/{kind}")
     def backtest_records(

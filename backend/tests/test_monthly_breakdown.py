@@ -39,7 +39,7 @@ def test_monthly_breakdown_splits_by_calendar_month():
     assert [item["month"] for item in monthly] == ["2025-01", "2025-02", "2025-03"]
     january, february, march = monthly
 
-    # 首月基期 = 初始资金。
+    # 首月基期 = 初始资金。（无逆回购字段 → repo_income 为 0）
     assert january == {
         "month": "2025-01",
         "start_equity": 100_000,
@@ -49,6 +49,7 @@ def test_monthly_breakdown_splits_by_calendar_month():
         "trading_days": 2,
         "max_drawdown": 0.0,
         "cumulative_return": pytest.approx(0.02),
+        "repo_income": 0.0,
     }
     # 后续月份基期 = 上月末权益，pnl = 当月末权益 - 上月末权益。
     assert february["start_equity"] == 102_000
@@ -109,6 +110,7 @@ def test_monthly_breakdown_single_day_month_has_zero_drawdown():
         "trading_days": 1,
         "max_drawdown": pytest.approx(0.12),
         "cumulative_return": pytest.approx(-0.12),
+        "repo_income": 0.0,
     }]
 
 

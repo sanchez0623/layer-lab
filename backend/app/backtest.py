@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import random
 import uuid
 from bisect import bisect_right
 from collections import defaultdict
@@ -34,6 +35,46 @@ def _normalize_fill_timestamp(fill: Fill, bar: Bar) -> None:
     """
     if bar.timeframe == "daily":
         fill.timestamp = f"{bar.date}T09:30:00"
+
+
+def repo_rate_for_date(date_str: str, config: StrategyConfig) -> float:
+    """某交易日的逆回购年化收益率：以日期为种子在 [repo_yield_min, repo_yield_max] 取值。
+
+    用 ``random.Random(f"repo:{date_str}")`` 做确定性随机——同一日期永远取到同一个
+    rate，保证同一份回测报告重跑结果完全一致（可复现）。真实国债逆回购利率每天
+    随资金面波动，这里用「日内均匀随机」模拟这种日间抖动，而不是固定值。
+    """
+    low = float(config.repo_yield_min)
+    high = float(config.repo_yield_max)
+    if high <= low:
+        return low
+    return random.Random(f"repo:{date_str}").uniform(low, high)
+
+
+def apply_repo_income(account: BrokerAccount, config: StrategyConfig, date_str: str) -> tuple[float, float]:
+    """闲置资金逆回购：每日盘后结算，返回 ``(当日收益, 计提前闲置资金)``。
+
+    闲置资金 ``idle = account.equity - account.market_value``（= 未被持仓占用的现金，
+    含 ETF beta 腿未占用部分——market_value 已含 beta 市值）。仅当
+    ``idle_cash_repo_enabled`` 且 ``idle > 0`` 时计提：``income = idle × rate / 365``，
+    直接加进 ``account.cash``（盘后结算，次日可用于买入）。收益自然抬高权益，
+    流进「每月盈亏」与「总收益」，不单独从权益里扣减。
+
+    返回 ``(0.0, 0.0)`` 表示当日未计提（功能关闭 / 无闲置资金）。调用方把 income /
+    idle / rate 写进 equity_curve 点（``repo_income`` / ``repo_rate`` / ``repo_idle``），
+    供明细弹窗；``repo_idle`` 取**计提前**的闲置资金（income 尚未进 cash）。
+    """
+    if not bool(getattr(config, "idle_cash_repo_enabled", False)):
+        return 0.0, 0.0
+    idle = money(float(account.equity) - float(account.market_value))
+    if idle <= 0:
+        return 0.0, 0.0
+    rate = repo_rate_for_date(date_str, config)
+    income = money(idle * rate / 365.0)
+    if income <= 0:
+        return 0.0, 0.0
+    account.cash = money(account.cash + income)
+    return income, idle
 
 # 回测指数加载：start 前推的日历天缓冲，保证回测首日往前 ≥21 根（L0 ret20 + 策略大盘门）。
 _INDEX_LOOKBACK_BUFFER_DAYS = 45
@@ -204,6 +245,8 @@ def monthly_breakdown(
             "max_drawdown": month_drawdown,
             "cumulative_return": (end_equity + cumulative_withdrawn) / base_cash - 1
                 if base_cash > 0 else 0.0,
+            # 闲置资金逆回购当月累计收益（仅开启时 > 0；旧报告无 repo_income 键时为 0）。
+            "repo_income": money(sum(float(point.get("repo_income") or 0.0) for point in points)),
         })
         previous_equity = end_equity
     return result
@@ -532,6 +575,9 @@ def performance_metrics(
     # 供前端画原始净值曲线的回撤着色，不受提现调整影响；只有 underwater 块换成了调整口径。
     # 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后重算，看收益是否靠少数极端项撑起。
     monthly_list = monthly_breakdown(equity_curve, initial_cash, withdrawals)
+    # 闲置资金逆回购总收益（Σ equity_curve.repo_income）：仅开启逆回购时有值，
+    # 自然已含在权益里，这里单独给出供「总收益」块展示构成。
+    repo_income_total = money(sum(float(item.get("repo_income") or 0.0) for item in equity_curve))
     best_month_pnl = max((float(row["pnl"]) for row in monthly_list), default=0.0)
     top3_win_pnl = sum(item["pnl"] for item in sorted(wins, key=lambda row: row["pnl"], reverse=True)[:3])
     robust_net_profit = net_profit - best_month_pnl - top3_win_pnl
@@ -548,6 +594,7 @@ def performance_metrics(
         "profit_factor": profit_factor, "total_rounds": len(rounds),
         "closed_rounds": len(closed), "total_trades": len(trades),
         "total_fees": money(total_fees), "t_net_profit": money(t_net_profit),
+        "repo_income_total": repo_income_total,
         "t_trade_count": sum(1 for item in trades if item["purpose"] == "T"),
         "total_withdrawn": money(total_withdrawn), "withdrawn_count": withdrawn_count,
         "profit_withdrawn": money(profit_withdrawn),
@@ -1692,6 +1739,9 @@ class FunnelRotationBacktest:
             # 并存模式（etf_beta_coexist）下 ETF 与个股同存，只按可用现金封顶建仓额度。
             self._current_symbol = current_symbol
             self._manage_beta(date_str)
+            # 闲置资金逆回购：盘后结算，收益进现金（自然流入每月盈亏 / 总收益）。
+            repo_income, repo_idle = apply_repo_income(self.account, self.config, date_str)
+            repo_rate = repo_rate_for_date(date_str, self.config) if repo_income else 0.0
             # 净值曲线点
             held = current_symbol if current_symbol else None
             position = self.account.position(held) if held else None
@@ -1707,6 +1757,11 @@ class FunnelRotationBacktest:
                 "beta_qty": beta_position.beta_qty if beta_position else 0,
                 "beta_value": beta_value,
                 "beta_symbol": self.etf_symbol if (beta_position and beta_position.beta_qty) else None,
+                # 闲置资金逆回购（盘后结算）：有计提才带字段，旧报告 / 关闭时无此键，
+                # 明细端点靠「repo_income 是否有值」过滤出真正的计提日。
+                "repo_income": repo_income,
+                "repo_rate": repo_rate,
+                "repo_idle": repo_idle,
             })
             # 供后续轮次闭合时查「轮次前一日」的 beta 市值基准（O(1)，不扫曲线）。
             self._beta_value_by_date[date_str] = beta_value

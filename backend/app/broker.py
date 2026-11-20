@@ -137,6 +137,10 @@ class BrokerAccount:
         self.auto_strategy = False
         self.strategy_state: dict = {}
         self.last_daily_signal_date: str | None = None
+        # 闲置资金逆回购：当日已计提盘后收益的交易日（YYYY-MM-DD）。仅用于同一天多次日终
+        # 去重（收盘快照幂等覆盖，但现金计提不能重复），随账户一起落库（include_internal），
+        # 进程重启后同样去重。关闭逆回购时始终为 None。
+        self.repo_accrued_date: str | None = None
         self.realized_pnl = 0.0
         self.total_fees = 0.0
         self.t_net_profit = 0.0
@@ -798,6 +802,7 @@ class BrokerAccount:
                 "current_date": self.current_date,
                 "strategy_state": self.strategy_state,
                 "last_daily_signal_date": self.last_daily_signal_date,
+                "repo_accrued_date": self.repo_accrued_date,
                 "rotation_pending_advance": self.rotation_pending_advance,
                 "rotation_config": self.rotation_config,
                 "rotation_last_attempt_date": self.rotation_last_attempt_date,
@@ -812,7 +817,7 @@ class BrokerAccount:
             initial_cash=data["initial_cash"], config=StrategyConfig.from_dict(data.get("config")),
             name=data["name"], account_id=data["id"], dataset_id=data.get("dataset_id"),
         )
-        for field in ("cash", "cursor", "status", "armed_state", "sequence_index", "realized_pnl", "total_fees", "t_net_profit", "current_date", "auto_strategy", "last_daily_signal_date", "total_withdrawn", "_last_month_eval"):
+        for field in ("cash", "cursor", "status", "armed_state", "sequence_index", "realized_pnl", "total_fees", "t_net_profit", "current_date", "auto_strategy", "last_daily_signal_date", "total_withdrawn", "_last_month_eval", "repo_accrued_date"):
             if field in data:
                 setattr(account, field, data[field])
         # created_at 兼容旧 payload：新字段缺失时用 payload 里的 updated_at（若有）或当前
