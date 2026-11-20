@@ -1777,10 +1777,20 @@ def create_app() -> FastAPI:
         trading_dates = [str(point.get("date")) for point in (report.get("equity_curve") or [])]
         enriched = enrich_trail(raw, report.get("rounds") or [], trading_dates)
         enriched = enrich_trail(raw, report.get("rounds") or [], trading_dates)
-        # 传 beta 汇总（含逐笔 fills）：给 BETA_SPAN 区间行补「持仓区间 / 持有交易日 /
-        # 本轮收益率 / 净盈亏」，补齐用户看到的四个空列。
+        # 传 beta 汇总（含逐笔 fills）+ equity_curve 的 {date: beta_value}：给 BETA_SPAN
+        # 区间行按「资本账户法」补「本轮收益率 / 净盈亏」（段初前收市值 + 段内买卖 +
+        # 段末市值），不再只算已实现 pnl。旧报告 equity_curve 没有 beta_value 字段时
+        # mapping 留空 → 回退原来的已实现口径，向后兼容。
+        curve_points = report.get("equity_curve") or []
+        has_beta_value = any(point.get("beta_value") is not None for point in curve_points)
+        beta_values = {
+            str(point.get("date"))[:10]: float(point.get("beta_value") or 0.0)
+            for point in curve_points
+        } if has_beta_value else {}
         items = (
-            collapse_waiting_spans(enriched, beta=info.get("beta"))
+            collapse_waiting_spans(
+                enriched, beta=info.get("beta"), beta_values=beta_values,
+            )
             if collapse_waiting else enriched
         )
         page, page_size = params

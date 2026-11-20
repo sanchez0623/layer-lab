@@ -178,6 +178,7 @@ def _beta_signature(item: dict[str, Any]) -> tuple[str | None, bool]:
 def collapse_waiting_spans(
     items: list[dict[str, Any]] | None,
     beta: dict[str, Any] | None = None,
+    beta_values: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """把连续同因的空仓日合并成区间行（轮次行原样保留，不跨轮次合并）。
 
@@ -190,6 +191,10 @@ def collapse_waiting_spans(
     ``beta_symbol`` / ``funnel`` / ``gate``），避免逐日刷屏。``beta``（报告 data_info
     里的 beta 汇总，含逐笔 ``fills``）传入时给 BETA_SPAN 补「净盈亏 / 本轮收益率 /
     区间投入」，补齐用户看到的四个空列（持仓区间 / 持有交易日 / 本轮收益率 / 净盈亏）。
+
+    ``beta_values`` 为 equity_curve 的 ``{date: beta_value}`` 映射；传入时 BETA_SPAN
+    改用资本账户口径（见 :func:`_beta_span_outcome`），不再只算已实现 pnl。旧调用 /
+    旧报告不传时保持原来的「仅已实现 pnl」行为，向后兼容。
     """
     result: list[dict[str, Any]] = []
     current_waiting: dict[str, Any] | None = None
@@ -204,7 +209,7 @@ def collapse_waiting_spans(
     def flush_beta() -> None:
         nonlocal current_beta
         if current_beta is not None:
-            _beta_span_outcome(current_beta, beta)
+            _beta_span_outcome(current_beta, beta, beta_values)
             result.append(current_beta)
             current_beta = None
 
@@ -305,27 +310,70 @@ def _apply_close_diagnostic(entry: dict[str, Any], round_row: dict[str, Any]) ->
 
 
 def _beta_span_outcome(
-    span: dict[str, Any], beta: dict[str, Any] | None,
+    span: dict[str, Any],
+    beta: dict[str, Any] | None,
+    beta_values: dict[str, float] | None = None,
 ) -> None:
     """给合并后的 ETF beta 持仓区间行（``kind=BETA_SPAN``）补上成果字段。
 
     用户看到的空列：持仓区间 / 持有交易日 / 本轮收益率 / 净盈亏。前三者区间合并时
     已有（``start_date``/``end_date``/``days``/``holding_days``），这里补「净盈亏」
-    与「本轮收益率」：用落在区间内的 beta 卖出成交汇总已实现盈亏，再除以区间内
-    beta 买入成本（含费）得资金效率口径收益率——与轮次行 ``pnl / max_invested``
-    的资金效率口径一致。
+    与「本轮收益率」。两种口径：
 
-    ``beta.fills`` 缺失（旧报告 / beta 未启用）时优雅降级：盈亏回退整个 beta 腿的
-    汇总 pnl（仅单区间时准确），收益率留空。
+    **资本账户法**（传入 ``beta_values``，即 equity_curve 的 ``{date: beta_value}``）：
+    把区间当成一个 mini 账户，按资金进出核算::
+
+        pnl = 段末 beta_value + Σ区间内卖出所得 − 段初 beta_value − Σ区间内买入成本
+
+    其中「段初」取 ``start_date`` **前一交易日**收盘的 beta_value（建仓段前一日
+    beta_qty=0 → 0；找不到则回退 0，避免把首日买入重复计入），「段末」取
+    ``end_date`` 收盘 beta_value；买入成本 = Σ(price×qty + fee)，卖出所得 =
+    Σ(price×qty − fee)。这样段内加仓的本金会被扣掉、不会冒充收益；段内只买入
+    未卖出也能算出浮盈；纯持有无成交则退化为「末值 − 初值」。同一段连续持仓被
+    门状态切成多段时，各段 pnl 可加总闭合。
+
+    收益率分母 = 段初市值 + 区间买入成本（期初参与资本，含费）；``beta_invested``
+    同步改为这个分母（资金效率口径），不再只是「区间买入成交额」。分母 > 0 时
+    才给 ``return_rate``，否则留空。
+
+    **旧的已实现口径**（未传 ``beta_values``，向后兼容旧调用 / 旧报告）：用落在区间
+    内的 beta 卖出成交汇总 ``realized_pnl``，除以区间买入成交额；``beta.fills`` 缺失
+    时回退整个 beta 腿的汇总 pnl（仅含 ``last_exit_date`` 的那一段），收益率留空。
     """
     start = str(span.get("start_date") or "")
-    end = str(span.get("end_date") or span.get("start_date") or "")
+    end = str(span.get("end_date") or start)
     fills = [
         item for item in ((beta or {}).get("fills") or [])
-        if start <= str(item.get("date") or "") <= end
+        if start <= str(item.get("date") or "")[:10] <= end
     ]
     buys = [item for item in fills if item.get("side") == "BUY"]
     sells = [item for item in fills if item.get("side") == "SELL"]
+
+    if beta_values:
+        # 段初取 start_date 的前一交易日收盘市值：建仓段前一日尚未持有（0），
+        # 若改用 start_date 当日收盘值会把当日买入重复计入。
+        previous = max((day for day in beta_values if str(day) < start), default=None)
+        start_value = float(beta_values.get(previous) or 0.0) if previous else 0.0
+        end_value = float(beta_values.get(end) or 0.0)
+        buy_cost = sum(
+            float(item.get("price", 0.0)) * int(item.get("quantity", 0))
+            + float(item.get("fee", 0.0) or 0.0)
+            for item in buys
+        )
+        sell_proceeds = sum(
+            float(item.get("price", 0.0)) * int(item.get("quantity", 0))
+            - float(item.get("fee", 0.0) or 0.0)
+            for item in sells
+        )
+        pnl = sell_proceeds + end_value - start_value - buy_cost
+        invested = start_value + buy_cost
+        span["beta_invested"] = round(invested, 2)
+        span["pnl"] = round(pnl, 2)
+        span["return_rate"] = (pnl / invested) if invested > 0 else None
+        span["beta_buy_count"] = len(buys)
+        span["beta_sell_count"] = len(sells)
+        return
+
     if fills:
         invested = sum(float(item.get("price", 0.0)) * int(item.get("quantity", 0)) for item in buys)
         pnl = sum(float(item.get("realized_pnl", 0.0) or 0.0) for item in sells)
