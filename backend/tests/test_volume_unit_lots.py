@@ -109,5 +109,68 @@ def test_lots_per_share_constant():
     assert LOTS_PER_SHARE == 100
 
 
+# ---------------- PERMANENT / T 回归护栏（本次不 ×100） ----------------
+
+def _permanent_seeded_account(permanent_qty: int) -> BrokerAccount:
+    """底仓永久仓 permanent_qty 股（T+1 可卖），参与度固定为 PARTICIPATION。"""
+    acct = BrokerAccount(
+        10_000_000, StrategyConfig(slippage_bps=0, volume_participation=PARTICIPATION),
+        name="股票容量测试",
+    )
+    acct.new_day("2025-01-02")
+    pos = acct.position("sh.600000")
+    pos.permanent_qty = permanent_qty
+    pos.permanent_cost = 2.0 * permanent_qty
+    acct.new_day("2025-01-03")
+    return acct
+
+
+def _stock_sell_request(quantity: int) -> OrderRequest:
+    return OrderRequest(
+        symbol="sh.600000", side="SELL", quantity=quantity, purpose="PERMANENT",
+        execution_mode="NEXT_BAR", order_type="MARKET", reason="测试",
+    )
+
+
+def test_permanent_large_order_not_scaled_by_lots():
+    """PERMANENT（股票）大单本次不 ×100：容量仍按 volume 当股数（与修复前一致）。
+
+    沪市主板市价单笔申报上限 10 万股，故委托取 9.9 万股；bar 成交量 1,000 手
+    （=10 万股，参与度 0.20、不 ×100 → 容量 2 万股），远小于委托量，验证股票路径
+    未被本次 BETA-only 修复误改：仍按「volume 当股数」算容量、部分成交。
+    """
+    acct = _permanent_seeded_account(permanent_qty=99_000)
+    order = acct.submit(_stock_sell_request(99_000), datetime(2025, 1, 3, 15))
+    assert order.status == "PENDING"
+
+    bar = Bar(
+        timestamp=datetime(2025, 1, 3, 9, 30), symbol="sh.600000",
+        open=2.54, high=2.57, low=2.51, close=2.54,
+        volume=1_000, amount=2.54 * 1_000, prev_close=2.54,
+    )
+    fills = acct.process_bar(bar)
+
+    expected = (int(1_000 * PARTICIPATION) // 100) * 100  # 20,000 股（未 ×100）
+    assert len(fills) == 1
+    assert fills[0].quantity == expected
+    assert order.status == "PARTIALLY_FILLED"
+    assert order.remaining == 99_000 - expected
+
+
+def test_permanent_small_order_behavior_unchanged():
+    """PERMANENT 小单（远小于容量）行为不变，单日全成。"""
+    acct = _permanent_seeded_account(permanent_qty=1_000)
+    order = acct.submit(_stock_sell_request(1_000), datetime(2025, 1, 3, 15))
+    bar = Bar(
+        timestamp=datetime(2025, 1, 3, 9, 30), symbol="sh.600000",
+        open=2.54, high=2.57, low=2.51, close=2.54,
+        volume=100_000, amount=2.54 * 100_000, prev_close=2.54,
+    )
+    fills = acct.process_bar(bar)
+    assert len(fills) == 1
+    assert fills[0].quantity == 1_000
+    assert order.status == "FILLED"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

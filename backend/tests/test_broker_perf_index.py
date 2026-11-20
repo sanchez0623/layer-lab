@@ -217,12 +217,11 @@ def test_partially_filled_order_leaves_index_only_when_no_longer_open():
     account = BrokerAccount(1_000_000, config())
     account.new_day("2025-01-02")
 
-    # 限价 9.9 买单 200 股；低成交量只够成交 100 股。
-    # 容量 = volume(手)×100(股/手)×参与度 = 1000×100×0.001 = 100 股。
+    # 限价 9.9 买单 200 股；低成交量（参与度 0.1 × 1000 股）只够成交 100 股。
     order = account.submit(req("TEST", quantity=200, order_type="LIMIT", limit_price=9.9))
     bar = make_bar("TEST", ts + timedelta(minutes=5), price=10.2, volume=1_000)
     bar.low = 9.8
-    account.config.volume_participation = 0.001
+    account.config.volume_participation = 0.1
     fills = account.process_bar(bar)
     assert len(fills) == 1 and fills[0].quantity == 100
     assert order.status == "PARTIALLY_FILLED"

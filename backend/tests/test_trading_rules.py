@@ -214,8 +214,7 @@ def test_star_board_can_fill_1_share_increment_partial():
     account = BrokerAccount(1_000_000, config())
     account.submit(request("sh.688200", quantity=1000, order_type="LIMIT", limit_price=10.0))
     bar = make_bar("sh.688200", 1, price=10.0, volume=100_000)
-    # 容量 = volume(手)×100(股/手)×参与度 = 100000×100×0.00001 = 100 股。
-    account.config.volume_participation = 0.00001   # 容量 100 股
+    account.config.volume_participation = 0.001   # 容量 100 股
     fills = account.process_bar(bar)
     assert len(fills) == 1
     assert fills[0].quantity == 100
