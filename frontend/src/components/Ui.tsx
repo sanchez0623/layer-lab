@@ -152,9 +152,9 @@ export function TableEmpty({ colSpan, message = '暂无记录', action }: { colS
   );
 }
 
-export function Metric({ label, value, sub, tone = '', icon }: { label: string; value: ReactNode; sub?: ReactNode; tone?: 'positive' | 'negative' | ''; icon?: ReactNode }) {
+export function Metric({ label, value, sub, tone = '', icon, title }: { label: string; value: ReactNode; sub?: ReactNode; tone?: 'positive' | 'negative' | ''; icon?: ReactNode; title?: string }) {
   return (
-    <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border bg-card px-3 py-2.5 shadow-xs">
+    <div className="flex min-w-0 flex-col gap-0.5 rounded-lg border border-border bg-card px-3 py-2.5 shadow-xs" title={title}>
       <div className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground">{label}{icon}</div>
       <div className={cn('font-mono text-lg font-medium tracking-tight text-foreground', tone === 'positive' && 'text-destructive', tone === 'negative' && 'text-success')}>{value}</div>
       {sub && <div className="truncate text-[10px] text-muted-foreground">{sub}</div>}
