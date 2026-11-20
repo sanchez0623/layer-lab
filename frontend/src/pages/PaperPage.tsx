@@ -786,6 +786,45 @@ export default function PaperPage() {
   const [riskCaliber, setRiskCaliber] = useState('');
   const [riskRatio, setRiskRatio] = useState('');
   const [savingRisk, setSavingRisk] = useState(false);
+  // 闲置资金逆回购：开关 + 年化收益率区间（%）。留空表示沿用当前值。
+  const repoEnabledCurrent = Boolean(account?.config?.idle_cash_repo_enabled);
+  const repoMinCurrent = account?.config?.repo_yield_min ?? 0.010;
+  const repoMaxCurrent = account?.config?.repo_yield_max ?? 0.015;
+  const [repoEnabledDraft, setRepoEnabledDraft] = useState<boolean | null>(null);
+  const [repoMinInput, setRepoMinInput] = useState('');
+  const [repoMaxInput, setRepoMaxInput] = useState('');
+  const [savingRepo, setSavingRepo] = useState(false);
+  const saveRepo = async () => {
+    if (!account) return;
+    const enabled = repoEnabledDraft ?? repoEnabledCurrent;
+    // 留空沿用当前值；填了就按 % → 小数换算。
+    const minPct = repoMinInput === '' ? repoMinCurrent * 100 : Number(repoMinInput);
+    const maxPct = repoMaxInput === '' ? repoMaxCurrent * 100 : Number(repoMaxInput);
+    if (!Number.isFinite(minPct) || !Number.isFinite(maxPct)) { setError('逆回购年化收益率须为数字。'); return; }
+    const minY = minPct / 100;
+    const maxY = maxPct / 100;
+    // 与后端 StrategyConfig.__post_init__ 同口径预校验：0 <= min <= max <= 10%。
+    if (!(minY >= 0 && minY <= 0.1)) { setError('逆回购年化下限须为 0~10% 之间的小数。'); return; }
+    if (!(maxY >= 0 && maxY <= 0.1)) { setError('逆回购年化上限须为 0~10% 之间的小数（上限最多 10%）。'); return; }
+    if (minY > maxY) { setError('逆回购年化下限不能高于上限。'); return; }
+    setSavingRepo(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, {
+        idle_cash_repo_enabled: enabled,
+        repo_yield_min: minY,
+        repo_yield_max: maxY,
+      });
+      setAccount(next);
+      setRepoEnabledDraft(null);
+      setRepoMinInput('');
+      setRepoMaxInput('');
+      toast.success(enabled ? '闲置资金逆回购已开启，下一根K线起盘后结算。' : '闲置资金逆回购已关闭。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '逆回购配置更新失败。');
+    } finally {
+      setSavingRepo(false);
+    }
+  };
   const riskCaliberCurrent = account?.config?.risk_volume_caliber ?? 'annualized';
   const riskRatioCurrent = account?.config?.risk_volume_ratio ?? 0.8;
   const saveRiskCaliber = async () => {
@@ -1299,6 +1338,19 @@ export default function PaperPage() {
                     <NumberInput unit="%" min={0.1} max={100} step={1} allowEmpty placeholder={number(riskRatioCurrent * 100, 0)} value={riskRatio} onChange={setRiskRatio} disabled={savingRisk} />
                   </Field>
                   <Button size="sm" className="h-8" onClick={() => void saveRiskCaliber()} disabled={savingRisk}>{savingRisk ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingRisk ? '正在保存' : '保存口径'}</Button>
+                </div>
+                {/* 闲置资金逆回购：开关 + 年化收益率区间（盘后结算，与回测同一套算法） */}
+                <div className="mt-1.5 flex flex-wrap items-end gap-2">
+                  <Field label="闲置资金逆回购" hint="空仓/未占用现金每日盘后结算，模拟国债逆回购收益" className="w-44">
+                    <Switch checked={repoEnabledDraft ?? repoEnabledCurrent} onCheckedChange={setRepoEnabledDraft} disabled={savingRepo} />
+                  </Field>
+                  <Field label="年化下限（%）" hint="每日收益率在 [下限, 上限] 区间按日期确定性取值" className="w-32">
+                    <NumberInput unit="%" min={0} max={10} step={0.1} allowEmpty placeholder={number(repoMinCurrent * 100, 2)} value={repoMinInput} onChange={setRepoMinInput} disabled={savingRepo} />
+                  </Field>
+                  <Field label="年化上限（%）" hint="上限最多 10%（防误填成 100%）；须 ≥ 下限" className="w-32">
+                    <NumberInput unit="%" min={0} max={10} step={0.1} allowEmpty placeholder={number(repoMaxCurrent * 100, 2)} value={repoMaxInput} onChange={setRepoMaxInput} disabled={savingRepo} />
+                  </Field>
+                  <Button size="sm" className="h-8" onClick={() => void saveRepo()} disabled={savingRepo}>{savingRepo ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingRepo ? '正在保存' : '保存逆回购'}</Button>
                 </div>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>

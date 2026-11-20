@@ -90,6 +90,13 @@ const fallbackConfig: StrategyConfig = {
   // 必须登记在 fallbackConfig 里，否则 mergeKnown 在「带入回测」时会静默丢弃报告快照里的值。
   installment_scale_mode: 'fixed',
   installment_scale_floor: 0.5,
+  // 闲置资金逆回购（每日盘后结算）：空仓/未占用现金每日模拟国债逆回购收益。
+  // 默认关闭（与后端 domain.py 一致）；必须登记在 fallbackConfig 里，
+  // 否则 mergeKnown 在「带入回测」时会静默丢弃报告快照里的值。
+  idle_cash_repo_enabled: false,
+  // 逆回购年化收益率下限/上限（小数，0.010 = 1.00%）。校验：0 <= min <= max <= 0.1。
+  repo_yield_min: 0.010,
+  repo_yield_max: 0.015,
 };
 
 /** 回测仅保留漏斗轮动模式（清仓后重跑选股换票）；旧的单标的模式已下线。 */
@@ -1065,6 +1072,21 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                       </FormGrid>
                     )}
                   </div>
+
+                {/* 闲置资金逆回购（每日盘后结算）：空仓/未占用现金每日模拟国债逆回购收益 */}
+                <div className="rounded-xl border bg-muted/25 p-3">
+                  <SwitchRow label="闲置资金逆回购" description="空仓/未占用现金每日盘后结算，模拟国债逆回购收益（收益进现金，体现在每月盈亏与总收益）；回测与模拟盘同一套算法" checked={Boolean(config.idle_cash_repo_enabled)} onCheckedChange={(checked) => updateConfig('idle_cash_repo_enabled', checked)} />
+                  {config.idle_cash_repo_enabled && (
+                    <FormGrid className="mt-2">
+                      <Field label="年化下限（%）" hint="每日收益率在 [下限, 上限] 区间按日期确定性取值（同一天同 rate，可复现）" error={configIssues.repo_yield_min}>
+                        <NumberInput unit="%" min={0} max={10} step={0.1} value={Number(((config.repo_yield_min ?? 0.010) * 100).toFixed(2))} onChange={(value) => updateConfig('repo_yield_min', Number(value) / 100)} />
+                      </Field>
+                      <Field label="年化上限（%）" hint="上限最多 10%（防把 1% 误填成 100%）；须 ≥ 下限" error={configIssues.repo_yield_max}>
+                        <NumberInput unit="%" min={0} max={10} step={0.1} value={Number(((config.repo_yield_max ?? 0.015) * 100).toFixed(2))} onChange={(value) => updateConfig('repo_yield_max', Number(value) / 100)} />
+                      </Field>
+                    </FormGrid>
+                  )}
+                </div>
 
                 <div className="rounded-xl border bg-muted/25 p-3">
                   <FormGrid>

@@ -40,6 +40,9 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   withdraw_fixed_amount: '固定金额',
   risk_volume_caliber: 'Armed 量价背离缩量口径',
   risk_volume_ratio: '缩量阈值',
+  idle_cash_repo_enabled: '闲置资金逆回购',
+  repo_yield_min: '逆回购年化下限',
+  repo_yield_max: '逆回购年化上限',
 };
 
 /** 把「字段 + 文案」拼成一句可读提示：`深跌幅当日做T：开启时须 ≥ 10%…`。 */
@@ -167,6 +170,22 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   const volumeRatio = config.risk_volume_ratio;
   if (volumeRatio !== undefined && !(isNum(volumeRatio) && volumeRatio > 0 && volumeRatio <= 1)) {
     issue('risk_volume_ratio', '须为 0~100%（不含 0）的百分数');
+  }
+
+  // ---- 闲置资金逆回购（年化收益率区间）--------------------------------------
+  // 收益率是「年化小数」口径：0 <= 下限 <= 上限 <= 10%，上限卡 10% 防止把 1% 误填成 1（=100%）。
+  const repoMin = config.repo_yield_min;
+  const repoMax = config.repo_yield_max;
+  if (isNum(repoMin) && isNum(repoMax) && repoMin > repoMax) {
+    issue('repo_yield_min', '年化下限不能高于上限');
+    issue('repo_yield_max', '年化上限不能低于下限');
+  } else {
+    if (isNum(repoMin) && !(repoMin >= 0 && repoMin <= 0.1)) {
+      issue('repo_yield_min', '须为 0~10% 的年化小数');
+    }
+    if (isNum(repoMax) && !(repoMax >= 0 && repoMax <= 0.1)) {
+      issue('repo_yield_max', '须为 0~10% 的年化小数（上限最多 10%，防误填成 100%）');
+    }
   }
 
   // ---- 16 笔金额的规模口径 --------------------------------------------------

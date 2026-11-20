@@ -111,6 +111,12 @@ export interface StrategyConfig {
   installment_scale_mode?: 'fixed' | 'equity';
   /** equity 口径下的放大倍数下限（小数，0.5 = 权益跌到初始本金一半以下也至少按半仓规模下注） */
   installment_scale_floor?: number;
+  /** 闲置资金逆回购（每日盘后结算）：空仓/未占用现金每日模拟国债逆回购收益 */
+  idle_cash_repo_enabled?: boolean;
+  /** 逆回购年化收益率下限（小数，0.010 = 1.00%）；校验 0 <= min <= max <= 0.1 */
+  repo_yield_min?: number;
+  /** 逆回购年化收益率上限（小数，0.015 = 1.50%）；上限最多 10% 防误填 */
+  repo_yield_max?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {
