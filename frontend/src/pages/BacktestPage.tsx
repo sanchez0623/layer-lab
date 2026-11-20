@@ -620,6 +620,17 @@ export default function BacktestPage() {
     toast.success(`已把报告「${report.name}」的参数带入回测配置，可直接运行或微调。`);
   };
   const metrics = report?.metrics;
+  // 现金流调整（TWR）口径指标：以 metrics.cashflow_adjusted 为主，逐字段回退顶层旧口径，
+  // 兼容旧报告（无 cashflow_adjusted）与残缺块（部分字段缺失），绝不显示 NaN。
+  const cfa = metrics?.cashflow_adjusted;
+  const cf = {
+    annualized_return: cfa?.annualized_return ?? metrics?.annualized_return ?? 0,
+    max_drawdown: cfa?.max_drawdown ?? metrics?.max_drawdown ?? 0,
+    sharpe_ratio: cfa?.sharpe_ratio ?? metrics?.sharpe_ratio ?? 0,
+    calmar_ratio: cfa?.calmar_ratio ?? metrics?.calmar_ratio ?? 0,
+    volatility: cfa?.volatility ?? metrics?.volatility ?? 0,
+  };
+  const cfUnderwaterDays = cfa?.underwater?.longest_underwater_days ?? metrics?.underwater?.longest_underwater_days;
   // ETF beta 腿摘要（新报告才有；旧报告 undefined）。
   const betaInfo = (report?.data_info?.beta as {
     enabled?: boolean; symbol?: string; trade_count?: number; pnl?: number;
@@ -1134,9 +1145,10 @@ export default function BacktestPage() {
 
                 <MetricGrid columns={6}>
                   <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={`期末权益 ${money(metrics.final_equity)}`} />
-                  <Metric label="年化收益率" value={signedPercent(metrics.annualized_return)} tone={metrics.annualized_return >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}{metrics.xirr_annualized != null ? ` · XIRR ${signedPercent(metrics.xirr_annualized)}` : ''}</span>} />
-                  <Metric label="最大回撤" value={percent(Math.abs(metrics.max_drawdown))} tone="negative" sub={`Calmar ${number(metrics.calmar_ratio)}${metrics.underwater?.longest_underwater_days ? ` · 最长水下 ${integer(metrics.underwater.longest_underwater_days)} 天` : ''}`} />
-                  <Metric label="夏普比率" value={number(metrics.sharpe_ratio)} sub={`波动率 ${percent(metrics.volatility)}`} />
+                  <Metric label="年化收益率（TWR 口径）" value={signedPercent(cf.annualized_return)} tone={cf.annualized_return >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}{metrics.xirr_annualized != null ? ` · XIRR ${signedPercent(metrics.xirr_annualized)}` : ''}</span>} />
+                  <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" sub={`Calmar ${number(cf.calmar_ratio)}${cfUnderwaterDays ? ` · 最长水下 ${integer(cfUnderwaterDays)} 天` : ''}`} />
+                  <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
+                  <Metric label="Calmar 比率（TWR 口径）" value={number(cf.calmar_ratio)} sub={<span className="whitespace-normal break-words">{`收益 / 最大回撤${cfa?.calmar_ratio != null ? ` · 含提现口径 ${number(metrics.calmar_ratio)}` : ''}`}</span>} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
                   <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}${metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}${metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}`} />
                 </MetricGrid>
