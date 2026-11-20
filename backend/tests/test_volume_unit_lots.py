@@ -1,175 +1,120 @@
-"""撮合容量单位换算（手 → 股）单测。
+"""撮合容量单位口径单测（入口统一为「股」，broker 不再换算）。
 
-根因：broker.process_bar 的容量计算把 bar.volume（单位「手」，1 手 = 100 股）当成
-「股」直接乘 volume_participation，导致容量少算 100 倍，把本可当日全成的大单误拆成
-多日分批成交。证据：159915 2020-07-27 真实日线 volume=4,235,953 手、amount=10,759,320.62
-元 → amount/volume≈2.54 元/股，与当日价格区间（2.513~2.577）吻合，确认 CSV 存的是手。
+背景（2026-11-20 腾讯行情量单位修复）：腾讯快照 / 5 分钟 / 日线的 volume 单位是「手」
+（1 手=100 股），已在 ``market.py`` 数据入口统一 ×100 转成「股」；quan parquet（回测、
+/advance）本来就是「股」。因此 ``broker.process_bar`` 的容量计算直接用 ``bar.volume``
+（股）× ``volume_participation``，**对 BETA / PERMANENT / T 一视同仁，不再按 purpose 猜单位**
+（旧的 ``LOTS_PER_SHARE`` 常量与 BETA-only ×100 分支已删除）。
 
-真实场景：159915 当日成交量 4.24 亿股（4,235,953 手），20% 参与度容量应约 8470 万股，
-一笔 96.9 万股的 ETF 卖单当然单日全成；修复前容量被算成 847,190「股」，只成交 847,100
-（step=100 向下取整），剩余滚到次日。
+本文件验证两件事：
+1. broker 对 BETA 与 PERMANENT 都**不 ×100**——喂进来的 bar.volume 已经是股，容量按股算。
+2. ``LOTS_PER_SHARE`` 常量已从 broker 删除（避免再出现「半手半股」混算）。
 """
 
 from datetime import datetime
 
 import pytest
 
-from app.broker import LOTS_PER_SHARE, BrokerAccount
+import app.broker as broker_module
+from app.broker import BrokerAccount
 from app.domain import Bar, OrderRequest, StrategyConfig
 
 
-SYMBOL = "sz.159915"          # ETF，申报 step=100
-LOTS = 4_235_953              # 2020-07-27 真实成交量（手）
 PARTICIPATION = 0.20          # 默认成交量参与度
+ETF = "sz.159915"             # ETF，申报 step=100
+STOCK = "sh.600000"           # 沪市主板，申报 step=100
 
 
-def make_bar(day: int, price: float = 2.54, volume: float = LOTS) -> Bar:
+def make_bar(symbol: str, day: int, price: float, volume: float) -> Bar:
+    """volume 已是**股**（与修复后数据入口口径一致）。"""
     return Bar(
-        timestamp=datetime(2025, 1, day, 9, 30), symbol=SYMBOL,
+        timestamp=datetime(2025, 1, day, 9, 30), symbol=symbol,
         open=price, high=price * 1.01, low=price * 0.99, close=price,
-        volume=volume, amount=price * volume * LOTS_PER_SHARE, prev_close=price,
+        volume=volume, amount=price * volume, prev_close=price,
     )
 
 
-def sell_request(quantity: int) -> OrderRequest:
-    return OrderRequest(
-        symbol=SYMBOL, side="SELL", quantity=quantity, purpose="BETA",
-        execution_mode="NEXT_BAR", order_type="MARKET", reason="测试",
-    )
-
-
-def seeded_account(beta_qty: int) -> BrokerAccount:
-    """底仓 beta_qty 股（T+1 可卖），参与度固定为 PARTICIPATION。"""
+def _seeded_account(symbol: str, qty_attr: str, qty: int) -> BrokerAccount:
+    """底仓 qty 股（T+1 可卖），参与度固定为 PARTICIPATION。"""
     acct = BrokerAccount(
         10_000_000, StrategyConfig(slippage_bps=0, volume_participation=PARTICIPATION),
-        name="ETF容量测试",
+        name="容量单位测试",
     )
     acct.new_day("2025-01-02")
-    pos = acct.position(SYMBOL)
-    pos.beta_qty = beta_qty
-    pos.beta_cost = 2.0 * beta_qty
-    # 跨日使其成为隔夜仓（T+1 可卖）
+    pos = acct.position(symbol)
+    setattr(pos, qty_attr, qty)
+    setattr(pos, qty_attr.replace("_qty", "_cost"), 2.0 * qty)
     acct.new_day("2025-01-03")
     return acct
 
 
-def test_large_etf_sell_fills_single_day():
-    """96.9 万股卖单 + 4,235,953 手成交量 → 单日全部成交（修复前只成 847,100）。"""
-    acct = seeded_account(beta_qty=969_000)
-    order = acct.submit(sell_request(969_000), datetime(2025, 1, 3, 15))
+def _sell_request(symbol: str, purpose: str, quantity: int) -> OrderRequest:
+    return OrderRequest(
+        symbol=symbol, side="SELL", quantity=quantity, purpose=purpose,
+        execution_mode="NEXT_BAR", order_type="MARKET", reason="测试",
+    )
+
+
+def test_beta_large_order_fills_single_bar_when_volume_is_shares():
+    """BETA：bar.volume 已是股（4.24 亿股）→ 96.9 万股卖单单根 bar 全成。"""
+    acct = _seeded_account(ETF, "beta_qty", 969_000)
+    order = acct.submit(_sell_request(ETF, "BETA", 969_000), datetime(2025, 1, 3, 15))
     assert order.status == "PENDING"
 
-    fills = acct.process_bar(make_bar(3))
+    fills = acct.process_bar(make_bar(ETF, 3, 2.54, volume=424_000_000))
 
     assert len(fills) == 1, f"应单根 bar 全部成交，实际 {len(fills)} 笔"
     assert fills[0].quantity == 969_000
     assert order.status == "FILLED"
-    assert order.remaining == 0
-    assert acct.position(SYMBOL).beta_qty == 0
 
 
-def test_large_order_capacity_not_capped_at_old_wrong_value():
-    """容量按股算后应远超 96.9 万股，不再被旧的 847,190「股」卡住。"""
-    acct = seeded_account(beta_qty=969_000)
-    order = acct.submit(sell_request(969_000), datetime(2025, 1, 3, 15))
-    fills = acct.process_bar(make_bar(3))
-    # 修复前的错误容量 = int(4_235_953 * 0.20) 向下取整到 step = 847,100 股
-    wrong_capacity = (int(LOTS * PARTICIPATION) // 100) * 100
-    assert fills[0].quantity > wrong_capacity
-    assert order.status == "FILLED"
-
-
-def test_small_order_behavior_unchanged():
-    """回归护栏：小单（远小于容量）行为不变，仍单日全成、数量精确。"""
-    acct = seeded_account(beta_qty=1_000)
-    order = acct.submit(sell_request(1_000), datetime(2025, 1, 3, 15))
-    fills = acct.process_bar(make_bar(3, volume=1_000))  # 1000 手 = 10 万股，容量 2 万股
-    assert len(fills) == 1
-    assert fills[0].quantity == 1_000
-    assert order.status == "FILLED"
-
-
-def test_capacity_still_capped_by_participation():
-    """超大单仍受参与度约束：委托量超过单日容量时按容量部分成交（护栏不被过度放宽）。
-
-    ETF 市价单笔申报上限 100 万股，故委托取 99 万股；bar 成交量调小到 6,000 手
-    （=60 万股，20% 容量=12 万股），远小于委托量，验证容量仍把大单截断成部分成交。
-    """
-    acct = seeded_account(beta_qty=990_000)
-    order = acct.submit(sell_request(990_000), datetime(2025, 1, 3, 15))
-    assert order.status == "PENDING"
-    fills = acct.process_bar(make_bar(3, volume=6_000))
+def test_beta_capacity_capped_by_participation_in_shares():
+    """BETA：容量按股算并受参与度约束——bar 60 万股 → 20% 容量=12 万股。"""
+    acct = _seeded_account(ETF, "beta_qty", 990_000)
+    order = acct.submit(_sell_request(ETF, "BETA", 990_000), datetime(2025, 1, 3, 15))
+    fills = acct.process_bar(make_bar(ETF, 3, 2.54, volume=600_000))
+    expected = (int(600_000 * PARTICIPATION) // 100) * 100  # 120,000 股
     assert order.status == "PARTIALLY_FILLED"
-    expected = (int(6_000 * LOTS_PER_SHARE * PARTICIPATION) // 100) * 100  # 120,000 股
     assert fills[0].quantity == expected
 
 
-def test_lots_per_share_constant():
-    """常量语义：1 手 = 100 股。"""
-    assert LOTS_PER_SHARE == 100
+# ---------------- PERMANENT 与 BETA 同口径：都不 ×100 ----------------
 
+def test_permanent_uses_raw_share_volume_not_scaled():
+    """PERMANENT：bar.volume 已是股，容量按股算、**不再 ×100**（旧 BETA-only 语义作废）。
 
-# ---------------- PERMANENT / T 回归护栏（本次不 ×100） ----------------
-
-def _permanent_seeded_account(permanent_qty: int) -> BrokerAccount:
-    """底仓永久仓 permanent_qty 股（T+1 可卖），参与度固定为 PARTICIPATION。"""
-    acct = BrokerAccount(
-        10_000_000, StrategyConfig(slippage_bps=0, volume_participation=PARTICIPATION),
-        name="股票容量测试",
-    )
-    acct.new_day("2025-01-02")
-    pos = acct.position("sh.600000")
-    pos.permanent_qty = permanent_qty
-    pos.permanent_cost = 2.0 * permanent_qty
-    acct.new_day("2025-01-03")
-    return acct
-
-
-def _stock_sell_request(quantity: int) -> OrderRequest:
-    return OrderRequest(
-        symbol="sh.600000", side="SELL", quantity=quantity, purpose="PERMANENT",
-        execution_mode="NEXT_BAR", order_type="MARKET", reason="测试",
-    )
-
-
-def test_permanent_large_order_not_scaled_by_lots():
-    """PERMANENT（股票）大单本次不 ×100：容量仍按 volume 当股数（与修复前一致）。
-
-    沪市主板市价单笔申报上限 10 万股，故委托取 9.9 万股；bar 成交量 1,000 手
-    （=10 万股，参与度 0.20、不 ×100 → 容量 2 万股），远小于委托量，验证股票路径
-    未被本次 BETA-only 修复误改：仍按「volume 当股数」算容量、部分成交。
+    旧实现曾对 PERMANENT 保留「不乘」、对 BETA ×100；入口统一后两者都不乘——
+    喂进来的 volume 本身已是股，直接 × 参与度即容量。
     """
-    acct = _permanent_seeded_account(permanent_qty=99_000)
-    order = acct.submit(_stock_sell_request(99_000), datetime(2025, 1, 3, 15))
+    acct = _seeded_account(STOCK, "permanent_qty", 99_000)
+    order = acct.submit(_sell_request(STOCK, "PERMANENT", 99_000), datetime(2025, 1, 3, 15))
     assert order.status == "PENDING"
 
-    bar = Bar(
-        timestamp=datetime(2025, 1, 3, 9, 30), symbol="sh.600000",
-        open=2.54, high=2.57, low=2.51, close=2.54,
-        volume=1_000, amount=2.54 * 1_000, prev_close=2.54,
-    )
-    fills = acct.process_bar(bar)
+    # bar 成交量 100,000 股（已是股），20% 容量=20,000 股 < 委托 99,000 → 部分成交
+    fills = acct.process_bar(make_bar(STOCK, 3, 2.54, volume=100_000))
 
-    expected = (int(1_000 * PARTICIPATION) // 100) * 100  # 20,000 股（未 ×100）
+    expected = (int(100_000 * PARTICIPATION) // 100) * 100  # 20,000 股
     assert len(fills) == 1
     assert fills[0].quantity == expected
     assert order.status == "PARTIALLY_FILLED"
     assert order.remaining == 99_000 - expected
 
 
-def test_permanent_small_order_behavior_unchanged():
-    """PERMANENT 小单（远小于容量）行为不变，单日全成。"""
-    acct = _permanent_seeded_account(permanent_qty=1_000)
-    order = acct.submit(_stock_sell_request(1_000), datetime(2025, 1, 3, 15))
-    bar = Bar(
-        timestamp=datetime(2025, 1, 3, 9, 30), symbol="sh.600000",
-        open=2.54, high=2.57, low=2.51, close=2.54,
-        volume=100_000, amount=2.54 * 100_000, prev_close=2.54,
-    )
-    fills = acct.process_bar(bar)
+def test_permanent_small_order_fills_single_bar():
+    """PERMANENT 小单（远小于容量）单根 bar 全成、数量精确。"""
+    acct = _seeded_account(STOCK, "permanent_qty", 1_000)
+    order = acct.submit(_sell_request(STOCK, "PERMANENT", 1_000), datetime(2025, 1, 3, 15))
+    fills = acct.process_bar(make_bar(STOCK, 3, 2.54, volume=100_000))
     assert len(fills) == 1
     assert fills[0].quantity == 1_000
     assert order.status == "FILLED"
+
+
+def test_broker_no_longer_exposes_lots_per_share():
+    """护栏：LOTS_PER_SHARE 常量已从 broker 删除，broker 不再自己做手→股换算。"""
+    assert not hasattr(broker_module, "LOTS_PER_SHARE"), (
+        "broker 不应再持有 LOTS_PER_SHARE：单位换算已统一到 market.py 数据入口"
+    )
 
 
 if __name__ == "__main__":
