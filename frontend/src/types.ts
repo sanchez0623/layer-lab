@@ -455,6 +455,20 @@ export interface ReportMetrics {
     currently_underwater: boolean;
     current_drawdown_days: number;
   } | null;
+  /**
+   * 现金流调整（TWR，时间加权收益率）口径的收益/风险指标。
+   * 顶层旧口径把「盈利提现」当成亏损，会压低夏普/Calmar、夸大回撤；
+   * 本块按 TWR 修正后重算，旧报告缺失时前端回退顶层字段。
+   */
+  cashflow_adjusted?: {
+    annualized_return: number;
+    total_return: number;
+    volatility: number;
+    sharpe_ratio: number;
+    max_drawdown: number;
+    calmar_ratio: number;
+    underwater?: ReportMetrics['underwater'];
+  };
 }
 
 export interface Trade {
