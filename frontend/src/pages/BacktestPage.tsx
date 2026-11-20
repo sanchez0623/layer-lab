@@ -19,6 +19,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { Badge, EmptyState, ErrorBanner, Field, FilterSelect, FormGrid, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
 import SearchInput from '../components/SearchInput';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { NumberInput } from '@/components/ui/number-input';
@@ -31,7 +32,7 @@ import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategy
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
 import { validateStrategyConfig, describeConfigIssue } from '../lib/configValidation';
-import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
+import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, RepoDaily, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -209,6 +210,11 @@ export default function BacktestPage() {
   // 每月盈亏表前端分页：月度数据由后端 metrics.monthly 下发（派生自权益曲线），无需额外请求。
   const [monthPage, setMonthPage] = useState(1);
   const [monthPageSize, setMonthPageSize] = useState(12);
+  // 逆回购每日明细弹窗：点某月行打开，按自然月后台分页拉取逐日计提明细。
+  const [repoMonth, setRepoMonth] = useState<string | null>(null);
+  const [repoData, setRepoData] = useState<Paginated<RepoDaily> | null>(null);
+  const [repoPage, setRepoPage] = useState(1);
+  const [repoLoading, setRepoLoading] = useState(false);
   // 成交明细筛选：symbolDraft 是输入框即时值（防抖后提交进 tradeFilter），
   // purpose / side 由下拉直接提交；三者都是空串表示「全部」。
   const [symbolDraft, setSymbolDraft] = useState('');
@@ -667,6 +673,8 @@ export default function BacktestPage() {
       average: monthly.length ? monthly.reduce((sum, item) => sum + item.pnl, 0) / monthly.length : 0,
     };
   }, [monthly]);
+  // 逆回购收益列 / 弹窗入口：仅当报告带 repo_income（新报告且开启逆回购）才显示，旧报告全 undefined 时隐藏。
+  const hasRepoIncome = useMemo(() => monthly.some((item) => item.repo_income != null), [monthly]);
   const monthPageCount = Math.max(1, Math.ceil(monthly.length / monthPageSize));
   // 切换每页条数后旧页码可能越界：渲染前收敛到最后一页，避免出现空表。
   const safeMonthPage = Math.min(monthPage, monthPageCount);
@@ -729,6 +737,19 @@ export default function BacktestPage() {
       .finally(() => { if (!cancelled) setTrailLoading(false); });
     return () => { cancelled = true; };
   }, [report, isFunnel, trailPage, trailPageSize]);
+
+  // 逆回购每日明细弹窗：打开某月（repoMonth）或翻页时按自然月拉取一页；关闭时清空。
+  // page_size 默认 31（一个月最多 31 个自然日，单页基本覆盖整月，超出再翻）。
+  useEffect(() => {
+    if (!report || !repoMonth) { setRepoData(null); return; }
+    let cancelled = false;
+    setRepoLoading(true);
+    api.repoDaily(report.id, { page: repoPage, pageSize: 31, month: repoMonth })
+      .then((paged) => { if (!cancelled) setRepoData(paged); })
+      .catch(() => { if (!cancelled) setRepoData(null); })
+      .finally(() => { if (!cancelled) setRepoLoading(false); });
+    return () => { cancelled = true; };
+  }, [report, repoMonth, repoPage]);
 
   // 成交 / 委托 / 轮次 明细分页：切 tab 或翻页时按需拉取当前 tab 的一页。
   useEffect(() => { setRecordPage(1); }, [report?.id, tableTab]);
@@ -1149,7 +1170,7 @@ export default function BacktestPage() {
                   <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" sub={`Calmar ${number(cf.calmar_ratio)}${cfUnderwaterDays ? ` · 最长水下 ${integer(cfUnderwaterDays)} 天` : ''}`} />
                   <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
-                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}{metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}</span>} />
+                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}{metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}{metrics.repo_income_total ? ` · 逆回购 ${signedMoney(metrics.repo_income_total)}` : ''}</span>} />
                 </MetricGrid>
 
                 <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
@@ -1255,12 +1276,18 @@ export default function BacktestPage() {
                     </div>
                     <div className="mt-1 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>柱高＝当月净盈亏（元），向上盈利 / 向下亏损</span><span>月度盈亏基于每月最后一个交易日权益，不含外部资金进出</span></div>
                     <Table className="mt-2">
-                      <TableHeader><TableRow><TableHead>月份</TableHead><TableHead className="text-right">净盈亏</TableHead><TableHead className="text-right">收益率</TableHead><TableHead className="text-right">交易日</TableHead><TableHead className="text-right">当月最大回撤</TableHead><TableHead className="text-right">累计收益率</TableHead></TableRow></TableHeader>
+                      <TableHeader><TableRow><TableHead>月份</TableHead><TableHead className="text-right">净盈亏</TableHead>{hasRepoIncome && <TableHead className="text-right">逆回购收益</TableHead>}<TableHead className="text-right">收益率</TableHead><TableHead className="text-right">交易日</TableHead><TableHead className="text-right">当月最大回撤</TableHead><TableHead className="text-right">累计收益率</TableHead></TableRow></TableHeader>
                       <TableBody>
                         {monthRows.map((item) => (
-                          <TableRow key={item.month}>
+                          <TableRow
+                            key={item.month}
+                            onClick={hasRepoIncome ? () => { setRepoPage(1); setRepoMonth(item.month); } : undefined}
+                            className={hasRepoIncome ? 'cursor-pointer' : undefined}
+                            title={hasRepoIncome ? '点击查看该月逆回购每日明细' : undefined}
+                          >
                             <TableCell><strong className="font-mono text-[12px]">{item.month}</strong></TableCell>
                             <TableCell className={cn('text-right font-mono text-[12px]', item.pnl >= 0 ? 'text-destructive' : 'text-success')}>{signedMoney(item.pnl)}</TableCell>
+                            {hasRepoIncome && <TableCell className="text-right font-mono text-[12px] text-muted-foreground">{signedMoney(item.repo_income)}</TableCell>}
                             <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(item.return_rate)}</TableCell>
                             <TableCell className="text-right font-mono text-[12px]">{integer(item.trading_days)}</TableCell>
                             <TableCell className="text-right font-mono text-[12px] text-muted-foreground">{drawdownLabel(item.max_drawdown)}</TableCell>
@@ -1272,6 +1299,38 @@ export default function BacktestPage() {
                     <div className="pt-3"><PaginationBar page={safeMonthPage} pageSize={monthPageSize} total={monthly.length} totalPages={monthPageCount} onPageChange={setMonthPage} onPageSizeChange={(size) => { setMonthPageSize(size); setMonthPage(1); }} pageSizeOptions={[12, 24, 36, 60]} /></div>
                   </Panel>
                 )}
+
+                {/* 逆回购每日明细弹窗：点每月盈亏表的月份行打开，按自然月后台分页下发逐日计提。 */}
+                <Dialog open={repoMonth !== null} onOpenChange={(open) => { if (!open) setRepoMonth(null); }}>
+                  <DialogContent className="max-w-2xl">
+                    <DialogHeader>
+                      <DialogTitle>{repoMonth} 逆回购每日明细</DialogTitle>
+                      <DialogDescription>闲置资金逆回购盘后逐日计提 · 当日收益已计入当月净盈亏</DialogDescription>
+                    </DialogHeader>
+                    <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-muted/40 px-2.5 py-1.5 text-[11px] text-muted-foreground">
+                      <span>当月合计收益 <strong className={cn('font-mono', (monthly.find((m) => m.month === repoMonth)?.repo_income ?? 0) > 0 ? 'text-destructive' : 'text-foreground')}>{signedMoney(monthly.find((m) => m.month === repoMonth)?.repo_income)}</strong></span>
+                      <span>计提天数 <strong className="font-mono text-foreground">{integer(repoData?.total ?? 0)}</strong></span>
+                    </div>
+                    <Table>
+                      <TableHeader><TableRow><TableHead>日期</TableHead><TableHead className="text-right">闲置资金</TableHead><TableHead className="text-right">年化收益率</TableHead><TableHead className="text-right">当日收益</TableHead></TableRow></TableHeader>
+                      <TableBody>
+                        {(repoData?.items.length ?? 0) === 0 ? (
+                          <TableEmpty colSpan={4} message="该月没有逆回购计提日（未开启或闲置资金为 0）" />
+                        ) : repoData?.items.map((row) => (
+                          <TableRow key={row.date}>
+                            <TableCell className="font-mono text-[12px]">{shortDate(row.date)}</TableCell>
+                            <TableCell className="text-right font-mono text-[12px]">{money(row.idle_cash, 0)}</TableCell>
+                            <TableCell className="text-right font-mono text-[12px] text-muted-foreground">{percent(row.rate)}</TableCell>
+                            <TableCell className={cn('text-right font-mono text-[12px]', row.income > 0 ? 'text-destructive' : 'text-success')}>{signedMoney(row.income)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    {repoData && repoData.total > repoData.page_size && (
+                      <div className="pt-3"><PaginationBar page={repoData.page} pageSize={repoData.page_size} total={repoData.total} totalPages={repoData.total_pages} onPageChange={setRepoPage} disabled={repoLoading} /></div>
+                    )}
+                  </DialogContent>
+                </Dialog>
 
                 <Panel className="mb-3" title="数据血缘与口径" description="本报告基于后端实际返回的数据元信息" action={<Layers3 className="size-4" />}>
                   <div className="mb-2 flex flex-wrap gap-1.5"><Badge>{reportDailySource} 日线</Badge>{reportIntradaySource && <Badge tone="indigo">{reportIntradaySource} 5分钟</Badge>}{reportIndexSource && <Badge tone="green">指数大盘门</Badge>}{reportSynthetic && <SyntheticNotice compact />}</div>

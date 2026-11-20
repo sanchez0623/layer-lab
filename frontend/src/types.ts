@@ -373,6 +373,18 @@ export interface RecordsPage<T> extends Paginated<T> {
   facets?: RecordFacets;
 }
 
+/** 闲置资金逆回购逐日计提明细一行（GET /backtests/{id}/repo-daily 的 items 元素）。 */
+export interface RepoDaily {
+  /** 计提日（YYYY-MM-DD）。 */
+  date: string;
+  /** 当日计提的闲置资金（元）。 */
+  idle_cash: number;
+  /** 年化收益率（小数，如 0.0123 = 1.23%）。 */
+  rate: number;
+  /** 当日收益（元）。 */
+  income: number;
+}
+
 export interface EquityPoint {
   date: string;
   equity: number;
@@ -401,6 +413,8 @@ export interface MonthlyPnl {
   max_drawdown: number;
   /** 当月末累计收益率（相对初始资金）。 */
   cumulative_return: number;
+  /** 当月闲置资金逆回购收益合计（元）；仅开启逆回购的新报告有值，旧报告为 undefined。 */
+  repo_income?: number;
 }
 
 export interface ReportMetrics {
@@ -436,6 +450,8 @@ export interface ReportMetrics {
   monthly?: MonthlyPnl[];
   /** 资金加权年化（XIRR）：把盈利出金当成回流现金流；无符号变化现金流时为 null，前端隐藏。 */
   xirr_annualized?: number | null;
+  /** 闲置资金逆回购总收益（元，Σ equity_curve.repo_income）；仅开启逆回购的新报告有值，旧报告为 undefined。 */
+  repo_income_total?: number;
   /** 稳健性版本：剔除最佳自然月 + 最大 3 笔盈利轮次后重算，判断收益是否靠少数极端项撑起。 */
   robustness?: {
     excluded_best_month_pnl: number;

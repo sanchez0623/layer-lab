@@ -28,6 +28,7 @@ import type {
   PrepareResponse,
   RefreshStatus,
   Report,
+  RepoDaily,
   Round,
   RotationRequest,
   RotationTrailPage,
@@ -188,6 +189,16 @@ export const api = {
       `/backtests/${encodeURIComponent(id)}/records/${kind}${query(params)}`,
     );
   },
+  /** 闲置资金逆回购逐日计提明细（后台分页）：主报告不含逐日 repo，点月份行按月拉取。
+   *  month 为 YYYY-MM 时只下发该自然月；不传返回全部计提日。旧报告 / 关闭逆回购 → 空 items。 */
+  repoDaily: (id: string, params: { page: number; pageSize: number; month?: string }) =>
+    request<Paginated<RepoDaily>>(
+      `/backtests/${encodeURIComponent(id)}/repo-daily${query({
+        page: String(params.page),
+        page_size: String(params.pageSize),
+        month: params.month,
+      })}`,
+    ),
   createAccount: (payload: CreateAccountRequest) => request<AccountState>('/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   currentAccount: () => request<AccountState>('/paper/accounts/current'),
   account: (id: string) => request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}`),
