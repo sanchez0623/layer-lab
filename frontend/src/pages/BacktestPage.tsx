@@ -1206,10 +1206,12 @@ export default function BacktestPage() {
                         ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: `${metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔 · ` : ''}已真实离场${metrics.profit_withdrawn != null && metrics.profit_withdrawn > 0 ? ` · 其中盈利出金 ${money(metrics.profit_withdrawn)}` : ''}`, tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
                         { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
                       ].map(({ icon: Icon, label, value, note, tone }) => (
-                        <div key={label} className="flex items-center gap-2 rounded-lg border bg-card px-2.5 py-2">
-                          <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
-                          <div className="min-w-0 flex-1"><small className="block text-[10px] text-muted-foreground">{label}</small><strong className={cn('block font-mono text-[13px]', tone)}>{value}</strong></div>
-                          <span className="text-right text-[10px] text-muted-foreground">{note}</span>
+                        <div key={label} className="rounded-lg border bg-card px-2.5 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
+                            <div className="min-w-0 flex-1"><small className="block text-[10px] text-muted-foreground">{label}</small><strong className={cn('block font-mono text-[13px]', tone)}>{value}</strong></div>
+                            <span className="shrink-0 text-right text-[10px] text-muted-foreground">{note}</span>
+                          </div>
                         </div>
                       ))}
                     </div>
