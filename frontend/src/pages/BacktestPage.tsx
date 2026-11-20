@@ -1312,17 +1312,11 @@ export default function BacktestPage() {
                     <Table>
                       <TableHeader><TableRow>
                         <TableHead className="w-8" />
-                        <TableHead>轮次 / 空仓</TableHead>
-                        <TableHead>选股日 / 区间</TableHead>
-                        <TableHead>标的 / 原因</TableHead>
-                        <TableHead>板块</TableHead>
-                        <TableHead className="text-right">入选 Chg20D</TableHead>
-                        <TableHead>L0 门</TableHead>
-                        <TableHead>持仓区间</TableHead>
-                        <TableHead className="text-right">持有交易日</TableHead>
-                        <TableHead className="text-right">本轮收益率</TableHead>
-                        <TableHead className="text-right">净盈亏</TableHead>
-                        <TableHead>状态 / 退出</TableHead>
+                        <TableHead>轮次 / 区间</TableHead>
+                        <TableHead>标的 / 板块</TableHead>
+                        <TableHead>门 · 状态</TableHead>
+                        <TableHead className="text-right">持仓</TableHead>
+                        <TableHead className="text-right">收益 / 盈亏</TableHead>
                       </TableRow></TableHeader>
                       <TableBody>
                         {rotationTrail.map((item, index) => {
@@ -1345,27 +1339,62 @@ export default function BacktestPage() {
                             <Fragment key={trailKey}>
                               <TableRow className={isSpan ? 'bg-muted/25' : ''}>
                                 <TableCell><button className="grid size-6 place-items-center rounded text-muted-foreground hover:bg-muted" onClick={() => toggleTrail(trailKey)} aria-label={expanded ? '收起本轮决策日志' : '展开本轮决策日志'} title={expanded ? '收起决策日志' : '查看本轮决策日志'}>{expanded ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}</button></TableCell>
-                                <TableCell>{isBeta || isBetaSpan ? <Badge tone="indigo">ETF持仓</Badge> : isSpan ? <Badge tone="amber">空仓</Badge> : item.round ? <strong className="font-mono text-[11px] text-primary">{item.round}</strong> : <span className="text-[11px] text-muted-foreground">待建仓</span>}</TableCell>
-                                <TableCell>{isSpan ? <span className="font-mono text-[11px]">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}{isWaitingSpan && item.days != null && <small className="ml-1 text-muted-foreground">（{integer(item.days)} 个交易日）</small>}</span> : shortDate(item.select_date)}</TableCell>
-                                <TableCell>{isBeta || isBetaSpan ? <div><span className="text-muted-foreground">ETF持仓覆盖</span><small className="block text-[10px] text-muted-foreground">{item.beta_symbol ? displaySymbol(item.beta_symbol) : 'beta 腿'}</small></div> : isSpan ? <div><span className="text-muted-foreground">空仓等待</span><small className="block text-[10px] text-muted-foreground">{trailWaitReason(item)}</small></div> : item.symbol ? <div><strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong><small className="ml-1 text-[11px] text-muted-foreground">{item.name || '—'}</small></div> : <span className="text-muted-foreground">空仓等待</span>}</TableCell>
-                                <TableCell>{isSpan ? '—' : item.board || '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.chg20d_at_select != null && (item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success'))}>{isSpan ? '—' : item.chg20d_at_select != null ? signedPercent(item.chg20d_at_select) : '—'}</TableCell>
-                                <TableCell><Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge></TableCell>
-                                <TableCell>{isSpan ? '—' : item.entry_date || item.exit_date ? <span className="font-mono text-[11px]">{item.entry_date ? shortDate(item.entry_date) : '—'} → {item.exit_date ? shortDate(item.exit_date) : '持仓中'}</span> : '—'}</TableCell>
-                                <TableCell className="text-right font-mono text-[12px]">{isWaitingSpan ? '—' : item.holding_days ?? '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{isWaitingSpan ? '—' : item.return_rate != null ? signedPercent(item.return_rate) : '—'}</TableCell>
-                                <TableCell className={cn('text-right font-mono text-[12px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>
-                                  {isWaitingSpan ? '—' : item.pnl != null ? signedMoney(item.pnl) : '—'}
-                                  {pnlSplit && (
-                                    <small className="mt-0.5 block whitespace-nowrap text-[9px] font-normal leading-3 text-muted-foreground">{pnlSplit}</small>
+                                <TableCell className="whitespace-nowrap">
+                                  {isBeta || isBetaSpan ? (
+                                    <div><Badge tone="indigo">ETF持仓</Badge><small className="mt-0.5 block font-mono text-[10px] text-muted-foreground">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}</small></div>
+                                  ) : isSpan ? (
+                                    <div><Badge tone="amber">空仓</Badge><small className="mt-0.5 block font-mono text-[10px] text-muted-foreground">{shortDate(item.start_date)} ~ {shortDate(item.end_date)}{isWaitingSpan && item.days != null ? `（${integer(item.days)} 日）` : ''}</small></div>
+                                  ) : (
+                                    <div><strong className="font-mono text-[11px] text-primary">{item.round || '待建仓'}</strong><small className="mt-0.5 block font-mono text-[10px] text-muted-foreground">{shortDate(item.select_date)}</small></div>
                                   )}
                                 </TableCell>
-                                <TableCell>{isBeta || isBetaSpan ? <div><Badge tone="indigo">ETF持仓</Badge><small className="ml-1 text-[10px] text-muted-foreground">个股空仓期间覆盖</small></div> : isSpan ? <span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span> : <div><Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>{item.close_reason && <small className="ml-1 text-[10px] text-muted-foreground">{item.close_reason}</small>}</div>}</TableCell>
+                                <TableCell>
+                                  {isBeta || isBetaSpan ? (
+                                    <div><span className="text-[11px] text-muted-foreground">ETF持仓覆盖</span><small className="mt-0.5 block text-[10px] text-muted-foreground">{item.beta_symbol ? displaySymbol(item.beta_symbol) : 'beta 腿'}</small></div>
+                                  ) : isSpan ? (
+                                    <div><span className="text-[11px] text-muted-foreground">{item.reason === 'gate_closed' ? 'L0 关门' : '无候选'}</span><small className="mt-0.5 block text-[10px] text-muted-foreground">{trailWaitReason(item)}</small></div>
+                                  ) : item.symbol ? (
+                                    <div className="max-w-[13rem]">
+                                      <div className="flex items-baseline gap-1"><strong className="font-mono text-[12px]" title={item.symbol}>{displaySymbol(item.symbol)}</strong><span className="truncate text-[11px] text-muted-foreground" title={item.name || ''}>{item.name || '—'}</span></div>
+                                      <small className="mt-0.5 block text-[10px] text-muted-foreground">{item.board || '—'}{item.chg20d_at_select != null ? <b className={cn('ml-1 font-mono', item.chg20d_at_select >= 0 ? 'text-destructive' : 'text-success')}>{signedPercent(item.chg20d_at_select)}</b> : null}</small>
+                                    </div>
+                                  ) : <span className="text-[11px] text-muted-foreground">空仓等待</span>}
+                                </TableCell>
+                                <TableCell className="whitespace-nowrap">
+                                  {isBeta || isBetaSpan || isSpan ? (
+                                    <Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge>
+                                  ) : (
+                                    <div>
+                                      <div className="flex items-center gap-1">
+                                        <Badge tone={status === 'CLOSED' ? 'green' : status === 'OPEN' ? 'indigo' : 'amber'}>{status === 'CLOSED' ? '已结束' : status === 'OPEN' ? (item.entry_date ? '持仓中' : '待建仓') : '空仓等待'}</Badge>
+                                        <Badge tone={item.gate_open ? 'green' : 'amber'}>{item.gate_open ? '开门' : '关门'}</Badge>
+                                      </div>
+                                      {item.close_reason && <small className="mt-0.5 block text-[10px] text-muted-foreground">{item.close_reason}</small>}
+                                    </div>
+                                  )}
+                                </TableCell>
+                                <TableCell className="text-right whitespace-nowrap">
+                                  {isSpan ? <span className="text-[11px] text-muted-foreground">—</span> : item.entry_date || item.exit_date ? (
+                                    <div>
+                                      <span className="font-mono text-[11px]">{item.entry_date ? shortDate(item.entry_date) : '—'} → {item.exit_date ? shortDate(item.exit_date) : '持仓中'}</span>
+                                      {item.holding_days != null && <small className="mt-0.5 block text-[10px] text-muted-foreground">持有 {integer(item.holding_days)} 日</small>}
+                                    </div>
+                                  ) : <span className="text-[11px] text-muted-foreground">—</span>}
+                                </TableCell>
+                                <TableCell className="text-right whitespace-nowrap">
+                                  {isWaitingSpan ? <span className="text-[11px] text-muted-foreground">—</span> : (
+                                    <div>
+                                      <span className={cn('font-mono text-[12px]', item.return_rate != null && (item.return_rate >= 0 ? 'text-destructive' : 'text-success'))}>{item.return_rate != null ? signedPercent(item.return_rate) : '—'}</span>
+                                      <small className={cn('mt-0.5 block font-mono text-[11px]', item.pnl != null && (item.pnl >= 0 ? 'text-destructive' : 'text-success'))}>{item.pnl != null ? signedMoney(item.pnl) : '—'}</small>
+                                      {pnlSplit && <small className="mt-0.5 block text-[9px] leading-3 text-muted-foreground">{pnlSplit}</small>}
+                                    </div>
+                                  )}
+                                </TableCell>
                               </TableRow>
                               {expanded && (
                                 <TableRow className="bg-muted/20">
                                   <TableCell />
-                                  <TableCell colSpan={11}>
+                                  <TableCell colSpan={5}>
                                     <div className="py-1">
                                       <div className="flex flex-wrap gap-1.5">
                                         {[{ tag: '全市场', value: item.funnel?.universe }, { tag: 'L0 大盘门', value: item.funnel?.after_l0 }, { tag: 'L1 超跌', value: item.funnel?.after_l1 }, { tag: 'L2 否决', value: item.funnel?.after_l2 }, { tag: 'L3 容量', value: item.funnel?.after_l3 }, { tag: '可用候选', value: item.funnel?.eligible }].map((stage) => (
