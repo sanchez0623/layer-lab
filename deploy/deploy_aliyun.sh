@@ -109,7 +109,7 @@ else
     nginx:1.27-alpine
 fi
 
-echo "==> [7/7] 健康检查"
+echo "==> [7/8] 健康检查"
 sleep 2
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
   "http://127.0.0.1:${HOST_PORT}/api/health" 2>/dev/null || echo 000)
@@ -126,6 +126,21 @@ if docker ps --format '{{.Names}}' | grep -q '^layer-lab-https$'; then
   echo "HTTPS /api/health → HTTP ${hcode}（401/200 均表示 TLS+服务正常）"
 else
   echo "HTTPS 反代未运行；临时用 http://${PUBLIC_IP}:${HOST_PORT} 访问"
+fi
+
+echo "==> [8/8] 清理 Docker 构建缓存（防磁盘撑满）"
+_disk_free_mb() { df -P / | awk 'NR==2 {printf "%d", $4/1024}'; }
+_free_before=$(_disk_free_mb)
+# 只保留最近 24h 的构建缓存；不支持 --filter 时退化为全量清理（缓存可再生）。
+docker builder prune -af --filter "until=24h" >/dev/null 2>&1 \
+  || docker builder prune -af >/dev/null 2>&1 || true
+docker image prune -f >/dev/null 2>&1 || true
+_free_after=$(_disk_free_mb)
+_used_pct=$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')
+echo "    磁盘可用：${_free_before} MB → ${_free_after} MB（已用 ${_used_pct}%）"
+if [ "${_used_pct:-0}" -ge 85 ]; then
+  echo "⚠️  磁盘已用 ${_used_pct}%（≥85%）。磁盘满会导致 HTTPS 反代写缓存失败、页面打不开。"
+  echo "    排查：docker system df / du -sh /var/lib/docker/overlay2/*"
 fi
 
 echo ""
