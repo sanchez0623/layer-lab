@@ -1321,8 +1321,8 @@ export default function PaperPage() {
                     { value: 'equity', label: 'equity · 按权益等比缩放' },
                   ]} ariaLabel="16 笔金额口径" />
                 </Field>
-                <Field label="缩放下限（倍）" hint="equity 模式下的放大倍数下限：权益回撤时最少按该倍数下注（默认 0.5）" className="w-40">
-                  <NumberInput step={0.1} min={0.05} max={1} allowEmpty placeholder={number(scaleFloor, 2)} value={scaleFloorInput} onChange={setScaleFloorInput} disabled={savingScale || scaleMode !== 'equity'} />
+                <Field label="缩放下限（倍）" hint="equity 模式下的放大倍数下限：权益回撤时最少按该倍数下注（默认 0.5）；fixed 模式下不生效但可预填" className="w-40">
+                  <NumberInput step={0.1} min={0.05} max={1} allowEmpty placeholder={number(scaleFloor, 2)} value={scaleFloorInput} onChange={setScaleFloorInput} disabled={savingScale} />
                 </Field>
                 <Button size="sm" className="h-8" onClick={() => void saveScale()} disabled={savingScale}>{savingScale ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingScale ? '正在保存' : '保存金额口径'}</Button>
               </div>
