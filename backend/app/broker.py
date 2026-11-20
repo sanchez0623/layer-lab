@@ -13,6 +13,16 @@ from .trading_rules import (
     validate_quantity,
 )
 
+# 行情 bar.volume 的单位口径（仅 ETF beta 腿已核实）：
+#   - BETA（ETF，如 159915）：日线 volume 单位是「手」（lot），1 手 = 100 股。证据：
+#     159915 2020-07-27 volume=4,235,953 手、amount=10,759,320.62 元 → amount/volume≈2.54
+#     元/股，与当日价格区间吻合。容量计算须 ×LOTS_PER_SHARE 换算成股，否则容量少算 100 倍，
+#     把本可当日全成的 ETF 大单误拆成多日分批成交。
+#   - PERMANENT / T（股票，含做T盘中走 5 分钟 bar）：单位待核实（gen_minute5_turnover.py /
+#     quan_data.py 注释称 5 分钟 bar volume 为「股」），本次**不乘**，保持原样。
+# 故本常量只对 order.purpose == "BETA" 生效。
+LOTS_PER_SHARE = 100
+
 
 def _replay_buy_fees(fills: Iterable[Fill]) -> tuple[float, float]:
     """按成交顺序重放，推算当前仍留在持仓成本内的买入手续费。
@@ -565,7 +575,15 @@ class BrokerAccount:
                 order.message = "涨跌停或超出价格限制，不可成交"
                 continue
             step = self._fill_step(order)
-            capacity = max(0, int((bar.volume * self.config.volume_participation - used_volume) / step) * step)
+            # 只对 ETF beta 腿（purpose=="BETA"）把手换算成股；股票/做T盘中（5 分钟 bar）
+            # 的 volume 单位待核实，保持原样不乘。used_volume 累计的已是股，两边统一为股。
+            volume_for_capacity = (
+                bar.volume * LOTS_PER_SHARE if order.purpose == "BETA" else bar.volume
+            )
+            capacity = max(
+                0,
+                int((volume_for_capacity * self.config.volume_participation - used_volume) / step) * step,
+            )
             if capacity <= 0:
                 order.message = "成交量参与度额度不足"
                 continue
