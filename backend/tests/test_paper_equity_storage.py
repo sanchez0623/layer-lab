@@ -128,6 +128,20 @@ def test_paper_equity_rejects_unknown_source_and_missing_keys(tmp_path):
         storage.save_paper_equity("acc-1", {"equity": 1.0})
 
 
+def test_delete_paper_equity_removes_all_sources_of_one_account(tmp_path):
+    """删除按账户隔离，live/replay 全清，返回删除行数。"""
+    storage = SQLiteStorage(tmp_path / "equity.db")
+    storage.save_paper_equity("acc-1", _row("2026-11-10", "2026-11-10T15:00:00"))
+    storage.save_paper_equity("acc-1", _row("2026-10-01", "2026-10-01T15:00:00"), source="replay")
+    storage.save_paper_equity("acc-2", _row("2026-11-10", "2026-11-10T15:00:00"))
+
+    assert storage.delete_paper_equity("acc-1") == 2
+    assert storage.list_paper_equity("acc-1") == []
+    assert storage.list_paper_equity("acc-1", source="replay") == []
+    assert len(storage.list_paper_equity("acc-2")) == 1
+    assert storage.delete_paper_equity("acc-1") == 0
+
+
 def test_legacy_db_without_paper_equity_table_gets_it_on_startup(tmp_path):
     """旧 DB 没有该表时启动自动建表，且既有 paper_accounts 记录仍可读。"""
     db_path = tmp_path / "legacy.db"
@@ -231,6 +245,36 @@ def test_equity_endpoint_contract_fields_coverage_source_and_errors(application,
     assert client.get(
         f"/api/paper/accounts/{account_id}/equity", params={"start": "2026/11/10"},
     ).status_code == 422
+
+
+# -- reset 清空旧净值 --------------------------------------------------------
+
+
+def test_reset_clears_equity_snapshots_of_that_account_only(application, client):
+    """reset 语义是「重开账户」：清空该账户 live+replay 快照，其它账户行不受影响。"""
+    storage = application.state.storage
+    target_id = _create_account(client, name="待重置")["id"]
+    other_id = _create_account(client, name="其它账户")["id"]
+    for day, ts in (
+        ("2026-11-10", "2026-11-10T15:00:00"),
+        ("2026-11-11", "2026-11-11T15:00:00"),
+    ):
+        storage.save_paper_equity(target_id, _row(day, ts))
+        storage.save_paper_equity(other_id, _row(day, ts))
+    storage.save_paper_equity(
+        target_id, _row("2026-10-01", "2026-10-01T15:00:00"), source="replay",
+    )
+
+    response = client.post(f"/api/paper/accounts/{target_id}/reset")
+    assert response.status_code == 200, response.text
+
+    assert storage.list_paper_equity(target_id) == []
+    assert storage.list_paper_equity(target_id, source="replay") == []
+    body = client.get(f"/api/paper/accounts/{target_id}/equity").json()
+    assert body["items"] == []
+    assert body["coverage"] == {"start": None, "end": None, "count": 0}
+    # 删除按账户隔离，别的账户历史净值不受影响。
+    assert len(storage.list_paper_equity(other_id)) == 2
 
 
 # -- 写入钩子接线 ------------------------------------------------------------

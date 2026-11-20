@@ -321,6 +321,19 @@ class SQLiteStorage:
             "count": int(row["count"] or 0) if row else 0,
         }
 
+    def delete_paper_equity(self, account_id: str) -> int:
+        """删除某账户的全部净值快照（live + replay），返回删除行数。
+
+        ``POST /reset`` 用它清空旧序列：reset 是「重开账户」（同一 account_id、
+        初始资金归位），保留旧行会让净值曲线从旧权益跳回初始资金，max_drawdown/
+        sharpe/TWR 等全部失真；旧净值对当前账户无意义，历史不保留可接受。
+        """
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM paper_equity WHERE account_id=?", (account_id,),
+            )
+        return cursor.rowcount
+
     def save_screener_run(self, payload: dict[str, Any]) -> None:
         """保存一次完整的选股结果（payload 即 ScreeningResult.to_dict()）。"""
         body = json.dumps(payload, ensure_ascii=False, allow_nan=False)

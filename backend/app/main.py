@@ -2013,6 +2013,10 @@ def create_app() -> FastAPI:
     @application.post("/api/paper/accounts/{account_id}/reset")
     def reset_paper_account(account_id: str):
         previous = get_paper(account_id)
+        # reset = 重开账户（同一 account_id、初始资金归位）：旧净值序列对当前账户无意义，
+        # 保留会让曲线从旧权益跳回初始资金，max_drawdown/sharpe/TWR 全错，因此一并清空。
+        # reset 本身不写快照，先删后建不会误删新账户数据。
+        storage.delete_paper_equity(account_id)
         account = BrokerAccount(
             initial_cash=previous.initial_cash, name=previous.name,
             config=previous.config, account_id=previous.id, dataset_id=previous.dataset_id,
