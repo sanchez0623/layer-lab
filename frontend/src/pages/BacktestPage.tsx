@@ -1149,7 +1149,7 @@ export default function BacktestPage() {
                   <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" sub={`Calmar ${number(cf.calmar_ratio)}${cfUnderwaterDays ? ` · 最长水下 ${integer(cfUnderwaterDays)} 天` : ''}`} />
                   <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
-                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}${metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}${metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}`} />
+                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}{metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}</span>} />
                 </MetricGrid>
 
                 <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
