@@ -3,6 +3,8 @@ import Layout from './components/Layout';
 import { Loading } from './components/Ui';
 import { Toaster } from '@/components/ui/sonner';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import LoginPage from './pages/LoginPage';
 import type { PageKey } from './types';
 
 const BacktestPage = lazy(() => import('./pages/BacktestPage'));
@@ -24,6 +26,17 @@ const parseHash = (): { page: PageKey; reportId?: string } => {
 };
 
 export default function App() {
+  return (
+    <AuthProvider>
+      <AuthGate />
+    </AuthProvider>
+  );
+}
+
+/** 登录门禁：initializing 显示 Loading；未登录只渲染登录页；已登录才渲染工作台。
+ *  路由解析（含 t2 的 backtest reportId 子资源）保持不变。 */
+function AuthGate() {
+  const { user, initializing } = useAuth();
   const [{ page, reportId }, setRoute] = useState(parseHash);
 
   useEffect(() => {
@@ -37,6 +50,23 @@ export default function App() {
     setRoute({ page: next });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  if (initializing) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-background">
+        <Loading label="正在校验登录状态" />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <TooltipProvider>
+        <LoginPage />
+        <Toaster position="top-right" richColors closeButton />
+      </TooltipProvider>
+    );
+  }
 
   return (
     <TooltipProvider>

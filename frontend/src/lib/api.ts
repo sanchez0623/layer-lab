@@ -1,5 +1,8 @@
 import type {
   AccountState,
+  AuthLoginRequest,
+  AuthLoginResponse,
+  AuthMeResponse,
   BacktestConfigDraft,
   BacktestConfigDraftResponse,
   BacktestJobRequest,
@@ -82,13 +85,68 @@ async function parseError(response: Response): Promise<string> {
   }
 }
 
+/* ---------- 鉴权令牌（应用级登录） ----------
+   持久化策略：remember_me=true → localStorage（关浏览器仍保留，跨刷新保持会话）；
+   否则 → sessionStorage（关浏览器即失效，对应「不记住密码」）。
+   恢复会话时优先 localStorage、再 sessionStorage。 */
+const AUTH_TOKEN_KEY = 'layerlab.authToken';
+
+let currentToken: string | null = readStoredToken();
+
+function readStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(AUTH_TOKEN_KEY) ?? window.sessionStorage.getItem(AUTH_TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+/** 取当前令牌（供请求附带 Bearer 头）。 */
+export function getAuthToken(): string | null {
+  return currentToken;
+}
+
+/** 保存令牌：remember=true 存 localStorage（跨刷新），否则存 sessionStorage（关浏览器失效）。 */
+export function setAuthToken(token: string, remember: boolean): void {
+  currentToken = token;
+  try {
+    if (remember) {
+      window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+      window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+    } else {
+      window.sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+      window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    }
+  } catch {
+    /* 存储不可用时退化为内存令牌（本次会话有效）。 */
+  }
+}
+
+/** 清除令牌（登出 / 收到 401）。 */
+export function clearAuthToken(): void {
+  currentToken = null;
+  try {
+    window.localStorage.removeItem(AUTH_TOKEN_KEY);
+    window.sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 401 时派发，让 AuthContext 感知并跳转登录页。 */
+function emitUnauthorized(): void {
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('layerlab:unauthorized'));
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
+    const token = currentToken;
     response = await fetch(`${API_BASE}${path}`, {
       ...init,
       headers: {
         ...(init?.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...init?.headers,
       },
     });
@@ -96,6 +154,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(`无法连接后端服务。请确认服务已启动，并检查 API 地址：${API_BASE}`, 0, true);
   }
 
+  if (response.status === 401) {
+    // 令牌失效 / 过期：清本地凭证并广播，触发全局跳登录页。
+    clearAuthToken();
+    emitUnauthorized();
+  }
   if (!response.ok) throw new ApiError(await parseError(response), response.status);
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -277,14 +340,48 @@ export const api = {
     request<PrepareResponse>(`/screener/runs/${encodeURIComponent(id)}/prepare`, { method: 'POST', body: JSON.stringify(payload) }),
   setRotation: (accountId: string, payload: RotationRequest) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(accountId)}/rotation`, { method: 'POST', body: JSON.stringify(payload) }),
+
+  /* ---------- 应用级登录（替代 nginx HTTP Basic 认证） ---------- */
+  /** 登录：remember_me=true 签发 7 天令牌，否则 12 小时。注意用裸 fetch 以免把可能已失效的旧令牌带上。 */
+  login: async (payload: AuthLoginRequest): Promise<AuthLoginResponse> => {
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      throw new ApiError(`无法连接后端服务。请确认服务已启动，并检查 API 地址：${API_BASE}`, 0, true);
+    }
+    if (!response.ok) throw new ApiError(await parseError(response), response.status);
+    return response.json() as Promise<AuthLoginResponse>;
+  },
+  /** 登出：撤销当前令牌（需 Bearer）。 */
+  logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+  /** 校验当前令牌归属用户。 */
+  me: () => request<AuthMeResponse>('/auth/me'),
+  /** 修改当前用户密码（需 Bearer）。 */
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+    }),
 };
 
 export async function downloadBacktestCsv(id: string, kind: 'trades' | 'orders' | 'trail'): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}/backtests/${encodeURIComponent(id)}/export?kind=${kind}`);
+    const token = currentToken;
+    response = await fetch(`${API_BASE}/backtests/${encodeURIComponent(id)}/export?kind=${kind}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
   } catch {
     throw new ApiError(`导出失败：无法连接 ${API_BASE}，请检查后端服务。`, 0, true);
+  }
+  if (response.status === 401) {
+    clearAuthToken();
+    emitUnauthorized();
   }
   if (!response.ok) throw new ApiError(await parseError(response), response.status);
   const blob = await response.blob();

@@ -1259,3 +1259,24 @@ export interface TradingSession {
   in_session?: boolean;
   session_windows?: string[];
 }
+
+/* ---------- 应用级登录（替代 nginx HTTP Basic 认证） ---------- */
+
+/** POST /api/auth/login 请求体；remember_me=true 签发 7 天令牌，否则 12 小时。 */
+export interface AuthLoginRequest {
+  username: string;
+  password: string;
+  remember_me: boolean;
+}
+
+/** POST /api/auth/login 响应：令牌 + 用户名 + 过期时间（ISO 字符串）。 */
+export interface AuthLoginResponse {
+  token: string;
+  username: string;
+  expires_at: string;
+}
+
+/** GET /api/auth/me 响应：当前令牌归属用户名。 */
+export interface AuthMeResponse {
+  username: string;
+}
