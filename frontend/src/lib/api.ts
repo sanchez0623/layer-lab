@@ -20,6 +20,8 @@ import type {
   MarketSourceStatus,
   Order,
   Paginated,
+  PaperBetaResponse,
+  PaperMetricsResponse,
   PrepareResponse,
   RefreshStatus,
   Report,
@@ -186,6 +188,12 @@ export const api = {
   createAccount: (payload: CreateAccountRequest) => request<AccountState>('/paper/accounts', { method: 'POST', body: JSON.stringify(payload) }),
   currentAccount: () => request<AccountState>('/paper/accounts/current'),
   account: (id: string) => request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}`),
+  // 读时派生指标：不含依赖逐日净值的字段；单独拉取，不进 15 秒轮询的账户 payload。
+  accountMetrics: (id: string) =>
+    request<PaperMetricsResponse>(`/paper/accounts/${encodeURIComponent(id)}/metrics`),
+  // ETF beta 腿摘要：与回测 data_info.beta 同键同口径。
+  accountBeta: (id: string) =>
+    request<PaperBetaResponse>(`/paper/accounts/${encodeURIComponent(id)}/beta`),
   resetAccount: (id: string) => request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/reset`, { method: 'POST' }),
   applyAccountFees: (id: string, fees: FeeConfig) =>
     request<AccountState>(`/paper/accounts/${encodeURIComponent(id)}/fees`, { method: 'POST', body: JSON.stringify({ fees }) }),
