@@ -1165,12 +1165,12 @@ export default function BacktestPage() {
                 </div>
 
                 <MetricGrid columns={6}>
-                  <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={`期末权益 ${money(metrics.final_equity)}`} />
+                  <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`期末权益 ${money(metrics.final_equity)}`}{metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}</span>} />
                   <Metric label="年化收益率（TWR 口径）" value={signedPercent(cf.annualized_return)} tone={cf.annualized_return >= 0 ? 'positive' : 'negative'} title={metrics.xirr_annualized != null ? `XIRR ${signedPercent(metrics.xirr_annualized)}：资金加权年化收益率（按每笔资金实际进出时点折算，反映真实资金的时间价值；与 TWR 时间加权口径互为补充）` : undefined} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}</span>} />
                   <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" sub={`Calmar ${number(cf.calmar_ratio)}${cfUnderwaterDays ? ` · 最长水下 ${integer(cfUnderwaterDays)} 天` : ''}`} />
                   <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
                   <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
-                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.profit_withdrawn ? ` · 含出金 ${money(metrics.profit_withdrawn)}` : ''}{metrics.robustness != null ? ` · 稳健版 ${signedPercent(metrics.robustness.total_return)}` : ''}{metrics.repo_income_total ? ` · 逆回购 ${signedMoney(metrics.repo_income_total)}` : ''}</span>} />
+                  <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.repo_income_total ? ` · 逆回购 ${signedMoney(metrics.repo_income_total)}` : ''}</span>} />
                 </MetricGrid>
 
                 <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
