@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Activity, AlertTriangle, ArrowDownLeft, ArrowUpRight, CircleDollarSign, FastForward, Landmark, Loader2, Pause, Play,
+  Activity, AlertTriangle, ArrowDownLeft, ArrowUpRight, ChevronDown, ChevronRight, CircleDollarSign, FastForward, Landmark, Loader2, Pause, Play,
   Plus, Radio, RefreshCw, Repeat2, RotateCcw, Send, ShieldCheck, StepForward, Timer, Wallet, XCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -8,6 +8,7 @@ import { ApiError, api } from '../lib/api';
 import { cleanSymbolInput, dateTime, displaySymbol, integer, lower, money, number, orderTypeLabel, purposeLabel, shortDate, sideLabel, signedMoney, signedPercent, statusLabel } from '../lib/format';
 import FeeConfigPanel from '../components/FeeConfigPanel';
 import { ConfirmDialog } from '../components/ConfirmDialog';
+import { PaginationBar } from '../components/PaginationBar';
 import { Badge, EmptyState, ErrorBanner, Field, FormGrid, Loading, Metric, MetricGrid, PageHeader, Panel, SelectField, SwitchRow, SyntheticNotice, TableEmpty } from '../components/Ui';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,7 +19,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
 import { defaultFeeConfig, feeBreakdownTitle, strategyToFeeConfig, stripFeeFields } from '../lib/feeConfig';
-import type { AccountState, BoardRules, Dataset, FeeConfig, OrderPurpose, OrderSide, OrderType, PaperBetaSummary, PaperMetrics, PositionQuote, RotationPoolItem, SchedulerStatus, StrategyConfig, TradingRulesResponse, TradingSession } from '../types';
+import type { AccountState, BoardRules, Dataset, FeeConfig, OrderPurpose, OrderSide, OrderType, Paginated, PaperBetaSummary, PaperMetrics, PaperRound, PaperStrategyMetrics, PaperSwitchesResponse, PositionQuote, RotationPoolItem, SchedulerStatus, StrategyConfig, TradingRulesResponse, TradingSession } from '../types';
 
 const POOL_PREVIEW_LIMIT = 10;
 
@@ -129,6 +130,15 @@ export default function PaperPage() {
   // 读时派生指标（/metrics、/beta）：单独端点按需拉取，不塞进轮询用的账户 payload。
   const [accountMetrics, setAccountMetrics] = useState<PaperMetrics | null>(null);
   const [betaSummary, setBetaSummary] = useState<PaperBetaSummary | null>(null);
+  // 轮次明细（后台分页）+ 策略指标汇总 + 策略开关（均来自账户读时派生 / config 快照）。
+  const [roundsPage, setRoundsPage] = useState(1);
+  const [roundsPageSize, setRoundsPageSize] = useState(20);
+  const [roundsData, setRoundsData] = useState<Paginated<PaperRound> | null>(null);
+  const [roundsLoading, setRoundsLoading] = useState(false);
+  const [strategyMetrics, setStrategyMetrics] = useState<PaperStrategyMetrics | null>(null);
+  const [switches, setSwitches] = useState<PaperSwitchesResponse | null>(null);
+  const [switchesOpen, setSwitchesOpen] = useState(false);
+  const [expandedRound, setExpandedRound] = useState<string | null>(null);
   const [side, setSide] = useState<OrderSide>('buy');
   const [purpose, setPurpose] = useState<OrderPurpose>('PERMANENT');
   const [orderType, setOrderType] = useState<OrderType>('market');
@@ -261,6 +271,45 @@ export default function PaperPage() {
       });
     return () => { cancelled = true; };
   }, [derivedAccountId, derivedKey]);
+
+  // 轮次明细：后台分页（成交/权益变化后重新拉当前页；服务端越界会收敛页码）。
+  useEffect(() => {
+    if (!derivedAccountId) { setRoundsData(null); return; }
+    let cancelled = false;
+    setRoundsLoading(true);
+    api.accountRounds(derivedAccountId, roundsPage, roundsPageSize)
+      .then((body) => {
+        if (cancelled) return;
+        setRoundsData(body);
+        if (body.page !== roundsPage) setRoundsPage(body.page);
+      })
+      .catch(() => {
+        // 轮次明细失败不阻塞账户面板：表格显示空态，下一轮同步重试。
+      })
+      .finally(() => { if (!cancelled) setRoundsLoading(false); });
+    return () => { cancelled = true; };
+  }, [derivedAccountId, derivedKey, roundsPage, roundsPageSize]);
+
+  // 策略指标汇总（胜率 / 盈亏比 / 平均单轮 / 加仓与退出原因分布）。
+  useEffect(() => {
+    if (!derivedAccountId) { setStrategyMetrics(null); return; }
+    let cancelled = false;
+    api.accountRoundsSummary(derivedAccountId)
+      .then((body) => { if (!cancelled) setStrategyMetrics(body.strategy_metrics); })
+      .catch(() => { /* 汇总失败时面板显示「—」 */ });
+    return () => { cancelled = true; };
+  }, [derivedAccountId, derivedKey]);
+
+  // 策略开关：只读账户 config 快照（架构原则 3），配置更新后刷新。
+  const configSnapshotKey = account ? JSON.stringify(account.config) : '';
+  useEffect(() => {
+    if (!derivedAccountId) { setSwitches(null); return; }
+    let cancelled = false;
+    api.accountSwitches(derivedAccountId)
+      .then((body) => { if (!cancelled) setSwitches(body); })
+      .catch(() => { /* 开关面板失败时整块隐藏，不影响交易面板 */ });
+    return () => { cancelled = true; };
+  }, [derivedAccountId, configSnapshotKey]);
 
   // 六板块规则全表：进页面拉一次，供「全部板块」对比视图使用。
   useEffect(() => {
@@ -1117,6 +1166,48 @@ export default function PaperPage() {
             />
           </MetricGrid>
 
+          {switches && (
+            <Panel
+              className="mb-3"
+              title="策略开关（账户配置快照）"
+              description={`来自账户创建 / 更新时定格的 config，不回读全局设置；快照时间 ${switches.config_snapshot_at ? dateTime(switches.config_snapshot_at) : '—'}`}
+              action={<Button variant="outline" size="sm" onClick={() => setSwitchesOpen(!switchesOpen)}>{switchesOpen ? <ChevronDown /> : <ChevronRight />}{switchesOpen ? '收起' : '展开'}</Button>}
+            >
+              {!switchesOpen ? (
+                <div className="flex flex-wrap gap-1.5">
+                  {Object.entries(switches.switches).map(([group, items]) => (
+                    <span key={group} className="rounded-md border bg-card px-2 py-1 text-[10px]">
+                      <small className="mr-1 text-muted-foreground">{group}</small>
+                      <b className="font-mono text-foreground">{items.filter((item) => item.enabled).length}/{items.length}</b> 开启
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <div className="grid gap-2 lg:grid-cols-2">
+                  {Object.entries(switches.switches).map(([group, items]) => (
+                    <div key={group} className="rounded-lg border bg-muted/20 p-2.5">
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <strong className="text-[12px]">{group}</strong>
+                        <span className="text-[10px] text-muted-foreground">{items.filter((item) => item.enabled).length}/{items.length} 开启</span>
+                      </div>
+                      <div className="grid gap-1">
+                        {items.map((item) => (
+                          <div key={item.key} title={item.hint || item.label} className={cn('flex items-center justify-between gap-2 rounded border bg-card px-2 py-1 text-[11px]', !item.enabled && 'opacity-55')}>
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <Badge tone={item.enabled ? 'green' : 'neutral'}>{item.enabled ? '开' : '关'}</Badge>
+                              <span className="truncate">{item.label}</span>
+                            </span>
+                            <span className="shrink-0 font-mono text-[11px] text-foreground">{item.value}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Panel>
+          )}
+
           {account.auto_strategy && (
             <Panel className="mb-3" title="做 T 止盈与截止" description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；到 T+1 尾盘截止时间仍未止盈则无条件强平。改动保存后下一根 K 线起生效。" action={<Badge tone="indigo">即时生效</Badge>}>
               <div className="grid gap-2 lg:grid-cols-2">
@@ -1367,6 +1458,128 @@ export default function PaperPage() {
                 })}
               </TableBody>
             </Table>
+          </Panel>
+
+          <Panel
+            className="mb-3"
+            flush
+            title="轮次明细"
+            description="按净个股持仓（永久仓 + T，不含 ETF）0→正→0 读时重建，T / ETF 成交不切轮次；pnl = 区间权益差，三腿口径与回测一致。无逐日净值快照时净盈亏显示「—」。"
+            action={<span className="text-[10px] text-muted-foreground">{roundsData ? `共 ${integer(roundsData.total)} 轮` : '—'}</span>}
+          >
+            {strategyMetrics && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b bg-muted/20 px-4 py-2 text-[10px] text-muted-foreground">
+                <span>轮次 <b className="font-mono text-foreground">{integer(strategyMetrics.total_rounds)}</b>（已结束 {integer(strategyMetrics.closed_rounds)}）</span>
+                <span>胜率 <b className="font-mono text-foreground">{number(strategyMetrics.win_rate * 100, 1)}%</b></span>
+                <span>盈亏比 <b className="font-mono text-foreground">{strategyMetrics.profit_factor != null ? number(strategyMetrics.profit_factor, 2) : '—'}</b></span>
+                <span>平均单轮 <b className={cn('font-mono', strategyMetrics.avg_round_return == null ? 'text-foreground' : strategyMetrics.avg_round_return >= 0 ? 'text-destructive' : 'text-success')}>{strategyMetrics.avg_round_return != null ? signedPercent(strategyMetrics.avg_round_return) : '—'}</b></span>
+                <span>平均持有 <b className="font-mono text-foreground">{strategyMetrics.avg_holding_days != null ? `${number(strategyMetrics.avg_holding_days, 1)} 日` : '—'}</b></span>
+                <span>做 T 净贡献 <b className="font-mono text-foreground">{signedMoney(strategyMetrics.t_net_profit)}</b></span>
+                <span>平均加仓 <b className="font-mono text-foreground">{strategyMetrics.installment_avg != null ? `${number(strategyMetrics.installment_avg, 1)} 笔` : '—'}</b></span>
+                <span>退出原因 <b className="font-mono text-foreground">{Object.entries(strategyMetrics.close_reason_distribution).map(([reason, count]) => `${reason}×${count}`).join(' / ') || '—'}</b></span>
+              </div>
+            )}
+            <Table>
+              <TableHeader><TableRow>
+                <TableHead className="w-8" />
+                <TableHead>轮次</TableHead>
+                <TableHead>标的</TableHead>
+                <TableHead>持仓区间</TableHead>
+                <TableHead className="text-right">持有交易日</TableHead>
+                <TableHead className="text-right">本轮收益率</TableHead>
+                <TableHead className="text-right">净盈亏</TableHead>
+                <TableHead className="text-right" title="个股腿真实盈亏 = pnl + 轮内提现 − ETF 腿">个股腿</TableHead>
+                <TableHead className="text-right" title="轮内 ETF beta 腿盈亏（含未实现）">ETF 腿</TableHead>
+                <TableHead className="text-right" title="轮次区间 (start_date, end_date] 内的提现合计">轮内提现</TableHead>
+                <TableHead>退出原因</TableHead>
+              </TableRow></TableHeader>
+              <TableBody>
+                {!roundsData || roundsData.items.length === 0 ? (
+                  <TableEmpty colSpan={11} message={roundsLoading ? '正在读取轮次明细' : '暂无轮次：自动策略建仓后按轮次聚合'} />
+                ) : roundsData.items.map((round) => {
+                  const expanded = expandedRound === round.id;
+                  return (
+                    <Fragment key={round.id}>
+                      <TableRow className={cn(round.status !== 'CLOSED' && 'bg-accent/20')}>
+                        <TableCell className="w-8 pr-0">
+                          <Button variant="ghost" size="sm" type="button" className="h-6 w-6 p-0" onClick={() => setExpandedRound(expanded ? null : round.id)} aria-label={expanded ? '收起轮次详情' : '展开轮次详情'}>
+                            {expanded ? <ChevronDown /> : <ChevronRight />}
+                          </Button>
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap">
+                          <strong className="font-mono text-[11px]">{round.id}</strong>
+                          <Badge tone={round.status === 'CLOSED' ? 'neutral' : 'indigo'}>{round.status === 'CLOSED' ? '已结束' : '持仓中'}</Badge>
+                        </TableCell>
+                        <TableCell>
+                          <strong className="block font-mono text-[12px]" title={round.symbol}>{displaySymbol(round.symbol)}</strong>
+                          {round.name && <small className="block text-[10px] text-muted-foreground">{round.name}</small>}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap font-mono text-[11px]">
+                          {shortDate(round.start_date)} → {round.exit_date ? shortDate(round.exit_date) : '持仓中'}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-[12px]">{round.holding_days != null ? `${integer(round.holding_days)} 日` : '—'}</TableCell>
+                        <TableCell className="text-right font-mono text-[12px]">
+                          <span className={cn(round.round_return == null ? '' : round.round_return >= 0 ? 'text-destructive' : 'text-success')}>{round.round_return != null ? signedPercent(round.round_return) : '—'}</span>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-[12px]">
+                          <span className={cn(round.pnl == null ? 'text-muted-foreground' : round.pnl >= 0 ? 'text-destructive' : 'text-success')} title={round.approx ? '净值序列未完整覆盖本轮，pnl 为近似值' : undefined}>
+                            {round.pnl != null ? `${round.approx ? '≈' : ''}${signedMoney(round.pnl)}` : '—'}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-[12px]">{round.stock_pnl != null ? signedMoney(round.stock_pnl) : '—'}</TableCell>
+                        <TableCell className="text-right font-mono text-[12px]">{round.beta_pnl != null ? signedMoney(round.beta_pnl) : '—'}</TableCell>
+                        <TableCell className="text-right font-mono text-[12px]">{round.withdraw_in_round > 0 ? money(round.withdraw_in_round) : '—'}</TableCell>
+                        <TableCell className="max-w-[180px] whitespace-normal text-[11px]" title={round.close_reason || undefined}>
+                          {round.close_reason_label ?? (round.status === 'CLOSED' ? '—' : '持仓中')}
+                        </TableCell>
+                      </TableRow>
+                      {expanded && (
+                        <TableRow className="bg-muted/20">
+                          <TableCell />
+                          <TableCell colSpan={10}>
+                            <div className="grid gap-2 py-1 lg:grid-cols-2">
+                              <div className="flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-muted-foreground">
+                                <span>峰值投入 <b className="font-mono text-foreground">{money(round.max_invested)}</b></span>
+                                <span>加仓 <b className="font-mono text-foreground">{integer(round.installment_count)} 笔</b></span>
+                                <span>做 T 净贡献 <b className="font-mono text-foreground">{signedMoney(round.t_net_profit)}</b></span>
+                                {round.pnl == null && <span className="text-warning">无逐日净值快照，净盈亏与三腿未计算</span>}
+                              </div>
+                              {round.close_diagnostic && (round.close_diagnostic.signal_price != null || round.close_diagnostic.fill_price != null) && (
+                                <div className="rounded-md border bg-card px-2.5 py-2 text-[10px]">
+                                  <small className="block text-muted-foreground">止盈执行诊断（信号 → 成交）</small>
+                                  <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1">
+                                    {round.close_signal_trigger_label != null && <span><span className="text-muted-foreground">触发 </span><b className="font-mono text-foreground">{round.close_signal_trigger_label}</b></span>}
+                                    {round.close_signal_price != null && <span><span className="text-muted-foreground">信号价 </span><b className="font-mono text-foreground">{money(round.close_signal_price)}</b>{round.close_signal_return != null && <b className="ml-1 font-mono text-foreground">{signedPercent(round.close_signal_return)}</b>}</span>}
+                                    {round.close_signal_time && <span><span className="text-muted-foreground">信号时间 </span><b className="font-mono text-foreground">{shortDate(round.close_signal_time)}</b></span>}
+                                    {round.close_fill_price != null && <span><span className="text-muted-foreground">成交价 </span><b className="font-mono text-foreground">{money(round.close_fill_price)}</b></span>}
+                                    {round.close_fill_time && <span><span className="text-muted-foreground">成交时间 </span><b className="font-mono text-foreground">{shortDate(round.close_fill_time)}</b></span>}
+                                    {round.close_execution_gap != null && <span><span className="text-muted-foreground">执行落差 </span><b className={cn('font-mono', round.close_execution_gap < 0 ? 'text-success' : 'text-muted-foreground')}>{signedPercent(round.close_execution_gap)}</b></span>}
+                                    {round.close_round_return != null && <span><span className="text-muted-foreground">轮次收益 </span><b className="font-mono text-foreground">{signedPercent(round.close_round_return)}</b></span>}
+                                    {round.close_return_gap != null && <span><span className="text-muted-foreground">总落差 </span><b className={cn('font-mono', round.close_return_gap < 0 ? 'text-success' : 'text-muted-foreground')}>{signedPercent(round.close_return_gap)}</b></span>}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </TableBody>
+            </Table>
+            {roundsData && roundsData.total > 0 && (
+              <div className="px-4 pb-3">
+                <PaginationBar
+                  page={roundsData.page}
+                  pageSize={roundsData.page_size}
+                  total={roundsData.total}
+                  totalPages={roundsData.total_pages}
+                  onPageChange={setRoundsPage}
+                  onPageSizeChange={(size) => { setRoundsPageSize(size); setRoundsPage(1); }}
+                />
+              </div>
+            )}
           </Panel>
 
           <Panel className="mb-3" flush>

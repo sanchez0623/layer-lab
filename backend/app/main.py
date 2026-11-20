@@ -35,7 +35,13 @@ from .market import (
     normalize_symbol,
 )
 from .pagination import paginate, page_params
-from .paper_analytics import paper_account_metrics, paper_beta_summary
+from .paper_analytics import (
+    paper_account_metrics,
+    paper_beta_summary,
+    paper_rounds,
+    paper_strategy_metrics,
+    paper_strategy_switches,
+)
 from .quan_data import QuanRefresher, QuanStore, quan_data_dir
 from .rotation import rescreen_and_advance, set_from_run as set_rotation_from_run, set_pool as set_rotation_pool
 from .rotation_trail import (
@@ -1998,6 +2004,39 @@ def create_app() -> FastAPI:
         """ETF beta 腿摘要：与回测 data_info.beta 同键名同口径（不含覆盖区间字段）。"""
         account = get_paper(account_id)
         return {"beta": paper_beta_summary(account), "derived_from": "cashflow"}
+
+    # -- 轮次明细 / 策略指标 / 策略开关（阶段 3） --------------------------
+    @application.get("/api/paper/accounts/{account_id}/rounds")
+    def paper_rounds_endpoint(
+        account_id: str, params: tuple[int, int] = Depends(page_params),
+    ):
+        """轮次明细（后台分页）：字段与回测 ``rounds`` 同构（含三腿分拆与执行诊断）。
+
+        ``equity_curve`` 取逐日净值（源 live）；无净值快照时 ``pnl=null``，不会被
+        现金流口径硬算成假收益。轮次按「净个股持仓 0→正→0」读时重建，BETA 不切轮。
+        """
+        account = get_paper(account_id)
+        page, page_size = params
+        rows = paper_rounds(account, storage.list_paper_equity_daily(account_id))
+        return paginate(rows, page=page, page_size=page_size)
+
+    @application.get("/api/paper/accounts/{account_id}/rounds/summary")
+    def paper_rounds_summary_endpoint(account_id: str):
+        """策略指标汇总：胜率 / 盈亏比 / 平均单轮收益 / 加仓与退出原因分布。
+
+        只聚合轮次 + 成交能精确算出的字段，不含任何依赖净值曲线的统计风险指标。
+        """
+        account = get_paper(account_id)
+        rows = paper_rounds(account, storage.list_paper_equity_daily(account_id))
+        return {
+            "strategy_metrics": paper_strategy_metrics(account, rows),
+            "derived_from": "rounds",
+        }
+
+    @application.get("/api/paper/accounts/{account_id}/switches")
+    def paper_switches_endpoint(account_id: str):
+        """账户配置快照里的策略开关（架构原则 3：在途账户不回读全局配置）。"""
+        return paper_strategy_switches(get_paper(account_id))
 
     @application.get("/api/paper/accounts/{account_id}/equity")
     def paper_equity_history(

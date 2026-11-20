@@ -731,6 +731,107 @@ export interface PaperBetaResponse {
   derived_from: string;
 }
 
+/**
+ * 模拟盘轮次明细（`GET /api/paper/accounts/{id}/rounds`）：与回测 `rounds` 同构。
+ *
+ * 轮次按「净个股持仓（PERMANENT+T，不含 BETA）0→正→0」读时重建；pnl 用逐日
+ * 净值差（无净值快照时为 null，不近似硬算）；三腿口径与回测 `decompose_round_pnl`
+ * 同一份实现（pnl = stock_pnl + beta_pnl - withdraw_in_round）。
+ */
+export interface PaperRoundCloseDiagnostic {
+  trigger?: string | null;
+  trigger_label?: string | null;
+  signal_price?: number | null;
+  signal_time?: string | null;
+  price_return?: number | null;
+  fill_price?: number | null;
+  fill_time?: string | null;
+  execution_gap?: number | null;
+  round_return?: number | null;
+  return_gap?: number | null;
+}
+
+export interface PaperRound {
+  id: string;
+  symbol: string;
+  name: string;
+  start_date: string;
+  end_date: string | null;
+  entry_date: string;
+  exit_date: string | null;
+  status: 'CLOSED' | 'OPEN' | string;
+  /** PERMANENT 买入笔数（轮内加仓次数）。 */
+  installment_count: number;
+  invested: number;
+  max_invested: number;
+  t_net_profit: number;
+  pnl: number | null;
+  /** pnl 是否近似（净值序列未覆盖轮次起点 / 盘中清仓当日无快照时为 true）。 */
+  approx: boolean;
+  stock_pnl: number | null;
+  beta_pnl: number | null;
+  withdraw_in_round: number;
+  round_return: number | null;
+  holding_days: number | null;
+  /** 原始退出原因（策略 / 委托 reason）。 */
+  close_reason: string | null;
+  /** 退出原因中文标签（与回测报告文案对齐）。 */
+  close_reason_label: string | null;
+  close_signal_trigger?: string | null;
+  close_signal_trigger_label?: string | null;
+  close_signal_price?: number | null;
+  close_signal_time?: string | null;
+  close_signal_return?: number | null;
+  close_fill_price?: number | null;
+  close_fill_time?: string | null;
+  close_execution_gap?: number | null;
+  close_round_return?: number | null;
+  close_return_gap?: number | null;
+  close_diagnostic?: PaperRoundCloseDiagnostic | null;
+}
+
+/** 模拟盘策略指标汇总（`GET /api/paper/accounts/{id}/rounds/summary`）。 */
+export interface PaperStrategyMetrics {
+  total_rounds: number;
+  closed_rounds: number;
+  win_rate: number;
+  profit_factor: number | null;
+  avg_round_return: number | null;
+  avg_holding_days: number | null;
+  t_net_profit: number;
+  t_trade_count: number;
+  beta_pnl: number;
+  beta_trade_count: number;
+  max_invested: number;
+  avg_max_invested: number | null;
+  installment_avg: number | null;
+  installment_max: number;
+  installment_histogram: Record<string, number>;
+  close_reason_distribution: Record<string, number>;
+}
+
+export interface PaperStrategyMetricsResponse {
+  strategy_metrics: PaperStrategyMetrics;
+  derived_from: string;
+}
+
+/** 单个策略开关（来自账户 config 快照，不回读全局配置）。 */
+export interface PaperSwitchItem {
+  key: string;
+  label: string;
+  enabled: boolean;
+  /** 已格式化的展示值（百分比 / 笔数 / 时间 / 金额 / 文本）。 */
+  value: string;
+  group: string;
+  hint: string;
+}
+
+export interface PaperSwitchesResponse {
+  switches: Record<string, PaperSwitchItem[]>;
+  /** 配置快照时间（账户创建时间）；后端旧版本可能为 null。 */
+  config_snapshot_at: string | null;
+}
+
 export interface CreateOrderRequest {
   symbol: string;
   side: OrderSide;
