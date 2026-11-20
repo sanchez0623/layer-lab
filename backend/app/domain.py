@@ -240,6 +240,16 @@ class StrategyConfig:
     risk_volume_caliber: str = "annualized"
     # 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
     risk_volume_ratio: float = 0.8
+    # ---- 闲置资金逆回购（每日盘后结算）------------------------------------
+    # 空仓/未占用现金每日模拟真实国债逆回购收益：收益率每天在 [repo_yield_min,
+    # repo_yield_max]（年化）之间按「以日期为种子」的确定性随机取值，当日收益
+    # income = idle × rate / 365 盘后计入现金。只体现在「每月收益」与「总收益」，
+    # 不单独从权益里扣减。回测与模拟盘共用同一套算法（架构原则 1），配置随账户快照。
+    idle_cash_repo_enabled: bool = False
+    # 年化收益率下限/上限（0.010 = 1.00%，0.015 = 1.50%）。校验：两者都在 [0, 0.1]
+    # （年化最多 10%，防误填成 1% 之类的小数口径错误），且 min <= max。
+    repo_yield_min: float = 0.010
+    repo_yield_max: float = 0.015
 
     def __post_init__(self) -> None:
         if len(self.installment_amounts) != 16:
@@ -331,6 +341,14 @@ class StrategyConfig:
             )
         if not 0 < float(self.risk_volume_ratio) <= 1:
             raise ValueError("risk_volume_ratio 必须在 (0, 1]（缩量阈值占前 5 日均量的比例）")
+        # ---- 闲置资金逆回购校验 ----------------------------------------------
+        # 收益率是「年化小数」口径：上限卡 10%，防止把 1% 误填成 1（=100%）之类。
+        self.repo_yield_min = float(self.repo_yield_min)
+        self.repo_yield_max = float(self.repo_yield_max)
+        if not 0 <= self.repo_yield_min <= self.repo_yield_max:
+            raise ValueError("repo_yield_min 必须满足 0 <= repo_yield_min <= repo_yield_max（逆回购年化下限/上限）")
+        if not 0 <= self.repo_yield_max <= 0.1:
+            raise ValueError("repo_yield_max 必须在 [0, 0.1] 内（逆回购年化上限最多 10%，防误填）")
 
     @classmethod
     def from_dict(cls, value: dict[str, Any] | None) -> "StrategyConfig":
