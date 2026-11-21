@@ -62,6 +62,28 @@ here-string，别拼字符串。同理，PowerShell 里 `git -c http.sslbackend=
 的 `-c` 必须放在 `git` 之后、子命令之前（`git fetch -c ...` 是错的，`-c` 不是
 fetch 的选项）。
 
+### ⚠️ 行尾：写工具会默认归一化 CRLF→LF（整天踩，写成硬规则）
+
+**问题**：`write` / `edit` 工具默认按 **LF** 写出，而本仓库大量文件（含本
+`AGENTS.md`、Windows 侧脚本/配置）是 **CRLF**。工具一重写就把 `CRLF→LF` 归一化，
+git diff 里**整个文件每一行都显示被改动**，全是行尾噪音，淹没真正的逻辑改动，
+还可能触发无谓的 CI / 干扰 review。
+
+**硬规则**：
+1. **改文件前先探行尾**：`([regex]::Matches((Get-Content -Raw <file>), "`r`n")).Count`
+   与总 `\n` 数对比；CRLF 占比高 → 该文件必须保持 CRLF。
+2. **优先小范围 `edit`**（替换一小段字面文本），别用 `write` 全量重写一个
+   CRLF 文件——`write` 会整文件归一化成 LF，必爆噪音。
+3. **确需生成/重写 CRLF 文件**：用 PowerShell 显式写出 CRLF
+   （如 `Set-Content` + 手动拼 `` "`r`n" ``，或 `WriteAllText` 前把 `\n` 换成 `` "`r`n" ``），
+   别依赖工具默认行为。
+4. **提交前自检**：`git diff --stat` 里若某个你只改了几行的文件显示「几百行变更」，
+   基本就是行尾被改了——先 `git diff` 确认，用 `git checkout -- <file>` 回滚后按上面
+   正确方式重做，别把行尾噪音 commit 进去。
+5. **别「顺手统一行尾」**：即使看到文件行尾混杂，也不要在无关改动里顺手转
+   CRLF/LF，那会产生独立于逻辑的巨型 diff。行尾归一化应作为**单独一次**显式、
+   有意的提交（且先问用户）。
+
 ### 提交 / 推送 / 版本号
 
 每次改完功能（本地验证通过后）：
