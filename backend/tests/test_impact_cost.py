@@ -220,3 +220,61 @@ def test_roundtrip_cost_impact_uses_volume_participation():
     assert strategy._t_roundtrip_cost() == pytest.approx(expected)
     # impact 单边滑点 = k*sqrt(vp) = 1.5*0.4472 ≈ 0.67，显著大于 fixed 默认 1bps。
     assert strategy._t_roundtrip_cost() > _fee_part(cfg) + 2 * 1.0 / 10000
+
+
+# ------------------------------------------------------- HTTP 端点端到端 ----
+# 回归哨兵：前端「模拟盘保存滑点模型」走 POST /paper/accounts/{id}/config，
+# 该端点的 AccountConfigRequest 必须显式收 slippage_model / impact_coefficient，
+# 否则 extra="forbid" 会拒绝（422）——真实事故：小系数 0.01 保存直接报错。
+# 下面用 TestClient 走完整 HTTP 链路，确保端点层不漏这两个字段。
+
+def test_paper_config_endpoint_accepts_impact_model(tmp_path, monkeypatch):
+    """模拟盘 /config 端点能接收 slippage_model=impact + 小系数 0.01 并落库。"""
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "app.db"))
+    client = TestClient(create_app())
+    account = client.post("/api/paper/accounts", json={
+        "name": "冲击模型", "initial_cash": 4_000_000,
+    }).json()
+
+    resp = client.post(f"/api/paper/accounts/{account['id']}/config", json={
+        "slippage_model": "impact", "impact_coefficient": 0.01,
+    })
+    assert resp.status_code == 200, resp.text
+    config = resp.json()["config"]
+    assert config["slippage_model"] == "impact"
+    assert config["impact_coefficient"] == pytest.approx(0.01)
+
+    # 持久化往返后仍是新值
+    reloaded = client.get(f"/api/paper/accounts/{account['id']}").json()["config"]
+    assert reloaded["slippage_model"] == "impact"
+    assert reloaded["impact_coefficient"] == pytest.approx(0.01)
+
+
+def test_paper_config_endpoint_rejects_bad_impact_model(tmp_path, monkeypatch):
+    """非法 slippage_model / 负系数在端点层被拦下（4xx），不让脏值落库。
+
+    两条拦截路径不同但都拒绝：
+    - 非法模型名：Pydantic 放行（只是 str），到 StrategyConfig.from_dict 抛 ValueError → 400。
+    - 负系数：AccountConfigRequest 的 Field(ge=0) 在 Pydantic 层直接拒 → 422。
+    """
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+
+    monkeypatch.setenv("WB_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "app.db"))
+    client = TestClient(create_app())
+    account = client.post("/api/paper/accounts", json={
+        "name": "冲击模型越界", "initial_cash": 4_000_000,
+    }).json()
+    url = f"/api/paper/accounts/{account['id']}/config"
+
+    # 非法模型名 → StrategyConfig 校验抛 ValueError → 400
+    resp = client.post(url, json={"slippage_model": "quadratic", "impact_coefficient": 0.01})
+    assert resp.status_code == 400, resp.text
+    # 负系数 → Pydantic Field(ge=0) 拒绝 → 422（仍在端点层拦下，不落库）
+    resp = client.post(url, json={"slippage_model": "impact", "impact_coefficient": -0.5})
+    assert resp.status_code == 422, resp.text

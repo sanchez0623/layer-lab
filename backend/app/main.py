@@ -292,6 +292,11 @@ class AccountConfigRequest(BaseModel):
     risk_volume_caliber: str | None = None
     # 缩量阈值：折算后的当日量能低于「前 5 日全天均量 × 本比例」即视为缩量（0~1 小数）。
     risk_volume_ratio: float | None = Field(default=None, gt=0, le=1)
+    # 滑点模型：fixed=固定 slippage_bps（默认，旧行为）/ impact=平方根冲击成本模型。
+    # impact_coefficient 为冲击系数 k（>=0），impact 模式下 rate = k * sqrt(本笔量/bar.volume)。
+    # 合并进 StrategyConfig 后由 __post_init__ 校验 model ∈ {fixed,impact} 且 k >= 0，非法值 400。
+    slippage_model: str | None = None
+    impact_coefficient: float | None = Field(default=None, ge=0)
     # 闲置资金逆回购：空仓/未占用现金每日盘后结算模拟国债逆回购收益。
     # repo_yield_min/max 为年化小数（0.010=1.00%）；合并进 StrategyConfig 后由
     # __post_init__ 校验 0 <= min <= max 且都在 [0, 0.1]（年化最多 10%），非法值 400。
@@ -603,7 +608,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.0.5",
+        version="3.0.6",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
