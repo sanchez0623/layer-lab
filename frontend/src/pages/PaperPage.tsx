@@ -1386,7 +1386,7 @@ export default function PaperPage() {
                   </Field>
                   {(slipModelInput || slipModelCurrent) === 'impact' && (
                     <Field label="冲击系数" hint="rate = 系数 × √(本笔量/当日成交量)；默认 1.0 时满额单≈√(参与度)" className="w-36">
-                      <NumberInput unit="k" min={0} step={0.1} allowEmpty placeholder={number(impactKCurrent, 1)} value={impactKInput} onChange={setImpactKInput} disabled={savingSlip} />
+                      <NumberInput unit="k" min={0} step={0.001} allowEmpty placeholder={number(impactKCurrent, 3)} value={impactKInput} onChange={setImpactKInput} disabled={savingSlip} />
                     </Field>
                   )}
                   <Button size="sm" className="h-8" onClick={() => void saveSlippageModel()} disabled={savingSlip}>{savingSlip ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingSlip ? '正在保存' : '保存滑点'}</Button>

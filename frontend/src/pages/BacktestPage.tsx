@@ -1163,7 +1163,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                       </Field>
                       {config.slippage_model === 'impact' ? (
                         <Field label="冲击系数" hint="rate = 系数 × √(本笔量/当日成交量)；默认 1.0 时满额单≈√(参与度)" error={configIssues.impact_coefficient}>
-                          <NumberInput unit="k" min={0} step={0.1} value={config.impact_coefficient ?? 1.0} onChange={(value) => updateConfig('impact_coefficient', Number(value))} />
+                          <NumberInput unit="k" min={0} step={0.001} value={config.impact_coefficient ?? 1.0} onChange={(value) => updateConfig('impact_coefficient', Number(value))} />
                         </Field>
                       ) : (
                         <Field label="滑点" error={configIssues.slippage_bps}><NumberInput unit="bps" min={0} step={1} precision={0} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
