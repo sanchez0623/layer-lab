@@ -47,6 +47,10 @@ export interface StrategyConfig {
   transfer_fee_rate: number;
   slippage_bps: number;
   volume_participation: number;
+  /** 滑点模型：fixed=固定 slippage（bps，旧行为）/ impact=平方根冲击成本模型（随成交量变化） */
+  slippage_model?: 'fixed' | 'impact';
+  /** 冲击成本系数 k（>=0，默认 1.0）：impact 模式下 rate = k × √(本笔量/当日成交量) */
+  impact_coefficient?: number;
   /** 已废弃：做T平仓改用 t_target_net_spread（扣成本后净利止盈），本字段不再参与做T计算，仅为兼容后端 config 保留 */
   t_target_spread?: number;
   /** 做T净利止盈阈值（小数，0.03 = 扣完成本后净赚 3% 平T）；可在模拟盘账户配置里改，下一根K线起生效 */

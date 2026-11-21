@@ -786,6 +786,10 @@ export default function PaperPage() {
   const [riskCaliber, setRiskCaliber] = useState('');
   const [riskRatio, setRiskRatio] = useState('');
   const [savingRisk, setSavingRisk] = useState(false);
+  // 滑点模型（fixed/impact）+ 冲击系数 k。留空表示沿用当前值。
+  const [slipModelInput, setSlipModelInput] = useState('');
+  const [impactKInput, setImpactKInput] = useState('');
+  const [savingSlip, setSavingSlip] = useState(false);
   // 闲置资金逆回购：开关 + 年化收益率区间（%）。留空表示沿用当前值。
   const repoEnabledCurrent = Boolean(account?.config?.idle_cash_repo_enabled);
   const repoMinCurrent = account?.config?.repo_yield_min ?? 0.010;
@@ -854,6 +858,39 @@ export default function PaperPage() {
       setError(cause instanceof Error ? cause.message : 'Armed 量价背离缩量口径更新失败。');
     } finally {
       setSavingRisk(false);
+    }
+  };
+
+  // 滑点模型 / 冲击系数：走 updateAccountConfig 局部更新，下一根K线起生效。
+  const slipModelCurrent = account?.config?.slippage_model ?? 'fixed';
+  const impactKCurrent = account?.config?.impact_coefficient ?? 1.0;
+  const saveSlippageModel = async () => {
+    if (!account) return;
+    const model = slipModelInput || slipModelCurrent;
+    if (!['fixed', 'impact'].includes(model)) {
+      setError('滑点模型需为 fixed / impact 之一。');
+      return;
+    }
+    // 冲击系数仅在 impact 模式下需要；留空沿用当前值。
+    const k = impactKInput === '' ? impactKCurrent : Number(impactKInput);
+    if (!Number.isFinite(k) || k < 0) {
+      setError('冲击系数不能为负。');
+      return;
+    }
+    setSavingSlip(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, {
+        slippage_model: model as 'fixed' | 'impact',
+        impact_coefficient: k,
+      });
+      setAccount(next);
+      setSlipModelInput('');
+      setImpactKInput('');
+      toast.success(model === 'impact' ? '冲击成本模型已更新，下一根K线起生效。' : '已切回固定滑点（bps），下一根K线起生效。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '滑点模型更新失败。');
+    } finally {
+      setSavingSlip(false);
     }
   };
 
@@ -1338,6 +1375,21 @@ export default function PaperPage() {
                     <NumberInput unit="%" min={0.1} max={100} step={1} allowEmpty placeholder={number(riskRatioCurrent * 100, 0)} value={riskRatio} onChange={setRiskRatio} disabled={savingRisk} />
                   </Field>
                   <Button size="sm" className="h-8" onClick={() => void saveRiskCaliber()} disabled={savingRisk}>{savingRisk ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingRisk ? '正在保存' : '保存口径'}</Button>
+                </div>
+                {/* 滑点模型：fixed=固定 bps（旧行为）/ impact=平方根冲击成本（随成交量变化） */}
+                <div className="mt-1.5 flex flex-wrap items-end gap-2">
+                  <Field label="滑点模型" hint="fixed=固定 slippage（bps，旧行为）；impact=冲击成本模型，滑点随成交量变化（大单更贵）" className="w-56">
+                    <SelectField value={slipModelInput || slipModelCurrent} onValueChange={setSlipModelInput} disabled={savingSlip} options={[
+                      { value: 'fixed', label: '固定 slippage（bps）' },
+                      { value: 'impact', label: '冲击成本模型（随量变化）' },
+                    ]} ariaLabel="滑点模型" />
+                  </Field>
+                  {(slipModelInput || slipModelCurrent) === 'impact' && (
+                    <Field label="冲击系数" hint="rate = 系数 × √(本笔量/当日成交量)；默认 1.0 时满额单≈√(参与度)" className="w-36">
+                      <NumberInput unit="k" min={0} step={0.1} allowEmpty placeholder={number(impactKCurrent, 1)} value={impactKInput} onChange={setImpactKInput} disabled={savingSlip} />
+                    </Field>
+                  )}
+                  <Button size="sm" className="h-8" onClick={() => void saveSlippageModel()} disabled={savingSlip}>{savingSlip ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingSlip ? '正在保存' : '保存滑点'}</Button>
                 </div>
                 {/* 闲置资金逆回购：开关 + 年化收益率区间（盘后结算，与回测同一套算法） */}
                 <div className="mt-1.5 flex flex-wrap items-end gap-2">

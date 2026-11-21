@@ -44,6 +44,11 @@ const fallbackConfig: StrategyConfig = {
   transfer_fee_rate: 0.00001,
   slippage_bps: 1,
   volume_participation: 0.2,
+  // 滑点模型：fixed=固定 slippage（bps，旧行为）/ impact=平方根冲击成本模型（随成交量变化）。
+  // 必须登记在 fallbackConfig 里，否则 mergeKnown 在「带入回测」时会静默丢弃报告快照里的值。
+  slippage_model: 'fixed',
+  // 冲击成本系数 k（>=0，默认 1.0）：impact 模式下 rate = k × √(本笔量/当日成交量)。
+  impact_coefficient: 1.0,
   t_target_net_spread: 0.03,
   t_exit_cutoff: '14:50',
   max_holding_days: 22,
@@ -1153,7 +1158,16 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                   <div className="grid gap-2">
                     <FeeConfigPanel value={fees} onChange={setFees} />
                     <FormGrid>
-                      <Field label="滑点" error={configIssues.slippage_bps}><NumberInput unit="bps" min={0} step={1} precision={0} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
+                      <Field label="滑点模型" hint="fixed=固定 slippage（bps，旧行为，与历史回测一致）；impact=冲击成本模型，滑点随成交量变化（大单更贵）" error={configIssues.slippage_model}>
+                        <SelectField value={config.slippage_model ?? 'fixed'} onValueChange={(value) => updateConfig('slippage_model', value as StrategyConfig['slippage_model'])} options={[{ value: 'fixed', label: '固定 slippage（bps）' }, { value: 'impact', label: '冲击成本模型（随量变化）' }]} ariaLabel="滑点模型" />
+                      </Field>
+                      {config.slippage_model === 'impact' ? (
+                        <Field label="冲击系数" hint="rate = 系数 × √(本笔量/当日成交量)；默认 1.0 时满额单≈√(参与度)" error={configIssues.impact_coefficient}>
+                          <NumberInput unit="k" min={0} step={0.1} value={config.impact_coefficient ?? 1.0} onChange={(value) => updateConfig('impact_coefficient', Number(value))} />
+                        </Field>
+                      ) : (
+                        <Field label="滑点" error={configIssues.slippage_bps}><NumberInput unit="bps" min={0} step={1} precision={0} value={config.slippage_bps} onChange={(value) => updateConfig('slippage_bps', Number(value))} /></Field>
+                      )}
                       <Field label="成交量参与上限" error={configIssues.volume_participation}><NumberInput unit="%" min={0} max={100} step={1} value={Number((config.volume_participation * 100).toFixed(0))} onChange={(value) => updateConfig('volume_participation', Number(value) / 100)} /></Field>
                     </FormGrid>
                   </div>

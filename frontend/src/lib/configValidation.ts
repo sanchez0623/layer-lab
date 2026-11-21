@@ -29,6 +29,8 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   force_exit_holding_days: '最大持仓天数',
   volume_participation: '成交量参与上限',
   slippage_bps: '滑点',
+  slippage_model: '滑点模型',
+  impact_coefficient: '冲击系数',
   etf_symbol: 'ETF 代码',
   etf_position_pct: 'ETF 仓位',
   etf_hard_stop_pct: 'ETF 硬止损',
@@ -120,6 +122,16 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   }
   if (!(isNum(config.slippage_bps) && config.slippage_bps >= 0)) {
     issue('slippage_bps', '滑点不能为负');
+  }
+  // 滑点模型：fixed（固定 bps）/ impact（平方根冲击成本）二选一。
+  const slipModel = config.slippage_model;
+  if (slipModel !== undefined && !['fixed', 'impact'].includes(slipModel)) {
+    issue('slippage_model', '须为 fixed / impact 之一');
+  }
+  // 冲击系数：impact 模式下的 k，不能为负（fixed 模式忽略，但填了负数仍提示）。
+  const impactK = config.impact_coefficient;
+  if (impactK !== undefined && !(isNum(impactK) && impactK >= 0)) {
+    issue('impact_coefficient', '冲击系数不能为负');
   }
 
   // ---- 指数 beta 腿（ETF）：仅在开启时校验，和表单一并展示 --------------------
