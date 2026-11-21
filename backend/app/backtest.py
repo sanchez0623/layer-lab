@@ -52,22 +52,26 @@ def repo_rate_for_date(date_str: str, config: StrategyConfig) -> float:
 
 
 def apply_repo_income(account: BrokerAccount, config: StrategyConfig, date_str: str,
-                      calendar_days: int = 1) -> tuple[float, float]:
-    """闲置资金逆回购：每个交易日盘后结算，返回 ``(当日收益, 计提前闲置资金)``。
+                      calendar_days: int = 1, notional: float | None = None) -> tuple[float, float]:
+    """闲置资金逆回购：每个交易日盘后结算，返回 ``(净收益, 计提前闲置资金)``。
 
     闲置资金 ``idle = account.equity - account.market_value``（= 未被持仓占用的现金，
     含 ETF beta 腿未占用部分——market_value 已含 beta 市值）。仅当
     ``idle_cash_repo_enabled`` 且 ``idle > 0`` 时计提。
 
-    **按自然日计息**（贴合真实国债逆回购）：``income = idle × rate × calendar_days / 365``。
+    **按自然日计息**（贴合真实国债逆回购）：``利息 = notional × rate × calendar_days / 365``。
     ``calendar_days`` 是本次计提覆盖的自然日数 = 本次交易日 − 上一个交易日（首日为 1）。
     周四做逆回购、下个交易日是周五 → 覆盖 1 天；周五做、下个交易日是周一 → 覆盖 3 天
     （把周末算进去）；节假日前最后一个交易日 → 覆盖整个假期。这样资金在非交易日也
     持续计息，与真实机制一致。
 
-    返回 ``(0.0, 0.0)`` 表示当日未计提（功能关闭 / 无闲置资金）。调用方把 income /
-    idle / rate 写进 equity_curve 点（``repo_income`` / ``repo_rate`` / ``repo_idle``），
-    供明细弹窗；``repo_idle`` 取**计提前**的闲置资金（income 尚未进 cash）。
+    **手续费**：真实约成交金额的 0.001%（10 万收 1 元、30 元封顶），从利息里扣除，
+    ``净收益 = 利息 − 手续费``。``notional`` 是计息本金（首次交收日的闲置资金），
+    缺省用当前 ``idle``。
+
+    返回 ``(0.0, 0.0)`` 表示当日未计提（功能关闭 / 净收益 ≤ 0 / 无闲置资金）。调用方把
+    income / idle / rate 写进 equity_curve 点（``repo_income`` / ``repo_rate`` /
+    ``repo_idle``），供明细弹窗；``repo_idle`` 取**计提前**的闲置资金。
     """
     if not bool(getattr(config, "idle_cash_repo_enabled", False)):
         return 0.0, 0.0
@@ -76,7 +80,13 @@ def apply_repo_income(account: BrokerAccount, config: StrategyConfig, date_str: 
         return 0.0, 0.0
     days = max(1, int(calendar_days))
     rate = repo_rate_for_date(date_str, config)
-    income = money(idle * rate * days / 365.0)
+    principal = float(notional) if notional is not None else idle
+    gross = money(idle * rate * days / 365.0)
+    if gross <= 0:
+        return 0.0, 0.0
+    # 手续费：成交金额 × 0.001%，1 元起、30 元封顶（真实规则）。
+    fee = min(max(principal * 0.00001, 1.0), 30.0)
+    income = money(gross - fee)
     if income <= 0:
         return 0.0, 0.0
     account.cash = money(account.cash + income)
@@ -1746,9 +1756,6 @@ class FunnelRotationBacktest:
             self._current_symbol = current_symbol
             self._manage_beta(date_str)
             # 闲置资金逆回购：盘后结算，收益进现金（自然流入每月盈亏 / 总收益）。
-            # 按自然日计息：本次覆盖的自然日数 = 本次交易日 − 上一个交易日（首日 1 天），
-            # 周末/节假日被自然算进（周五→周一 3 天，节假日前→后跨整个假期）。
-            # 闲置资金逆回购：盘后结算，收益进现金（自然流入每月盈亏 / 总收益）。
             # 按资金实际占用自然日计息（贴合真实国债逆回购）：T 日收盘下单 1 天期，
             # 首次交收日 = T 的下一个交易日（含），到期交收日 = 再下一个交易日（不含），
             # 占款天数 = 到期交收日 − 首次交收日。周四下单 → 首次交收周五、到期下周一，
@@ -1756,6 +1763,7 @@ class FunnelRotationBacktest:
             _ti = bisect_right(self.timeline, date_str)
             _t1 = self.timeline[_ti] if _ti < len(self.timeline) else None       # 首次交收日
             _t2 = self.timeline[_ti + 1] if _ti + 1 < len(self.timeline) else None  # 到期交收日
+            repo_calendar_days = 1
             if _t1 and _t2:
                 try:
                     repo_calendar_days = max(1, (
@@ -1763,11 +1771,10 @@ class FunnelRotationBacktest:
                     ).days)
                 except ValueError:
                     repo_calendar_days = 1
-            else:
-                # 区间末端没有下两个交易日可比（如最后一天），退回 1 天。
-                repo_calendar_days = 1
+            repo_idle = float(self.account.equity) - float(self.account.market_value)  # 计提前闲置
             repo_income, repo_idle = apply_repo_income(
-                self.account, self.config, date_str, calendar_days=repo_calendar_days)
+                self.account, self.config, date_str, calendar_days=repo_calendar_days,
+                notional=repo_idle)
             repo_rate = repo_rate_for_date(date_str, self.config) if repo_income else 0.0
             # 净值曲线点
             held = current_symbol if current_symbol else None
