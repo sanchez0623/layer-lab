@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.backtest import cashflow_adjusted_curve, cashflow_adjusted_series, performance_metrics, underwater_stats
 
 
@@ -87,3 +89,81 @@ def test_longest_underwater_days_never_exceeds_raw_with_withdrawals():
     adjusted, _ = cashflow_adjusted_series(curve, withdrawals)
     assert adjusted != [float(item["equity"]) for item in curve]
     assert cashflow_adjusted_curve(curve, adjusted)[-1]["date"] == "2025-01-09"
+
+
+# --- 回撤深度分桶（drawdown_depth_distribution）-------------------------------
+
+BUCKET_KEYS = ["lte_2pct", "2_to_5pct", "5_to_10pct", "gt_10pct"]
+
+
+def _dist(curve: list[dict]) -> dict:
+    return underwater_stats(curve)["drawdown_depth_distribution"]
+
+
+def test_depth_distribution_empty_curve_returns_zeroed_skeleton():
+    """空曲线：四个分桶都在、天数与比例全 0，不抛错。"""
+    dist = underwater_stats([])["drawdown_depth_distribution"]
+    assert list(dist.keys()) == BUCKET_KEYS
+    for key in BUCKET_KEYS:
+        assert dist[key]["days"] == 0
+        assert dist[key]["pct_of_underwater"] == 0.0
+        assert dist[key]["pct_of_trading"] == 0.0
+
+
+def test_depth_distribution_buckets_and_ratios():
+    """浅水下落 ≤2% 档、深水下落 >10% 档，days 与两个比例口径自洽。
+
+    曲线：首日 1M 为峰值 → 全程再没回到 1M。各天回撤深度刻意避开 2%/5%/10% 的
+    浮点边界（如 0.98M 的深度是 0.020000000000000018，会被归到 2–5% 档）：
+      - 第2/3天 0.999M / 0.99M → 回撤 0.1% / 1% → ≤2% 档；
+      - 第4天 0.96M → 回撤 4% → 2–5% 档；
+      - 第5天 0.92M → 回撤 8% → 5–10% 档；
+      - 第6天 0.85M → 回撤 15% → >10% 档。
+    """
+    curve = _curve([1_000_000.0, 999_000.0, 990_000.0, 960_000.0, 920_000.0, 850_000.0])
+    dist = _dist(curve)
+
+    assert [dist[k]["days"] for k in BUCKET_KEYS] == [2, 1, 1, 1]
+    # 深度天数合计 = 水下天数（首日是峰值，不算水下）。
+    assert sum(dist[k]["days"] for k in BUCKET_KEYS) == 5
+    assert underwater_stats(curve)["underwater_days"] == 5
+    # pct_of_trading 合计 ≈ 水下占比（分桶逐日除后求和，与一次性除有浮点末位差）。
+    assert sum(dist[k]["pct_of_trading"] for k in BUCKET_KEYS) == \
+        pytest.approx(underwater_stats(curve)["underwater_ratio"])
+    # pct_of_underwater 合计 ≈ 1（所有水下日都被归到某一档）。
+    assert sum(dist[k]["pct_of_underwater"] for k in BUCKET_KEYS) == pytest.approx(1.0)
+
+
+def test_depth_distribution_boundary_inclusive_upper():
+    """分桶上界是闭区间（depth <= upper）。深度正好 5% 归 2–5% 档、正好 10% 归 5–10% 档。
+
+    用能被整除的值规避浮点误差：0.95M/1M=5%、0.90M/1M=10%。
+    """
+    curve = _curve([1_000_000.0, 950_000.0, 900_000.0])
+    dist = _dist(curve)
+    # 第2天深度 5% → 2_to_5pct；第3天深度 10% → 5_to_10pct。
+    assert dist["2_to_5pct"]["days"] == 1
+    assert dist["5_to_10pct"]["days"] == 1
+    assert dist["gt_10pct"]["days"] == 0
+
+
+def test_depth_distribution_all_time_high_day_not_counted():
+    """全程创新高（无水下）：所有分桶天数 0，比例 0，不抛错。"""
+    curve = _curve([1_000_000.0, 1_010_000.0, 1_020_000.0, 1_015_000.0])
+    # 第4天 1.015M < 峰值 1.02M → 1 天浅水下。
+    dist = _dist(curve)
+    assert sum(dist[k]["days"] for k in BUCKET_KEYS) == 1
+    assert dist["lte_2pct"]["days"] == 1  # 回撤 0.49% → ≤2% 档
+
+    monotic = _curve([1_000_000.0, 1_010_000.0, 1_020_000.0])
+    dist_mono = _dist(monotic)
+    assert sum(dist_mono[k]["days"] for k in BUCKET_KEYS) == 0
+
+
+def test_depth_distribution_present_in_full_metrics():
+    """顶层 metrics['underwater'] 与 cashflow_adjusted['underwater'] 都带该字段且一致。"""
+    curve = _curve([1_000_000.0, 1_050_000.0, 980_000.0, 1_010_000.0])
+    metrics = _metrics(curve, withdrawals=None)
+    assert "drawdown_depth_distribution" in metrics["underwater"]
+    assert metrics["underwater"]["drawdown_depth_distribution"] == \
+        metrics["cashflow_adjusted"]["underwater"]["drawdown_depth_distribution"]

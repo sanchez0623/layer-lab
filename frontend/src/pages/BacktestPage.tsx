@@ -32,7 +32,7 @@ import { defaultFeeConfig, feeBreakdownTitle, feeConfigToStrategyPatch, strategy
 import { EMPTY_TRADE_FILTERS, PURPOSE_FILTER_OPTIONS, SIDE_FILTER_OPTIONS, matchesTradeFilters, tradeFilterActive } from '../lib/recordFilters';
 import type { TradeFilters } from '../lib/recordFilters';
 import { validateStrategyConfig, describeConfigIssue } from '../lib/configValidation';
-import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, RepoDaily, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
+import type { BacktestConfigDraft, BacktestJobView, BacktestSummary, DepthBucket, FeeConfig, MonthlyPnl, Order, Paginated, RecordsPage, RepoDaily, Report, ReportConfig, Round, RotationTrailItem, RotationTrailPage, RotationTrailSummary, ScreenerConfig, StrategyConfig, Trade, Withdrawal } from '../types';
 
 const fallbackConfig: StrategyConfig = {
   enable_t: true,
@@ -1315,6 +1315,18 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                     tiles.push({ label: '水下占比', value: percent(u.underwater_ratio), note: `${integer(u.underwater_days)} / ${integer(report.equity_curve.length)} 交易日` });
                     tiles.push({ label: '当前状态', value: u.currently_underwater ? `水下第 ${integer(u.current_drawdown_days)} 日` : '处于峰值上方', tone: u.currently_underwater ? 'text-success' : 'text-foreground' });
                   }
+                  const dd = u?.drawdown_depth_distribution ?? null;
+                  type DepthKey = 'lte_2pct' | '2_to_5pct' | '5_to_10pct' | 'gt_10pct';
+                  // 四档按浅→深排列；某档 0 天仍显示（让人看到「没有深度回撤」也是信息）。
+                  const depthRows: { key: DepthKey; label: string; tone: string; bar: string; bucket: DepthBucket }[] = dd
+                    ? ([
+                        { key: 'lte_2pct', label: '≤2%', tone: 'text-success', bar: 'bg-success' },
+                        { key: '2_to_5pct', label: '2–5%', tone: 'text-foreground', bar: 'bg-muted-foreground' },
+                        { key: '5_to_10pct', label: '5–10%', tone: 'text-warning', bar: 'bg-warning' },
+                        { key: 'gt_10pct', label: '>10%', tone: 'text-destructive', bar: 'bg-destructive' },
+                      ] as { key: DepthKey; label: string; tone: string; bar: string }[])
+                      .map((row) => ({ ...row, bucket: dd[row.key] }))
+                    : [];
                   return (
                     <Panel className="mb-3" title="稳健性与水下时长" description="剔除极端项后的收益成色 · 净值曲线在水下的时长分布" action={<ShieldCheck className="size-4" />}>
                       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -1326,6 +1338,35 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                           </div>
                         ))}
                       </div>
+                      {depthRows.length > 0 && (
+                        <div className="mt-3 rounded-lg border bg-card px-2.5 py-2">
+                          <div className="mb-1.5 flex items-center justify-between gap-2">
+                            <small className="text-[10px] text-muted-foreground">水下深度分布 · 水下日按回撤深度拆分</small>
+                            <span className="text-[10px] text-muted-foreground">共 {integer(u!.underwater_days)} 个水下交易日</span>
+                          </div>
+                          <div className="space-y-1">
+                            {depthRows.map(({ key, label, tone, bar, bucket }) => {
+                              const days = bucket.days;
+                              // 条宽按「占全部交易日」比例，直观看到每档在整体里的分量。
+                              const widthPct = Math.max(days > 0 ? 1 : 0, bucket.pct_of_trading * 100);
+                              return (
+                                <div key={key} className="flex items-center gap-2">
+                                  <span className={cn('w-12 shrink-0 text-right font-mono text-[10px]', tone)}>{label}</span>
+                                  <div className="h-1.5 flex-1 overflow-hidden rounded bg-muted">
+                                    <div className={cn('h-full rounded', bar)} style={{ width: `${widthPct}%` }} />
+                                  </div>
+                                  <span className="w-24 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
+                                    {integer(days)} 天 · {percent(bucket.pct_of_underwater)}
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="mt-1.5 text-[10px] leading-4 text-muted-foreground">
+                            占比口径：条长=占全部交易日，右侧 %=占全部水下日。深档越少说明「水下」多为峰值附近浅晃，而非深度回撤。
+                          </div>
+                        </div>
+                      )}
                     </Panel>
                   );
                 })()}

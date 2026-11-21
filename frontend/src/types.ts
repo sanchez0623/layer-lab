@@ -427,6 +427,16 @@ export interface MonthlyPnl {
   repo_income?: number;
 }
 
+/** 回撤深度分桶：某深度区间的水下交易日数，及其占水下日 / 占全部交易日的比例。 */
+export interface DepthBucket {
+  /** 落在该深度区间的水下交易日数。 */
+  days: number;
+  /** 占全部水下交易日的比例（0–1，四档合计 ≈ 1）。 */
+  pct_of_underwater: number;
+  /** 占全部交易日的比例（0–1，四档合计 ≈ 水下占比 underwater_ratio）。 */
+  pct_of_trading: number;
+}
+
 export interface ReportMetrics {
   initial_cash: number;
   final_equity: number;
@@ -480,6 +490,17 @@ export interface ReportMetrics {
     underwater_ratio: number;
     currently_underwater: boolean;
     current_drawdown_days: number;
+    /**
+     * 回撤深度分布：把水下日按回撤深度（≤2% / 2–5% / 5–10% / >10%）拆开的天数与占比。
+     * 「水下占比高」可能只是长期在峰值附近浅晃，也可能是深度回撤——这组分布把两者区分开。
+     * 旧报告缺失时前端降级隐藏。
+     */
+    drawdown_depth_distribution?: {
+      lte_2pct: DepthBucket;
+      '2_to_5pct': DepthBucket;
+      '5_to_10pct': DepthBucket;
+      gt_10pct: DepthBucket;
+    } | null;
   } | null;
   /**
    * 现金流调整（TWR，时间加权收益率）口径的收益/风险指标。

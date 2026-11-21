@@ -316,6 +316,23 @@ def xirr_annualized(
     return (lo + hi) / 2
 
 
+# 回撤深度分桶上限（小数口径）：水下日按「1 - equity/peak」落进 ≤2% / 2–5% /
+# 5–10% / >10% 四档。低回撤策略「水下占比」高但多为浅水下，单看占比易误读为
+# 「长期深套」，这里把水下天数按深度拆开，供前端并列展示。
+DRAWDOWN_DEPTH_BUCKETS: tuple[tuple[str, float], ...] = (
+    ("lte_2pct", 0.02), ("2_to_5pct", 0.05), ("5_to_10pct", 0.10),
+)
+
+
+def _empty_depth_distribution() -> dict[str, dict[str, float]]:
+    """回撤深度分桶的空骨架（含 gt_10pct 兜底档）。"""
+    dist: dict[str, dict[str, float]] = {}
+    for key, _ in DRAWDOWN_DEPTH_BUCKETS:
+        dist[key] = {"days": 0, "pct_of_underwater": 0.0, "pct_of_trading": 0.0}
+    dist["gt_10pct"] = {"days": 0, "pct_of_underwater": 0.0, "pct_of_trading": 0.0}
+    return dist
+
+
 def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
     """净值曲线水下时长：从峰值回落到收复的全部区间统计。
 
@@ -323,7 +340,10 @@ def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
     - ``longest_underwater_calendar_days``：同一段水下区间跨越的日历天数；
     - ``longest_underwater_start`` / ``longest_underwater_end``：该区间起止日期；
     - ``underwater_days`` / ``underwater_ratio``：水下交易日数与占比；
-    - ``currently_underwater`` / ``current_drawdown_days``：当前是否仍处水下及已持续天数。
+    - ``currently_underwater`` / ``current_drawdown_days``：当前是否仍处水下及已持续天数；
+    - ``drawdown_depth_distribution``：水下日按回撤深度（≤2% / 2–5% / 5–10% / >10%）
+      的天数拆分，各档给出 ``days``、占水下日的比例 ``pct_of_underwater``、占全部
+      交易日的比例 ``pct_of_trading``——把「水下占比高」到底是浅晃还是深套讲清楚。
 
     逐日比对「此前峰值」（含当日），equity < 峰值即记为水下一天；空曲线返回全 0。
     """
@@ -333,12 +353,15 @@ def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
             "longest_underwater_start": None, "longest_underwater_end": None,
             "underwater_days": 0, "underwater_ratio": 0.0,
             "currently_underwater": False, "current_drawdown_days": 0,
+            "drawdown_depth_distribution": _empty_depth_distribution(),
         }
     peak = float(equity_curve[0]["equity"])
     longest = current = total = 0
     longest_start: str | None = None
     longest_end: str | None = None
     current_start: str | None = None
+    depth_days = {key: 0 for key, _ in DRAWDOWN_DEPTH_BUCKETS}
+    depth_days["gt_10pct"] = 0
     for item in equity_curve:
         equity = float(item["equity"])
         day = str(item.get("date") or "")
@@ -354,6 +377,16 @@ def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
             current_start = day
         current += 1
         total += 1
+        # 按当日回撤深度归档：depth = (peak - equity) / peak（peak>0，因 equity<peak）。
+        # 用减法后再相除，而非 1 - equity/peak——后者在边界值（如 0.95/0.90）上会因
+        # 浮点抵消误差产生 0.05000...044，把刚好 5%/10% 的深度错归到下一档。
+        depth = (peak - equity) / peak if peak > 0 else 0.0
+        for key, upper in DRAWDOWN_DEPTH_BUCKETS:
+            if depth <= upper:
+                depth_days[key] += 1
+                break
+        else:
+            depth_days["gt_10pct"] += 1
     if current > longest:
         longest, longest_start, longest_end = current, current_start, str(equity_curve[-1].get("date") or "")
     calendar = 0
@@ -364,15 +397,31 @@ def underwater_stats(equity_curve: list[dict[str, Any]]) -> dict[str, Any]:
             ).days)
         except ValueError:
             calendar = 0
+    n = len(equity_curve)
+    distribution: dict[str, dict[str, float]] = {}
+    for key, _ in DRAWDOWN_DEPTH_BUCKETS:
+        days = depth_days[key]
+        distribution[key] = {
+            "days": days,
+            "pct_of_underwater": days / total if total else 0.0,
+            "pct_of_trading": days / n if n else 0.0,
+        }
+    gt = depth_days["gt_10pct"]
+    distribution["gt_10pct"] = {
+        "days": gt,
+        "pct_of_underwater": gt / total if total else 0.0,
+        "pct_of_trading": gt / n if n else 0.0,
+    }
     return {
         "longest_underwater_days": longest,
         "longest_underwater_calendar_days": calendar,
         "longest_underwater_start": longest_start,
         "longest_underwater_end": longest_end,
         "underwater_days": total,
-        "underwater_ratio": total / len(equity_curve),
+        "underwater_ratio": total / n,
         "currently_underwater": current > 0,
         "current_drawdown_days": current,
+        "drawdown_depth_distribution": distribution,
     }
 
 
