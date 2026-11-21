@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import asdict
 from datetime import datetime
@@ -621,7 +622,16 @@ class BrokerAccount:
             if quantity < step:
                 order.message = "可成交数量不足一个申报单位"
                 continue
-            slippage_rate = self.config.slippage_bps / 10000.0
+            # 滑点率按模型分支（回测与模拟盘共用同一份成交逻辑，架构原则 1）：
+            #   fixed —— 固定 slippage_bps（旧行为，默认）；
+            #   impact —— 平方根冲击模型：rate = k * sqrt(本笔量 / bar.volume)。
+            # 用本笔实际 quantity（min(remaining, capacity) 之后，且扣掉可卖/资金不足缩量前）
+            # 计算参与率；bar.volume<=0 时参与率取 0 → 滑点为 0，避免除零。
+            if self.config.slippage_model == "impact":
+                participation = quantity / bar.volume if bar.volume > 0 else 0.0
+                slippage_rate = self.config.impact_coefficient * math.sqrt(participation)
+            else:
+                slippage_rate = self.config.slippage_bps / 10000.0
             execution = price(base * (1 + slippage_rate if order.side == "BUY" else 1 - slippage_rate))
             if not self._tradable(order.side, execution, bar.prev_close or previous_close, order.symbol):
                 continue

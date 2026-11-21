@@ -139,6 +139,13 @@ class StrategyConfig:
     transfer_fee_rate: float = 0.00001      # 万0.1，过户费，双边
     slippage_bps: float = 1.0
     volume_participation: float = 0.20
+    # 滑点模型（回测与模拟盘共用 broker 同一份成交逻辑，架构原则 1）：
+    #   fixed（默认，向后兼容）——固定 slippage_bps，买卖对称，旧行为不变。
+    #   impact——平方根冲击成本模型：单边滑点率 = impact_coefficient * sqrt(本笔量 / bar.volume)，
+    #     单量越大成交价越差（买卖对称：BUY 加价、SELL 减价），bar.volume<=0 时按 0 滑点兜底。
+    slippage_model: str = "fixed"
+    # 冲击系数 k（>=0）：impact 模式下 rate = k * sqrt(本笔量 / bar.volume)。0 = impact 模式无滑点。
+    impact_coefficient: float = 1.0
     # 仅用于合成标的（TEST/SYNTH001 等无板块代码）的涨跌幅回退口径；
     # 真实板块（科创板/创业板/沪深主板/B股）的涨跌幅一律取 trading_rules 的板块值，忽略本字段。
     limit_pct: float = 0.20
@@ -271,6 +278,11 @@ class StrategyConfig:
                 raise ValueError(f"{name} 必须是非负且小于 10% 的小数比例")
         if self.min_commission < 0 or self.slippage_bps < 0:
             raise ValueError("min_commission 与 slippage_bps 不能为负")
+        # 滑点模型：fixed/impact 二选一；impact 系数 k 非负。
+        if self.slippage_model not in ("fixed", "impact"):
+            raise ValueError("slippage_model 必须是 fixed/impact 之一")
+        if self.impact_coefficient < 0:
+            raise ValueError("impact_coefficient 不能为负")
         if not 0 < self.t_target_net_spread < 1:
             raise ValueError("t_target_net_spread 必须是大于0且小于1的小数（做T净利止盈阈值）")
         try:

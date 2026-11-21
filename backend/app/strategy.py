@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from bisect import bisect_left, bisect_right
 from datetime import datetime, time as dtime
+import math
 from statistics import mean
 
 from .broker import BrokerAccount
@@ -909,12 +910,18 @@ class LayeredTStrategy(Strategy):
         （毛目标价差 = 净目标 + 本成本率）。百分比近似，忽略 min_commission
         固定佣金（做T金额 10 万~40 万时占比 <0.005%）。
         """
+        # 滑点项按模型分支：fixed 用 2*slippage_bps（旧行为不变）；impact 用代表性
+        # 参与率 volume_participation 做单边滑点估算 one_way = k*sqrt(volume_participation)。
+        if self.config.slippage_model == "impact":
+            slippage = 2 * self.config.impact_coefficient * math.sqrt(self.config.volume_participation)
+        else:
+            slippage = 2 * self.config.slippage_bps / 10000
         return (
             2 * (
                 self.config.commission_rate + self.config.handling_fee_rate
                 + self.config.regulatory_fee_rate + self.config.transfer_fee_rate
             )
-            + self.config.stamp_tax_rate + 2 * self.config.slippage_bps / 10000
+            + self.config.stamp_tax_rate + slippage
         )
 
     def _t_eligible(self, history: list[Bar], bar: Bar, account: BrokerAccount,
