@@ -1554,7 +1554,6 @@ class FunnelRotationBacktest:
             for point in equity_curve if point.get("date")
         }
         total = len(self.timeline)
-        prev_repo_date: str | None = None  # 上一个交易日（供逆回购按自然日计息，覆盖周末/节假日）
         for date_str in self.timeline:
             session_index += 1
             if session_index <= start_after:
@@ -1749,16 +1748,24 @@ class FunnelRotationBacktest:
             # 闲置资金逆回购：盘后结算，收益进现金（自然流入每月盈亏 / 总收益）。
             # 按自然日计息：本次覆盖的自然日数 = 本次交易日 − 上一个交易日（首日 1 天），
             # 周末/节假日被自然算进（周五→周一 3 天，节假日前→后跨整个假期）。
-            if prev_repo_date is not None:
+            # 闲置资金逆回购：盘后结算，收益进现金（自然流入每月盈亏 / 总收益）。
+            # 按资金实际占用自然日计息（贴合真实国债逆回购）：T 日收盘下单 1 天期，
+            # 首次交收日 = T 的下一个交易日（含），到期交收日 = 再下一个交易日（不含），
+            # 占款天数 = 到期交收日 − 首次交收日。周四下单 → 首次交收周五、到期下周一，
+            # 占款 3 天（跨周末）；周五下单 → 首次交收/到期都在下周一，占款 1 天。
+            _ti = bisect_right(self.timeline, date_str)
+            _t1 = self.timeline[_ti] if _ti < len(self.timeline) else None       # 首次交收日
+            _t2 = self.timeline[_ti + 1] if _ti + 1 < len(self.timeline) else None  # 到期交收日
+            if _t1 and _t2:
                 try:
-                    repo_calendar_days = (
-                        datetime.fromisoformat(date_str) - datetime.fromisoformat(prev_repo_date)
-                    ).days
+                    repo_calendar_days = max(1, (
+                        datetime.fromisoformat(_t2) - datetime.fromisoformat(_t1)
+                    ).days)
                 except ValueError:
                     repo_calendar_days = 1
             else:
+                # 区间末端没有下两个交易日可比（如最后一天），退回 1 天。
                 repo_calendar_days = 1
-            repo_calendar_days = max(1, repo_calendar_days)
             repo_income, repo_idle = apply_repo_income(
                 self.account, self.config, date_str, calendar_days=repo_calendar_days)
             repo_rate = repo_rate_for_date(date_str, self.config) if repo_income else 0.0
@@ -1783,8 +1790,6 @@ class FunnelRotationBacktest:
                 "repo_rate": repo_rate,
                 "repo_idle": repo_idle,
             })
-            # 更新「上一个交易日」，供下一交易日的逆回购按自然日计息（覆盖周末/节假日）。
-            prev_repo_date = date_str
             # 供后续轮次闭合时查「轮次前一日」的 beta 市值基准（O(1)，不扫曲线）。
             self._beta_value_by_date[date_str] = beta_value
             if self.hooks.get("on_progress"):
