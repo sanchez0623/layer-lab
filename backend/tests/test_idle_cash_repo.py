@@ -109,6 +109,31 @@ def test_repo_rate_at_fixed_band_used_in_income():
     assert income == pytest.approx(365_000.0 * 0.010 / 365.0)  # = 10.0 元/日
 
 
+def test_repo_accrues_by_calendar_days_weekend():
+    """按自然日计息：周五收盘做逆回购、下个交易日是周一 → 覆盖 3 天（周末算息）。
+
+    min == max = 1.0%、cash = 365,000 → 单日 10 元；calendar_days=3 应得 30 元，
+    是单日的 3 倍（旧实现恒按 1 天，只会得 10 元）。
+    """
+    account = _account(enabled=True, cash=365_000.0, min_yield=0.010, max_yield=0.010)
+    income_fri, _ = apply_repo_income(account, account.config, "2026-03-06", calendar_days=1)
+    account.cash = 365_000.0
+    income_mon, _ = apply_repo_income(account, account.config, "2026-03-09", calendar_days=3)
+    assert income_fri == pytest.approx(10.0)
+    assert income_mon == pytest.approx(30.0)
+    assert income_mon == pytest.approx(income_fri * 3)
+
+
+def test_repo_calendar_days_minimum_one():
+    """calendar_days 被 max(1, ·) 兜底：传 0 或负数按 1 天计，不会出现 0/负收益。"""
+    account = _account(enabled=True, cash=365_000.0, min_yield=0.010, max_yield=0.010)
+    income, _ = apply_repo_income(account, account.config, "2026-03-02", calendar_days=0)
+    assert income == pytest.approx(10.0)
+    account.cash = 365_000.0
+    income_neg, _ = apply_repo_income(account, account.config, "2026-03-02", calendar_days=-5)
+    assert income_neg == pytest.approx(10.0)
+
+
 # ------------------------------------------------------- monthly / metrics --
 
 def test_monthly_breakdown_sums_repo_income():

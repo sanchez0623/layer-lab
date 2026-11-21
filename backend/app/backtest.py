@@ -51,14 +51,19 @@ def repo_rate_for_date(date_str: str, config: StrategyConfig) -> float:
     return random.Random(f"repo:{date_str}").uniform(low, high)
 
 
-def apply_repo_income(account: BrokerAccount, config: StrategyConfig, date_str: str) -> tuple[float, float]:
-    """闲置资金逆回购：每日盘后结算，返回 ``(当日收益, 计提前闲置资金)``。
+def apply_repo_income(account: BrokerAccount, config: StrategyConfig, date_str: str,
+                      calendar_days: int = 1) -> tuple[float, float]:
+    """闲置资金逆回购：每个交易日盘后结算，返回 ``(当日收益, 计提前闲置资金)``。
 
     闲置资金 ``idle = account.equity - account.market_value``（= 未被持仓占用的现金，
     含 ETF beta 腿未占用部分——market_value 已含 beta 市值）。仅当
-    ``idle_cash_repo_enabled`` 且 ``idle > 0`` 时计提：``income = idle × rate / 365``，
-    直接加进 ``account.cash``（盘后结算，次日可用于买入）。收益自然抬高权益，
-    流进「每月盈亏」与「总收益」，不单独从权益里扣减。
+    ``idle_cash_repo_enabled`` 且 ``idle > 0`` 时计提。
+
+    **按自然日计息**（贴合真实国债逆回购）：``income = idle × rate × calendar_days / 365``。
+    ``calendar_days`` 是本次计提覆盖的自然日数 = 本次交易日 − 上一个交易日（首日为 1）。
+    周四做逆回购、下个交易日是周五 → 覆盖 1 天；周五做、下个交易日是周一 → 覆盖 3 天
+    （把周末算进去）；节假日前最后一个交易日 → 覆盖整个假期。这样资金在非交易日也
+    持续计息，与真实机制一致。
 
     返回 ``(0.0, 0.0)`` 表示当日未计提（功能关闭 / 无闲置资金）。调用方把 income /
     idle / rate 写进 equity_curve 点（``repo_income`` / ``repo_rate`` / ``repo_idle``），
@@ -69,8 +74,9 @@ def apply_repo_income(account: BrokerAccount, config: StrategyConfig, date_str: 
     idle = money(float(account.equity) - float(account.market_value))
     if idle <= 0:
         return 0.0, 0.0
+    days = max(1, int(calendar_days))
     rate = repo_rate_for_date(date_str, config)
-    income = money(idle * rate / 365.0)
+    income = money(idle * rate * days / 365.0)
     if income <= 0:
         return 0.0, 0.0
     account.cash = money(account.cash + income)
@@ -1548,6 +1554,7 @@ class FunnelRotationBacktest:
             for point in equity_curve if point.get("date")
         }
         total = len(self.timeline)
+        prev_repo_date: str | None = None  # 上一个交易日（供逆回购按自然日计息，覆盖周末/节假日）
         for date_str in self.timeline:
             session_index += 1
             if session_index <= start_after:
@@ -1740,7 +1747,20 @@ class FunnelRotationBacktest:
             self._current_symbol = current_symbol
             self._manage_beta(date_str)
             # 闲置资金逆回购：盘后结算，收益进现金（自然流入每月盈亏 / 总收益）。
-            repo_income, repo_idle = apply_repo_income(self.account, self.config, date_str)
+            # 按自然日计息：本次覆盖的自然日数 = 本次交易日 − 上一个交易日（首日 1 天），
+            # 周末/节假日被自然算进（周五→周一 3 天，节假日前→后跨整个假期）。
+            if prev_repo_date is not None:
+                try:
+                    repo_calendar_days = (
+                        datetime.fromisoformat(date_str) - datetime.fromisoformat(prev_repo_date)
+                    ).days
+                except ValueError:
+                    repo_calendar_days = 1
+            else:
+                repo_calendar_days = 1
+            repo_calendar_days = max(1, repo_calendar_days)
+            repo_income, repo_idle = apply_repo_income(
+                self.account, self.config, date_str, calendar_days=repo_calendar_days)
             repo_rate = repo_rate_for_date(date_str, self.config) if repo_income else 0.0
             # 净值曲线点
             held = current_symbol if current_symbol else None
@@ -1763,6 +1783,8 @@ class FunnelRotationBacktest:
                 "repo_rate": repo_rate,
                 "repo_idle": repo_idle,
             })
+            # 更新「上一个交易日」，供下一交易日的逆回购按自然日计息（覆盖周末/节假日）。
+            prev_repo_date = date_str
             # 供后续轮次闭合时查「轮次前一日」的 beta 市值基准（O(1)，不扫曲线）。
             self._beta_value_by_date[date_str] = beta_value
             if self.hooks.get("on_progress"):
