@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Pencil, Play, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Square, Trash2, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Pencil, Play, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Square, Squirrel, Trash2, TrendingDown, WalletCards, Waves,
 } from 'lucide-react';
 import {
   Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -1331,9 +1331,9 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
 
                 <MetricGrid columns={6}>
                   <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`期末权益 ${money(metrics.final_equity)}`}{metrics.profit_withdrawn ? ` · 盈利出金 ${money(metrics.profit_withdrawn)}` : ''}</span>} />
-                  <Metric label="年化收益率（TWR 口径）" value={signedPercent(cf.annualized_return)} tone={cf.annualized_return >= 0 ? 'positive' : 'negative'} title={metrics.xirr_annualized != null ? `XIRR ${signedPercent(metrics.xirr_annualized)}：资金加权年化收益率（按每笔资金实际进出时点折算，反映真实资金的时间价值；与 TWR 时间加权口径互为补充）` : undefined} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}</span>} />
-                  <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" title="TWR 口径剔除提现台阶，只反映真实投资亏损的回撤；权益曲线图上的「回撤（含提现）」含提现造成的权益台阶，两者数值会不同（本报告：不含提现 16.75% / 含提现 23.50%）" sub={`Calmar ${number(cf.calmar_ratio)}`} />
-                  <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
+                  <Metric label="年化收益率（TWR 口径）" value={signedPercent(cf.annualized_return)} tone={cf.annualized_return >= 0 ? 'positive' : 'negative'} title={metrics.xirr_annualized != null ? `XIRR ${signedPercent(metrics.xirr_annualized)}：资金加权年化收益率（按每笔资金实际进出时点折算，反映真实资金的时间价值；与 TWR 时间加权口径互为补充）` : undefined} />
+                  <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" title="TWR 口径剔除提现台阶，只反映真实投资亏损的回撤；权益曲线图上的「回撤（含提现）」含提现造成的权益台阶，两者数值会不同（本报告：不含提现 16.75% / 含提现 23.50%）" sub="剔除提现台阶" />
+                  <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} title="TWR 口径夏普＝年化收益 / 年化波动率，剔除提现台阶；含提现口径夏普见「本轮风险诊断」。" />
                   {(() => {
                     // 三口径胜率并列：账户（pnl，含 ETF）/ 选股（stock_pnl，剔 ETF）/
                     // ETF（beta 腿自己的平仓回合）。分母各不相同，sub 里分别标注。
@@ -1355,6 +1355,33 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                   })()}
                   <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.repo_income_total ? ` · 逆回购 ${signedMoney(metrics.repo_income_total)}` : ''}</span>} />
                 </MetricGrid>
+
+                {/* 买入持有基准：单独成框，给出各基准区间收益与相对策略的超额 */}
+                {(metrics.buy_hold_benchmarks?.length || metrics.buy_hold_return != null) && (
+                  <div className="mb-3 rounded-xl border bg-card px-3.5 py-3">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                      <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-foreground"><BarChart3 className="size-3.5 text-muted-foreground" />买入持有基准</span>
+                      {(metrics.buy_hold_benchmarks?.length ? metrics.buy_hold_benchmarks : []).map((b) => {
+                        const excess = metrics.total_return - b.return;
+                        return (
+                          <span key={b.symbol} className="inline-flex items-baseline gap-1.5 text-[11px]">
+                            <span className="text-muted-foreground">{b.symbol === '组合' ? '双创' : b.label}</span>
+                            <b className={cn('font-mono', b.return >= 0 ? 'text-success' : 'text-destructive')}>{signedPercent(b.return)}</b>
+                            <span className="text-[10px] text-muted-foreground">超额 {signedPercent(excess)}</span>
+                          </span>
+                        );
+                      })}
+                      {!metrics.buy_hold_benchmarks?.length && metrics.buy_hold_return != null && (
+                        <span className="inline-flex items-baseline gap-1.5 text-[11px]">
+                          <span className="text-muted-foreground">基准</span>
+                          <b className={cn('font-mono', metrics.buy_hold_return >= 0 ? 'text-success' : 'text-destructive')}>{signedPercent(metrics.buy_hold_return)}</b>
+                          <span className="text-[10px] text-muted-foreground">超额 {signedPercent(metrics.total_return - metrics.buy_hold_return)}</span>
+                        </span>
+                      )}
+                      <span className="ml-auto text-[10px] text-muted-foreground">同期买入持有 · 正超额＝策略跑赢基准</span>
+                    </div>
+                  </div>
+                )}
 
                 <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px] xl:grid-rows-[auto_auto]">
                   <Panel className="xl:col-start-1 xl:row-start-1" title="权益与风险轨迹" description="账户权益、实际投入与回撤随时间的变化" action={<div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-primary" />账户权益</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-[#64748b]" />账户权益（含出金）</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-muted-foreground" />实际投入</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-success" />回撤</span></div>}>
@@ -1390,6 +1417,20 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                         ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: `${metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔` : '未提取'}${metrics.profit_withdrawn != null && metrics.profit_withdrawn > 0 ? ' · 盈利' : ''}`, tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
                         { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
                       ].map(({ icon: Icon, label, value, note, tone }) => (
+                        <div key={label} className="flex flex-1 flex-col justify-center rounded-lg border bg-card px-2.5 py-2">
+                          <div className="flex items-center gap-2">
+                            <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
+                            <div className="min-w-0 flex-1"><small className="block text-[10px] text-muted-foreground">{label}</small><strong className={cn('block font-mono text-[13px]', tone)}>{value}</strong></div>
+                          </div>
+                          {note && <div className="mt-1 whitespace-normal break-words text-right text-[10px] text-muted-foreground">{note}</div>}
+                        </div>
+                      ))}
+                      <div className="mt-1 flex items-center gap-2 pt-1 text-[10px] font-medium text-muted-foreground"><span className="h-px flex-1 bg-border" />风险调整<span className="h-px flex-1 bg-border" /></div>
+                      {([
+                        { icon: Gauge, label: 'Calmar', value: number(cf.calmar_ratio), note: '年化收益 / 最大回撤（TWR）' },
+                        { icon: Waves, label: '波动率', value: percent(cf.volatility), note: 'TWR 日收益年化' },
+                        ...(cfa?.sharpe_ratio != null ? [{ icon: Squirrel, label: '夏普（含提现口径）', value: number(metrics.sharpe_ratio), note: '对比顶部 TWR 口径' }] : []),
+                      ] as { icon: React.ComponentType<{ className?: string }>; label: string; value: string; note: string; tone?: string }[]).map(({ icon: Icon, label, value, note, tone }) => (
                         <div key={label} className="flex flex-1 flex-col justify-center rounded-lg border bg-card px-2.5 py-2">
                           <div className="flex items-center gap-2">
                             <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
