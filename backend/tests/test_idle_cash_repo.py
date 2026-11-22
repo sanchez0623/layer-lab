@@ -56,6 +56,15 @@ def _account(*, enabled: bool, cash: float = 1_000_000.0,
     return BrokerAccount(initial_cash=cash, config=config, name="repo-test")
 
 
+def _repo_fee(principal: float) -> float:
+    """镜像生产手续费规则（backtest.apply_repo_income）：成交额 0.001%，1 元起、30 元封顶。
+
+    断言的期望值必须扣掉这笔手续费——apply_repo_income 返回的是**净收益**
+    （毛利息 − 手续费），不是毛利息。手续费规则若变，改这里即可，不必逐个断言硬编码。
+    """
+    return min(max(principal * 0.00001, 1.0), 30.0)
+
+
 def test_repo_disabled_no_accrual():
     account = _account(enabled=False)
     before = account.cash
@@ -71,10 +80,12 @@ def test_repo_enabled_accrues_into_cash():
     assert income > 0
     assert idle == pytest.approx(before)  # 空仓：计提前 idle = equity = cash
     assert account.cash == pytest.approx(before + income)
-    # income = idle × rate / 365（money 口径四舍五入到分），rate 落在 [min, max]
+    # income = idle × rate / 365 − 手续费（money 口径四舍五入到分），rate 落在 [min, max]
     rate = repo_rate_for_date("2026-03-02", account.config)
     assert account.config.repo_yield_min <= rate <= account.config.repo_yield_max
-    assert income == pytest.approx(idle * rate / 365.0, rel=1e-3, abs=0.01)
+    assert income == pytest.approx(
+        idle * rate / 365.0 - _repo_fee(idle), rel=1e-3, abs=0.01
+    )
 
 
 def test_repo_rate_deterministic_per_date():
@@ -106,7 +117,8 @@ def test_repo_rate_at_fixed_band_used_in_income():
     account = _account(enabled=True, cash=365_000.0, min_yield=0.010, max_yield=0.010)
     income, idle = apply_repo_income(account, account.config, "2026-03-02")
     assert idle == pytest.approx(365_000.0)
-    assert income == pytest.approx(365_000.0 * 0.010 / 365.0)  # = 10.0 元/日
+    # 毛息 10 元/日，扣手续费后为净收益。
+    assert income == pytest.approx(365_000.0 * 0.010 / 365.0 - _repo_fee(365_000.0))
 
 
 def test_repo_accrues_by_calendar_days_weekend():
@@ -119,19 +131,22 @@ def test_repo_accrues_by_calendar_days_weekend():
     income_fri, _ = apply_repo_income(account, account.config, "2026-03-06", calendar_days=1)
     account.cash = 365_000.0
     income_mon, _ = apply_repo_income(account, account.config, "2026-03-09", calendar_days=3)
-    assert income_fri == pytest.approx(10.0)
-    assert income_mon == pytest.approx(30.0)
-    assert income_mon == pytest.approx(income_fri * 3)
+    # 净收益 = 毛息 − 手续费（两笔手续费相同，均为 _repo_fee(365_000)）。
+    fee = _repo_fee(365_000.0)
+    assert income_fri == pytest.approx(10.0 - fee)
+    assert income_mon == pytest.approx(30.0 - fee)
+    # 固定手续费下不再是严格 3 倍；两笔手续费抵消，差额 = 多 2 天毛息 = 20 元。
+    assert income_mon - income_fri == pytest.approx(20.0)
 
 
 def test_repo_calendar_days_minimum_one():
     """calendar_days 被 max(1, ·) 兜底：传 0 或负数按 1 天计，不会出现 0/负收益。"""
     account = _account(enabled=True, cash=365_000.0, min_yield=0.010, max_yield=0.010)
     income, _ = apply_repo_income(account, account.config, "2026-03-02", calendar_days=0)
-    assert income == pytest.approx(10.0)
+    assert income == pytest.approx(10.0 - _repo_fee(365_000.0))
     account.cash = 365_000.0
     income_neg, _ = apply_repo_income(account, account.config, "2026-03-02", calendar_days=-5)
-    assert income_neg == pytest.approx(10.0)
+    assert income_neg == pytest.approx(10.0 - _repo_fee(365_000.0))
 
 
 # ------------------------------------------------------- monthly / metrics --
@@ -293,8 +308,10 @@ def test_paper_daily_close_accrues_repo_once(api):
     resp = client.post(f"/api/paper/accounts/{account_id}/ticks", json=tick)
     assert resp.status_code == 200, resp.text
     after_day1 = resp.json()["cash"]
-    # 空仓 → idle = equity = 365_000，rate 固定 1% → 当日收益 10 元
-    assert after_day1 == pytest.approx(365_000.0 + 365_000.0 * 0.01 / 365.0)
+    # 空仓 → idle = equity = 365_000，rate 固定 1% → 毛息 10 元，扣手续费后为净收益
+    assert after_day1 == pytest.approx(
+        365_000.0 + 365_000.0 * 0.01 / 365.0 - _repo_fee(365_000.0)
+    )
 
     # 同一天再推一次日终（不同 ts）：不重复结算
     tick_late = {**tick, "timestamp": "2026-03-02T15:05:00"}
