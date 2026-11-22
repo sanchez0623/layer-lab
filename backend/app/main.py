@@ -498,6 +498,30 @@ def _ensure_extended_metrics(report: dict) -> dict:
     return report
 
 
+def _ensure_beta_win_rate(report: dict) -> dict:
+    """旧报告没有 ETF 交易回合胜率：读取时从已持久化的 ``data_info.beta.fills`` 重算。
+
+    新报告由 ``_beta_summary`` 在跑回测时算好 ``beta_win_rate``；这里只兜底存量报告——
+    它们落库时还没有该字段，但 ``beta.fills`` 里每笔卖出（含 ``realized_pnl``）早已持久化，
+    据此离线重算即可，无需重跑回测。已有值则不覆盖（setdefault）。缺 beta/fills 时跳过。
+    """
+    metrics = report.get("metrics")
+    if not isinstance(metrics, dict) or "beta_win_rate" in metrics:
+        return report
+    beta = (report.get("data_info") or {}).get("beta") or {}
+    fills = beta.get("fills") if isinstance(beta.get("fills"), list) else None
+    if not fills:
+        return report
+    sells = [item for item in fills if item.get("side") == "SELL"]
+    if not sells:
+        return report
+    wins = sum(1 for item in sells if float(item.get("realized_pnl") or 0.0) > 0)
+    metrics.setdefault("beta_sell_rounds", len(sells))
+    metrics.setdefault("beta_sell_wins", wins)
+    metrics.setdefault("beta_win_rate", wins / len(sells))
+    return report
+
+
 def _decompose_report_rounds(report: dict) -> list[dict]:
     """按需给轮次补齐盈亏分腿字段（个股腿 / ETF 腿 / 轮内提现）。
 
@@ -1946,7 +1970,9 @@ def create_app() -> FastAPI:
         # 旧报告离线补齐轮次盈亏分腿（幂等）；必须在 _slim_records 抽走 rounds 之前。
         _decompose_report_rounds(report)
         return _slim_records(
-            _slim_rotation_trail(_ensure_extended_metrics(_ensure_monthly(report)))
+            _slim_rotation_trail(
+                _ensure_beta_win_rate(_ensure_extended_metrics(_ensure_monthly(report)))
+            )
         )
 
     @application.get("/api/backtests/{backtest_id}/rotation-trail")

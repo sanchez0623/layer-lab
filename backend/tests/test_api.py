@@ -639,3 +639,46 @@ def test_auto_strategy_toggle_keeps_round_state(tmp_path, monkeypatch):
     persisted = storage.get_paper(account_id)
     assert persisted["strategy_state"]["last_add_price"] == 145.9046
     assert persisted["strategy_state"]["last_add_session"] == 241
+
+
+def test_ensure_beta_win_rate_backfills_from_persisted_fills():
+    """旧报告缺 beta_win_rate：从已持久化的 data_info.beta.fills 重算并挂进 metrics。
+
+    构造 3 笔 SELL（2 盈 1 亏）+ 1 笔 BUY → win_rate=2/3、sell_rounds=3、sell_wins=2。
+    已有 beta_win_rate 的新报告不被覆盖（setdefault）。
+    """
+    from app.main import _ensure_beta_win_rate
+
+    report = {
+        "metrics": {},
+        "data_info": {"beta": {"enabled": True, "fills": [
+            {"date": "2025-01-02", "side": "BUY", "realized_pnl": 0.0},
+            {"date": "2025-01-03", "side": "SELL", "realized_pnl": 200.0},
+            {"date": "2025-01-04", "side": "SELL", "realized_pnl": 100.0},
+            {"date": "2025-01-05", "side": "SELL", "realized_pnl": -50.0},
+        ]}},
+    }
+    out = _ensure_beta_win_rate(report)
+    assert out["metrics"]["beta_win_rate"] == pytest.approx(2 / 3)
+    assert out["metrics"]["beta_sell_rounds"] == 3
+    assert out["metrics"]["beta_sell_wins"] == 2
+
+
+def test_ensure_beta_win_rate_no_overwrite_and_skips_when_absent():
+    """已有 beta_win_rate 不覆盖；缺 beta/fills 或无 SELL 时跳过（保持原样）。"""
+    from app.main import _ensure_beta_win_rate
+
+    # 已有值：不覆盖
+    has = {"metrics": {"beta_win_rate": 0.9},
+           "data_info": {"beta": {"fills": [{"side": "SELL", "realized_pnl": -1.0}]}}}
+    assert _ensure_beta_win_rate(has)["metrics"]["beta_win_rate"] == 0.9
+
+    # 缺 beta / fills：原样返回
+    no_beta = {"metrics": {}, "data_info": {}}
+    assert _ensure_beta_win_rate(no_beta)["metrics"] == {}
+    empty_fills = {"metrics": {}, "data_info": {"beta": {"fills": []}}}
+    assert _ensure_beta_win_rate(empty_fills)["metrics"] == {}
+
+    # 只有 BUY、无 SELL：跳过（win_rate 无定义）
+    only_buy = {"metrics": {}, "data_info": {"beta": {"fills": [{"side": "BUY", "realized_pnl": 0.0}]}}}
+    assert _ensure_beta_win_rate(only_buy)["metrics"] == {}
