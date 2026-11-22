@@ -613,6 +613,15 @@ def performance_metrics(
     gross_profit = sum(item["pnl"] for item in wins)
     gross_loss = -sum(item["pnl"] for item in losses)
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    # 选股胜率：用轮次的「个股腿」盈亏（stock_pnl，已剔除 ETF beta 腿）判胜负，
+    # 与顶层 win_rate（用 pnl，含 ETF）并列。ETF beta 腿跨轮独立持有，其盯市盈亏会被
+    # 记进轮次 pnl，导致「选股选错但 ETF 顺手抬成胜」的误判——选股胜率把这条干扰剥掉。
+    # 旧报告轮次缺 stock_pnl 时降级为 None（前端隐藏），不参与分母。
+    stock_closed = [item for item in closed if item.get("stock_pnl") is not None]
+    stock_wins = [item for item in stock_closed if float(item["stock_pnl"]) > 0]
+    stock_win_rate = (
+        len(stock_wins) / len(stock_closed) if stock_closed else None
+    )
     exposure = mean(
         item["market_value"] / item["equity"] if item["equity"] else 0.0
         for item in equity_curve
@@ -656,6 +665,8 @@ def performance_metrics(
         "annualized_return": annualized, "max_drawdown": max_drawdown,
         "sharpe_ratio": sharpe, "volatility": volatility, "calmar_ratio": calmar,
         "win_rate": len(wins) / len(closed) if closed else 0.0,
+        # 选股胜率：剔 ETF 腿后的纯选股胜负（旧报告轮次缺 stock_pnl 时为 None，前端隐藏）。
+        "stock_win_rate": stock_win_rate,
         "profit_factor": profit_factor, "total_rounds": len(rounds),
         "closed_rounds": len(closed), "total_trades": len(trades),
         "total_fees": money(total_fees), "t_net_profit": money(t_net_profit),
@@ -1142,11 +1153,19 @@ class FunnelRotationBacktest:
         buys = [item for item in self._beta_fills if item["side"] == "BUY"]
         sells = [item for item in self._beta_fills if item["side"] == "SELL"]
         pnl = money(sum(item["realized_pnl"] for item in sells))
+        # ETF 交易回合胜率：ETF 腿自己的每一笔卖出（平仓）按已实现盈亏判胜负，
+        # 独立于个股轮次——回答「ETF 这条腿自己有多少比例的回合是赚的」。
+        # 与选股胜率（按轮次 stock_pnl）分母不同、口径不同，前端并列展示、各自标注。
+        sell_rounds = len(sells)
+        sell_wins = sum(1 for item in sells if float(item.get("realized_pnl") or 0.0) > 0)
+        win_rate = (sell_wins / sell_rounds) if sell_rounds else None
         return {
             "enabled": self.etf_enabled, "symbol": self.etf_symbol,
             "source": self._beta_source,
             "trade_count": len(self._beta_fills),
             "buy_count": len(buys), "sell_count": len(sells),
+            "sell_wins": sell_wins,
+            "win_rate": win_rate,
             "entry_date": buys[0]["date"] if buys else None,
             "last_exit_date": sells[-1]["date"] if sells else None,
             "exit_reason": self._beta_last_exit_reason,
@@ -1947,6 +1966,11 @@ class FunnelRotationBacktest:
         if beta["enabled"]:
             metrics["beta_pnl"] = beta["pnl"]
             metrics["beta_trade_count"] = beta["trade_count"]
+            # ETF 交易回合胜率（按 beta 腿自己的每笔平仓 realized_pnl 判胜负）。
+            # 与选股胜率（按轮次 stock_pnl）口径不同、分母不同，前端并列、各自标注。
+            metrics["beta_win_rate"] = beta.get("win_rate")
+            metrics["beta_sell_rounds"] = beta.get("sell_count")
+            metrics["beta_sell_wins"] = beta.get("sell_wins")
         data_info = {
             "mode": "funnel_rotation", "boards": list(self.screener_config.boards),
             "universe_codes": len(self.candidates), "codes_with_daily": self.codes_with_daily,

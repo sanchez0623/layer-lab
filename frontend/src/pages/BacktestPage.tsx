@@ -1250,7 +1250,25 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                   <Metric label="年化收益率（TWR 口径）" value={signedPercent(cf.annualized_return)} tone={cf.annualized_return >= 0 ? 'positive' : 'negative'} title={metrics.xirr_annualized != null ? `XIRR ${signedPercent(metrics.xirr_annualized)}：资金加权年化收益率（按每笔资金实际进出时点折算，反映真实资金的时间价值；与 TWR 时间加权口径互为补充）` : undefined} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}</span>} />
                   <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" title="TWR 口径剔除提现台阶，只反映真实投资亏损的回撤；权益曲线图上的「回撤（含提现）」含提现造成的权益台阶，两者数值会不同（本报告：不含提现 16.75% / 含提现 23.50%）" sub={`Calmar ${number(cf.calmar_ratio)}${cfUnderwaterDays ? ` · 最长水下 ${integer(cfUnderwaterDays)} 天` : ''} · 不含提现`} />
                   <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
-                  <Metric label="轮次胜率" value={percent(metrics.win_rate)} sub={`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`} />
+                  {(() => {
+                    // 三口径胜率并列：账户（pnl，含 ETF）/ 选股（stock_pnl，剔 ETF）/
+                    // ETF（beta 腿自己的平仓回合）。分母各不相同，sub 里分别标注。
+                    const parts: string[] = [`${metrics.closed_rounds} / ${metrics.total_rounds} 轮已结束`];
+                    if (metrics.stock_win_rate != null) {
+                      parts.push(`选股 ${percent(metrics.stock_win_rate)}`);
+                    }
+                    if (metrics.beta_win_rate != null) {
+                      parts.push(`ETF ${percent(metrics.beta_win_rate)}（${integer(metrics.beta_sell_wins ?? 0)}/${integer(metrics.beta_sell_rounds ?? 0)} 回合）`);
+                    }
+                    return (
+                      <Metric
+                        label="轮次胜率"
+                        value={percent(metrics.win_rate)}
+                        title="账户口径胜率（按轮次 pnl，含 ETF 腿盯市盈亏）。ETF beta 腿跨轮独立持有，其盈亏会记进轮次 pnl——故并列给出剔 ETF 的「选股胜率」与 ETF 腿自己的「交易回合胜率」，三者分母不同。"
+                        sub={<span className="whitespace-normal break-words">{parts.join(' · ')}</span>}
+                      />
+                    );
+                  })()}
                   <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.repo_income_total ? ` · 逆回购 ${signedMoney(metrics.repo_income_total)}` : ''}</span>} />
                 </MetricGrid>
 

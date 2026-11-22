@@ -448,6 +448,19 @@ export interface ReportMetrics {
   volatility: number;
   calmar_ratio: number;
   win_rate: number;
+  /**
+   * 选股胜率：用轮次「个股腿」盈亏（stock_pnl，已剔除 ETF beta 腿）判胜负。
+   * 顶层 win_rate 用 pnl（含 ETF），ETF 跨轮盯市盈亏会污染胜负判定——本字段剥掉该干扰。
+   * 旧报告轮次缺 stock_pnl 时为 null，前端降级隐藏。
+   */
+  stock_win_rate?: number | null;
+  /**
+   * ETF 交易回合胜率：ETF beta 腿自己的每一笔平仓（sell）按已实现盈亏判胜负的占比。
+   * 仅启用 ETF 的新报告有值；与选股胜率分母/口径不同（按 ETF 回合 vs 按个股轮次）。
+   */
+  beta_win_rate?: number | null;
+  beta_sell_rounds?: number | null;
+  beta_sell_wins?: number | null;
   profit_factor: number;
   total_rounds: number;
   closed_rounds: number;

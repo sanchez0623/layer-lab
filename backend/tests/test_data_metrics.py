@@ -100,3 +100,55 @@ def test_performance_metrics_drawdown_win_rate_profit_factor():
     assert metrics["t_net_profit"] == 2.34
     assert metrics["buy_hold_return"] == 0.08
     assert metrics["exposure"] == 0.5
+
+
+def test_performance_metrics_stock_win_rate_excludes_beta_leg():
+    """选股胜率用轮次 stock_pnl（剔 ETF 腿）判胜负，与顶层 win_rate（用 pnl，含 ETF）并列。
+
+    构造：两轮已闭合。账户口径下两轮 pnl 都 > 0（胜率 1.0），但其中一轮的盈利
+    其实来自 ETF 腿、个股腿 stock_pnl < 0——选股胜率应只算 1/2。
+    """
+    curve = [
+        {"date": "2025-01-01", "equity": 100.0, "market_value": 50.0},
+        {"date": "2025-01-02", "equity": 120.0, "market_value": 60.0},
+        {"date": "2025-01-03", "equity": 130.0, "market_value": 65.0},
+    ]
+    rounds = [
+        # 账户 pnl>0（胜），个股腿也 >0（选股胜）。
+        {"status": "CLOSED", "pnl": 100.0, "stock_pnl": 80.0},
+        # 账户 pnl>0（账户胜），但盈利全靠 ETF 腿、个股腿亏损 → 选股负。
+        {"status": "CLOSED", "pnl": 30.0, "stock_pnl": -20.0},
+    ]
+    metrics = performance_metrics(curve, 100, rounds, [], 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert metrics["win_rate"] == 1.0            # 账户口径：两轮 pnl 都 >0
+    assert metrics["stock_win_rate"] == 0.5      # 选股口径：只有 1 轮 stock_pnl>0
+
+
+def test_performance_metrics_stock_win_rate_none_when_legacy_rounds_lack_stock_pnl():
+    """旧报告轮次缺 stock_pnl：选股胜率降级为 None（前端隐藏），顶层 win_rate 不受影响。"""
+    curve = [
+        {"date": "2025-01-01", "equity": 100.0, "market_value": 50.0},
+        {"date": "2025-01-02", "equity": 120.0, "market_value": 60.0},
+    ]
+    rounds = [
+        {"status": "CLOSED", "pnl": 100.0},
+        {"status": "CLOSED", "pnl": -50.0},
+    ]
+    metrics = performance_metrics(curve, 100, rounds, [], 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert metrics["win_rate"] == 0.5
+    assert metrics["stock_win_rate"] is None
+
+
+def test_performance_metrics_stock_win_rate_ignores_open_rounds():
+    """未闭合轮次不进选股胜率分母（与顶层 win_rate 只算 CLOSED 一致）。"""
+    curve = [
+        {"date": "2025-01-01", "equity": 100.0, "market_value": 50.0},
+        {"date": "2025-01-02", "equity": 120.0, "market_value": 60.0},
+    ]
+    rounds = [
+        {"status": "CLOSED", "pnl": 100.0, "stock_pnl": 80.0},
+        {"status": "CLOSED", "pnl": -50.0, "stock_pnl": -60.0},
+        {"status": "OPEN", "pnl": 10.0, "stock_pnl": 999.0},  # 未闭合，应被忽略
+    ]
+    metrics = performance_metrics(curve, 100, rounds, [], 0.0, 0.0, 0.0, 0.0, 0.0)
+    assert metrics["stock_win_rate"] == 0.5  # 只看 2 个 CLOSED，1 胜 1 负

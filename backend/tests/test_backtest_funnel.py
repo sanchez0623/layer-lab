@@ -935,3 +935,44 @@ def test_transient_t1_reject_not_in_global_warnings(tmp_path, monkeypatch):
     # 非瞬时原因（如申量不足最小申报单位）仍进 warnings，避免掩盖真实规则问题
     engine._submit_beta_order("2025-08-22", "BUY", 50, "测试不合规申报")
     assert [w for w in engine.warnings if "ETF委托被拒" in w]
+
+
+def test_beta_summary_trade_round_win_rate(tmp_path, monkeypatch):
+    """ETF 交易回合胜率：按 beta 腿自己每笔 SELL 的 realized_pnl 判胜负。
+
+    构造 3 笔 SELL（2 盈 1 亏）→ win_rate = 2/3、sell_wins=2、sell_count=3。
+    独立于个股轮次（分母是 ETF 平仓回合数，不是轮次数）。
+    """
+    engine = _beta_engine(
+        tmp_path, monkeypatch,
+        config=StrategyConfig(etf_entry_ma_days=3, etf_exit_ma_days=3),
+        index_closes=[100.0, 101.0, 102.0],
+    )
+    engine._beta_fills = [
+        {"date": "2025-08-20", "side": "BUY", "quantity": 1000, "price": 3.0, "fee": 1.0, "realized_pnl": 0.0},
+        {"date": "2025-08-21", "side": "SELL", "quantity": 1000, "price": 3.2, "fee": 1.0, "realized_pnl": 200.0},
+        {"date": "2025-08-22", "side": "BUY", "quantity": 1000, "price": 3.0, "fee": 1.0, "realized_pnl": 0.0},
+        {"date": "2025-08-23", "side": "SELL", "quantity": 1000, "price": 3.1, "fee": 1.0, "realized_pnl": 100.0},
+        {"date": "2025-08-24", "side": "SELL", "quantity": 500, "price": 2.9, "fee": 1.0, "realized_pnl": -50.0},
+    ]
+    summary = engine._beta_summary()
+    assert summary["sell_count"] == 3
+    assert summary["sell_wins"] == 2
+    assert summary["win_rate"] == pytest.approx(2 / 3)
+    # BUY 不计入回合：4 笔里只有 3 笔 SELL 进分母。
+    assert summary["trade_count"] == 5
+
+
+def test_beta_summary_trade_round_win_rate_none_when_no_sells(tmp_path, monkeypatch):
+    """没有任何 SELL（从未平仓）时，ETF 回合胜率为 None（前端隐藏），不报错。"""
+    engine = _beta_engine(
+        tmp_path, monkeypatch,
+        config=StrategyConfig(etf_entry_ma_days=3, etf_exit_ma_days=3),
+        index_closes=[100.0, 101.0],
+    )
+    engine._beta_fills = [
+        {"date": "2025-08-20", "side": "BUY", "quantity": 1000, "price": 3.0, "fee": 1.0, "realized_pnl": 0.0},
+    ]
+    summary = engine._beta_summary()
+    assert summary["sell_count"] == 0
+    assert summary["win_rate"] is None
