@@ -708,8 +708,8 @@ export default function PaperPage() {
         toast.success('深跌幅当日做T已关闭。');
       } else {
         const pct = Number(deepDropInput);
-        if (!Number.isFinite(pct) || pct < 10 || pct > 20) {
-          setError('深跌幅阈值需为 10–20 之间的百分数（20cm 板极端恐慌线）。');
+        if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+          setError('深跌幅阈值需为大于 0 且不超过 100 的百分数（0 = 关闭）。');
           return;
         }
         const next = await api.updateAccountConfig(account.id, { t_deep_drop_pct: pct / 100 });
@@ -1355,7 +1355,7 @@ export default function PaperPage() {
                 </div>
                 {deepDropPct != null && (
                   <>
-                    <Field label="阈值（%）" hint="10–20，20cm 板极端恐慌线" className="w-40"><NumberInput unit="%" min={10} max={20} step={0.5} allowEmpty placeholder={number(deepDropPct * 100, 1)} value={deepDropInput} onChange={setDeepDropInput} disabled={savingDeepDrop} /></Field>
+                    <Field label="阈值（%）" hint="大于 0 且 ≤100，0 = 关闭" className="w-40"><NumberInput unit="%" min={0.5} max={100} step={0.5} allowEmpty placeholder={number(deepDropPct * 100, 1)} value={deepDropInput} onChange={setDeepDropInput} disabled={savingDeepDrop} /></Field>
                     <Button size="sm" className="h-8" onClick={() => void saveDeepDrop(true)} disabled={savingDeepDrop || deepDropInput === ''}>{savingDeepDrop ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingDeepDrop ? '正在保存' : '保存阈值'}</Button>
                   </>
                 )}
