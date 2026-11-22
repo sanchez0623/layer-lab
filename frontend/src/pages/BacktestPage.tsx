@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity, AlertTriangle, ArrowDownToLine, ArrowLeft, BarChart3, CalendarDays, ChevronDown, ChevronUp,
-  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Play, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Square, Trash2, TrendingDown, WalletCards,
+  CircleDollarSign, Clock3, FlaskConical, Gauge, Landmark, Layers3, Loader2, Pencil, Play, RefreshCw, RotateCcw, ShieldAlert, ShieldCheck, Square, Trash2, TrendingDown, WalletCards,
 } from 'lucide-react';
 import {
   Area, Bar, BarChart, CartesianGrid, Cell, ComposedChart, Line, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis,
@@ -261,6 +261,10 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
   const [reportListLoading, setReportListLoading] = useState(false);
   const [reportListVersion, setReportListVersion] = useState(0);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // 报告重命名：内联编辑态（编辑中标志 + 草稿值 + 提交中标志）。
+  const [renamingReport, setRenamingReport] = useState(false);
+  const [renameValue, setRenameValue] = useState('');
+  const [renaming, setRenaming] = useState(false);
   // 回测表单草稿：服务端持久化，改完自动保存，进入页面优先恢复（不再被默认值重置）。
   const [draftStatus, setDraftStatus] = useState<'idle' | 'saving' | 'saved' | 'invalid' | 'error'>('idle');
   const [draftError, setDraftError] = useState('');
@@ -615,6 +619,45 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
     setTrailData(null);
     setRecordData(null);
     setBacktestHash();
+  };
+
+  /** 进入报告重命名内联编辑态：草稿预填当前名称。 */
+  const startRename = () => {
+    if (!report) return;
+    setRenameValue(report.name || '');
+    setRenamingReport(true);
+  };
+
+  const cancelRename = () => {
+    setRenamingReport(false);
+    setRenameValue('');
+  };
+
+  /** 提交重命名：前端先校验非空，成功后同步详情态与列表并退出编辑态。 */
+  const submitRename = async () => {
+    if (!report) return;
+    const nextName = renameValue.trim();
+    if (!nextName) {
+      toast.error('报告名称不能为空。');
+      return;
+    }
+    setRenaming(true);
+    try {
+      const result = await api.renameBacktest(report.id, nextName);
+      // 同步当前详情（report.name 即标题展示），并刷新列表缓存里的摘要名。
+      setReport((current) => (current ? { ...current, name: result.name } : current));
+      setReportList((current) => current
+        ? { ...current, items: current.items.map((item) => (item.id === result.id ? { ...item, name: result.name } : item)) }
+        : current);
+      setRenamingReport(false);
+      setRenameValue('');
+      toast.success('报告已重命名。');
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : '重命名失败。';
+      toast.error(`重命名失败：${message}`);
+    } finally {
+      setRenaming(false);
+    }
   };
 
   // 浏览器前进/后退：reportId prop 变化时打开或关闭详情。打开走 loadReport（内部已同步 hash），
@@ -1244,7 +1287,40 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                 <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
                   <div>
                     <div className="mb-1 flex items-center gap-2 font-mono text-[10px] tracking-wide text-muted-foreground"><Badge tone="indigo">{statusLabel(report.status)}</Badge><span>REPORT / {report.id.slice(0, 8).toUpperCase()}</span></div>
-                    <h2 className="text-xl font-semibold tracking-tight">{report.name}</h2>
+                    {renamingReport ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          value={renameValue}
+                          onChange={(event) => setRenameValue(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') { event.preventDefault(); void submitRename(); }
+                            if (event.key === 'Escape') { event.preventDefault(); cancelRename(); }
+                          }}
+                          placeholder="报告名称"
+                          aria-label="报告名称"
+                          maxLength={200}
+                          className="h-8 w-64 text-base font-semibold"
+                          autoFocus
+                        />
+                        <Button variant="outline" size="sm" onClick={() => void submitRename()} disabled={renaming}>
+                          {renaming ? <Loader2 className="animate-spin" /> : null}{renaming ? '保存中' : '保存'}
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={cancelRename} disabled={renaming}>取消</Button>
+                      </div>
+                    ) : (
+                      <h2 className="group flex items-center gap-2 text-xl font-semibold tracking-tight">
+                        {report.name}
+                        <button
+                          type="button"
+                          onClick={startRename}
+                          title="重命名报告"
+                          aria-label="重命名报告"
+                          className="rounded p-1 text-muted-foreground opacity-60 transition hover:bg-accent hover:text-foreground hover:opacity-100"
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                      </h2>
+                    )}
                     <p className="mt-1 text-[12px] text-muted-foreground">生成于 {dateTime(report.created_at)} · 初始资金 {money(metrics.initial_cash, 0)}</p>
                   </div>
                   <div className="flex flex-wrap gap-2">

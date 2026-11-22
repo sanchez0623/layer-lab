@@ -636,7 +636,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.0.10",
+        version="3.0.11",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1965,6 +1965,20 @@ def create_app() -> FastAPI:
         if not storage.delete_backtest(backtest_id):
             raise HTTPException(status_code=404, detail="回测不存在")
         return {"deleted": True, "id": backtest_id}
+
+    @application.patch("/api/backtests/{backtest_id}")
+    def rename_backtest(backtest_id: str, body: dict):
+        """重命名回测报告：只改展示名称，不影响报告数据。返回 {id, name}。"""
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="报告名称不能为空。")
+        if len(name) > 200:
+            raise HTTPException(status_code=400, detail="报告名称过长（最多 200 字）。")
+        if storage.get_backtest(backtest_id) is None:
+            raise HTTPException(status_code=404, detail="回测不存在")
+        if not storage.rename_backtest(backtest_id, name):
+            raise HTTPException(status_code=404, detail="回测不存在")
+        return {"id": backtest_id, "name": name}
 
     @application.get("/api/backtests/{backtest_id}")
     def backtest(backtest_id: str):
