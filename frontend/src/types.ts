@@ -403,6 +403,8 @@ export interface EquityPoint {
   invested: number;
   drawdown: number;
   position_qty: number;
+  /** 含出金权益 = equity + 截至当日的累计提现（TWR 口径同源）。旧报告无此字段。 */
+  equity_incl_withdrawal?: number;
 }
 
 /** 回测报告「每月盈亏」：按自然月汇总的账户权益变动（后端 monthly_breakdown 口径）。 */

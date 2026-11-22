@@ -475,12 +475,16 @@ def cashflow_adjusted_curve(
 def cashflow_adjusted_metrics(
     equity_curve: list[dict[str, Any]], initial_cash: float,
     withdrawals: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[float]]:
     """TWR 口径的风险收益指标块：年化/波动/Sharpe/maxDD/Calmar/水下统计。
 
     与 ``performance_metrics`` 顶层字段（提现当亏损的「账户体验」口径）并列，
     供前端并列展示、让用户自行选择评估口径。旧报告可离线重算（用 equity_curve +
     withdrawals 即可），不需要重跑回测。
+
+    返回 ``(指标块, adjusted_equities)``：后者即「把已落袋提现加回」的逐日权益序列，
+    与 ``equity_curve`` 逐点对应，供调用方直接派生曲线字段（``equity_incl_withdrawal``），
+    免得多算一遍 ``cashflow_adjusted_series``。
     """
     adjusted, returns = cashflow_adjusted_series(equity_curve, withdrawals)
     nav_returns = returns[1:] if returns else []
@@ -521,7 +525,7 @@ def cashflow_adjusted_metrics(
         "max_drawdown": max_drawdown,
         "calmar_ratio": calmar,
         "underwater": underwater,
-    }
+    }, adjusted
 
 
 def exposure_breakdown(equity_curve: list[dict[str, Any]]) -> dict[str, float]:
@@ -637,7 +641,14 @@ def performance_metrics(
     # 现金流调整（TWR）口径：把提现视为外部现金流而非亏损，重建日收益/波动/Sharpe/
     # maxDD/Calmar/水下。与顶层字段（账户体验口径）并列输出，供前端并列展示。
     # 旧报告可离线重算（只需 equity_curve + withdrawals），不需重跑回测。
-    cashflow_adjusted = cashflow_adjusted_metrics(equity_curve, initial_cash, withdrawals)
+    cashflow_adjusted, adjusted_equities = cashflow_adjusted_metrics(
+        equity_curve, initial_cash, withdrawals,
+    )
+    # 逐点派生「含出金」权益：原始 equity 已扣掉提现已落袋的钱（提现日是负台阶），
+    # 这里把「截至当日的累计提现」加回，与 TWR 口径同源。复用上方同一次
+    # ``cashflow_adjusted_series`` 的结果，不再另写累加逻辑（铁律 1：口径收敛在共用逻辑）。
+    for item, equity_incl in zip(equity_curve, adjusted_equities):
+        item["equity_incl_withdrawal"] = equity_incl
     # 敞口拆分：总敞口含 ETF beta 仓；个股/ETF 分项 + 完全空仓占比，避免误读
     # 「exposure 23% = 个股只用 23%」。
     exposure_parts = exposure_breakdown(equity_curve)

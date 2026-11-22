@@ -1248,7 +1248,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                 <MetricGrid columns={6}>
                   <Metric label="总收益率" value={signedPercent(metrics.total_return)} tone={metrics.total_return >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`期末权益 ${money(metrics.final_equity)}`}{metrics.profit_withdrawn ? ` · 盈利出金 ${money(metrics.profit_withdrawn)}` : ''}</span>} />
                   <Metric label="年化收益率（TWR 口径）" value={signedPercent(cf.annualized_return)} tone={cf.annualized_return >= 0 ? 'positive' : 'negative'} title={metrics.xirr_annualized != null ? `XIRR ${signedPercent(metrics.xirr_annualized)}：资金加权年化收益率（按每笔资金实际进出时点折算，反映真实资金的时间价值；与 TWR 时间加权口径互为补充）` : undefined} sub={<span className="whitespace-normal break-words">{metrics.buy_hold_benchmarks?.length ? `买入持有: ${metrics.buy_hold_benchmarks.map((b) => `${b.symbol === '组合' ? '双创' : b.label} ${signedPercent(b.return)}`).join(' · ')}` : `买入持有 ${signedPercent(metrics.buy_hold_return)}`}</span>} />
-                  <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" title="TWR 口径剔除提现台阶，只反映真实投资亏损的回撤；权益曲线图上的「回撤（含提现）」含提现造成的权益台阶，两者数值会不同（本报告：不含提现 16.75% / 含提现 23.50%）" sub={`Calmar ${number(cf.calmar_ratio)}${cfUnderwaterDays ? ` · 最长水下 ${integer(cfUnderwaterDays)} 天` : ''} · 不含提现`} />
+                  <Metric label="最大回撤（TWR 口径）" value={percent(Math.abs(cf.max_drawdown))} tone="negative" title="TWR 口径剔除提现台阶，只反映真实投资亏损的回撤；权益曲线图上的「回撤（含提现）」含提现造成的权益台阶，两者数值会不同（本报告：不含提现 16.75% / 含提现 23.50%）" sub={`Calmar ${number(cf.calmar_ratio)}`} />
                   <Metric label="夏普比率（TWR 口径）" value={number(cf.sharpe_ratio)} sub={<span className="whitespace-normal break-words">{`波动率 ${percent(cf.volatility)}${cfa?.sharpe_ratio != null ? ` · 含提现口径 ${number(metrics.sharpe_ratio)}` : ''}`}</span>} />
                   {(() => {
                     // 三口径胜率并列：账户（pnl，含 ETF）/ 选股（stock_pnl，剔 ETF）/
@@ -1272,8 +1272,8 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                   <Metric label="净利润" value={signedMoney(metrics.net_profit)} tone={metrics.net_profit >= 0 ? 'positive' : 'negative'} sub={<span className="whitespace-normal break-words">{`${integer(metrics.total_trades)} 笔成交 · PF ${number(metrics.profit_factor)}`}{metrics.repo_income_total ? ` · 逆回购 ${signedMoney(metrics.repo_income_total)}` : ''}</span>} />
                 </MetricGrid>
 
-                <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px]">
-                  <Panel title="权益与风险轨迹" description="账户权益、实际投入与回撤随时间的变化" action={<div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-primary" />账户权益</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-muted-foreground" />实际投入</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-success" />回撤</span></div>}>
+                <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_300px] xl:grid-rows-[auto_auto]">
+                  <Panel className="xl:col-start-1 xl:row-start-1" title="权益与风险轨迹" description="账户权益、实际投入与回撤随时间的变化" action={<div className="flex items-center gap-2 text-[10px] text-muted-foreground"><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-primary" />账户权益</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-[#64748b]" />账户权益（含出金）</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-muted-foreground" />实际投入</span><span className="inline-flex items-center gap-1"><i className="size-1.5 rounded-full bg-success" />回撤</span></div>}>
                     <div className="h-[320px] w-full">
                       {report.equity_curve.length > 0 ? (
                         <ResponsiveContainer width="100%" height="100%">
@@ -1283,19 +1283,20 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                             <XAxis dataKey="date" tickFormatter={(value: string) => value.slice(5, 10)} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={48} dy={8} />
                             <YAxis yAxisId="money" tickFormatter={(value: number) => `${(value / 10000).toFixed(0)}万`} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} width={52} domain={['auto', 'auto']} />
                             <YAxis yAxisId="drawdown" orientation="right" tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`} tick={{ fill: '#9a9aa3', fontSize: 11 }} axisLine={false} tickLine={false} width={42} domain={['auto', 0]} />
-                            <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="rounded-lg border bg-popover p-3 text-xs shadow-md"><strong className="block text-foreground">{label}</strong>{[['账户权益', money(payload[0].payload.equity)], ['实际投入', money(payload[0].payload.invested)], ['可用现金', money(payload[0].payload.cash)], ['持仓市值', money(payload[0].payload.market_value)], ['回撤（含提现）', percent(payload[0].payload.drawdown)], ['持仓数量', integer(payload[0].payload.position_qty)]].map(([k, v]) => <div key={String(k)} className="mt-1 flex items-center justify-between gap-4"><span className="text-muted-foreground">{k}</span><b className="font-mono text-foreground">{v}</b></div>)}</div> : null} />
+                            <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="rounded-lg border bg-popover p-3 text-xs shadow-md"><strong className="block text-foreground">{label}</strong>{[['账户权益', money(payload[0].payload.equity)], ['账户权益（含出金）', money(payload[0].payload.equity_incl_withdrawal)], ['实际投入', money(payload[0].payload.invested)], ['可用现金', money(payload[0].payload.cash)], ['持仓市值', money(payload[0].payload.market_value)], ['回撤（不含提现）', percent(payload[0].payload.drawdown)], ['持仓数量', integer(payload[0].payload.position_qty)]].map(([k, v]) => <div key={String(k)} className="mt-1 flex items-center justify-between gap-4"><span className="text-muted-foreground">{k}</span><b className="font-mono text-foreground">{v}</b></div>)}</div> : null} />
                             <Area yAxisId="money" type="monotone" dataKey="equity" stroke="#5046d8" strokeWidth={2.2} fill="url(#equityFill)" activeDot={{ r: 4, fill: '#5046d8', stroke: '#fff', strokeWidth: 2 }} />
+                             <Line yAxisId="money" type="monotone" dataKey="equity_incl_withdrawal" stroke="#64748b" strokeWidth={1.6} strokeDasharray="6 4" dot={false} />
                             <Line yAxisId="money" type="monotone" dataKey="invested" stroke="#8b8b98" strokeWidth={1.5} dot={false} strokeDasharray="5 4" />
                             <Line yAxisId="drawdown" type="stepAfter" dataKey="drawdown" stroke="#138064" strokeWidth={1.4} dot={false} />
                           </ComposedChart>
                         </ResponsiveContainer>
                       ) : <EmptyState compact title="暂无权益曲线" description="报告未返回可绘制的时序数据。" />}
                     </div>
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>左轴：资金（万元） · 右轴：回撤（%，含提现口径）</span><span>期末 {report.equity_curve[report.equity_curve.length - 1]?.date || '—'}</span></div>
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>左轴：资金（万元） · 右轴：回撤（%，不含提现）</span><span>期末 {report.equity_curve[report.equity_curve.length - 1]?.date || '—'}</span></div>
                   </Panel>
 
-                  <Panel title="本轮风险诊断" description="从资金占用到尾部风险的横向检查" action={<ShieldAlert className="size-4" />}>
-                    <div className="grid gap-1.5">
+                  <Panel className="xl:col-start-2 xl:row-start-1 xl:row-span-2" contentClassName="flex-1 flex flex-col" title="本轮风险诊断" description="从资金占用到尾部风险的横向检查" action={<ShieldAlert className="size-4" />}>
+                    <div className="flex flex-1 flex-col gap-1.5">
                       {[
                         { icon: WalletCards, label: '最大资金投入', value: money(metrics.max_invested), note: '峰值占用' },
                         { icon: TrendingDown, label: '最大浮亏', value: money(metrics.max_float_loss), note: '未实现口径', tone: 'text-success' },
@@ -1305,7 +1306,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                         ...(metrics.total_withdrawn != null ? [{ icon: Landmark, label: '累计提现', value: money(metrics.total_withdrawn), note: `${metrics.withdrawn_count ? `${integer(metrics.withdrawn_count)} 笔` : '未提取'}${metrics.profit_withdrawn != null && metrics.profit_withdrawn > 0 ? ' · 盈利' : ''}`, tone: (metrics.total_withdrawn ?? 0) > 0 ? 'text-destructive' : undefined }] : []),
                         { icon: Activity, label: '平均资金敞口', value: percent(metrics.exposure), note: '权益占比' },
                       ].map(({ icon: Icon, label, value, note, tone }) => (
-                        <div key={label} className="rounded-lg border bg-card px-2.5 py-2">
+                        <div key={label} className="flex flex-1 flex-col justify-center rounded-lg border bg-card px-2.5 py-2">
                           <div className="flex items-center gap-2">
                             <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground"><Icon className="size-3.5" /></span>
                             <div className="min-w-0 flex-1"><small className="block text-[10px] text-muted-foreground">{label}</small><strong className={cn('block font-mono text-[13px]', tone)}>{value}</strong></div>
@@ -1316,7 +1317,6 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                     </div>
                     <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-muted/60 px-2.5 py-2 text-[10px] leading-4 text-muted-foreground"><Gauge className="mt-0.5 size-3 shrink-0" /><span>风险表现需结合数据粒度、成交假设与样本区间共同判断。</span></div>
                   </Panel>
-                </div>
 
                 {(() => {
                   const rb = metrics.robustness;
@@ -1346,7 +1346,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                       .map((row) => ({ ...row, bucket: dd[row.key] }))
                     : [];
                   return (
-                    <Panel className="mb-3" title="稳健性与水下时长" description="剔除极端项后的收益成色 · 净值曲线在水下的时长分布" action={<ShieldCheck className="size-4" />}>
+                    <Panel className="xl:col-start-1 xl:row-start-2" title="稳健性与水下时长" description="剔除极端项后的收益成色 · 净值曲线在水下的时长分布" action={<ShieldCheck className="size-4" />}>
                       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                         {tiles.map((tile) => (
                           <div key={tile.label} className="rounded-lg border bg-card px-2.5 py-2">
@@ -1388,6 +1388,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                     </Panel>
                   );
                 })()}
+                </div>
 
                 {monthly.length > 0 && (
                   <Panel className="mb-3" title="每月盈亏" description={`按自然月汇总账户权益变动（含未实现盈亏与手续费）· 共 ${monthly.length} 个月 · 红涨绿跌`} action={<CalendarDays className="size-4" />}>
