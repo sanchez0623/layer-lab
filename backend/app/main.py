@@ -483,7 +483,10 @@ def _ensure_extended_metrics(report: dict) -> dict:
     withdrawals = report.get("withdrawals") if isinstance(report.get("withdrawals"), list) else None
     rounds = report.get("rounds") if isinstance(report.get("rounds"), list) else []
     trades = report.get("trades") if isinstance(report.get("trades"), list) else []
-    if "xirr_annualized" not in metrics or "robustness" not in metrics or "underwater" not in metrics:
+    if (
+        "xirr_annualized" not in metrics or "robustness" not in metrics
+        or "underwater" not in metrics or "stock_win_rate" not in metrics
+    ):
         full = performance_metrics(
             [dict(point) for point in equity_curve], float(base), rounds, trades,
             float(metrics.get("total_fees") or 0.0), float(metrics.get("t_net_profit") or 0.0),
@@ -493,7 +496,8 @@ def _ensure_extended_metrics(report: dict) -> dict:
             withdrawn_count=int(metrics.get("withdrawn_count") or 0),
             withdrawals=withdrawals,
         )
-        for key in ("xirr_annualized", "robustness", "underwater"):
+        # stock_win_rate 依赖 rounds 已补好 stock_pnl（_decompose_report_rounds 先跑）。
+        for key in ("xirr_annualized", "robustness", "underwater", "stock_win_rate"):
             metrics.setdefault(key, full.get(key))
     return report
 

@@ -682,3 +682,36 @@ def test_ensure_beta_win_rate_no_overwrite_and_skips_when_absent():
     # 只有 BUY、无 SELL：跳过（win_rate 无定义）
     only_buy = {"metrics": {}, "data_info": {"beta": {"fills": [{"side": "BUY", "realized_pnl": 0.0}]}}}
     assert _ensure_beta_win_rate(only_buy)["metrics"] == {}
+
+
+def test_ensure_extended_metrics_backfills_stock_win_rate():
+    """旧报告 metrics 已有 xirr/robustness/underwater 但缺 stock_win_rate：读时仍要触发重算补上。
+
+    回归护栏——stock_win_rate 加进 _ensure_extended_metrics 的重算触发条件之前，
+    这类「三项齐全的旧报告」不会重算 performance_metrics，导致选股胜率一直缺失。
+    """
+    from app.main import _ensure_extended_metrics
+
+    # 两轮已闭合：账户口径两轮都胜（win_rate=1.0），选股口径只 1 轮胜（stock_win_rate=0.5）。
+    report = {
+        "metrics": {
+            "initial_cash": 100.0, "total_fees": 0.0, "t_net_profit": 0.0,
+            "max_invested": 0.0, "max_float_loss": 0.0, "buy_hold_return": 0.0,
+            "total_withdrawn": 0.0, "withdrawn_count": 0,
+            # 三项齐全 → 修复前不会触发重算
+            "xirr_annualized": 0.1, "robustness": {}, "underwater": {},
+        },
+        "equity_curve": [
+            {"date": "2025-01-01", "equity": 100.0, "market_value": 50.0},
+            {"date": "2025-01-02", "equity": 120.0, "market_value": 60.0},
+            {"date": "2025-01-03", "equity": 130.0, "market_value": 65.0},
+        ],
+        "rounds": [
+            {"status": "CLOSED", "pnl": 100.0, "stock_pnl": 80.0},
+            {"status": "CLOSED", "pnl": 30.0, "stock_pnl": -20.0},
+        ],
+        "trades": [], "withdrawals": [],
+    }
+    out = _ensure_extended_metrics(report)
+    assert out["metrics"]["stock_win_rate"] == pytest.approx(0.5)
+    # win_rate 是核心字段（真实报告本就带），本函数只兜底 4 个扩展键、不回填它。
