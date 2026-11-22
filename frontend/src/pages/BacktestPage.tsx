@@ -696,7 +696,6 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
     calmar_ratio: cfa?.calmar_ratio ?? metrics?.calmar_ratio ?? 0,
     volatility: cfa?.volatility ?? metrics?.volatility ?? 0,
   };
-  const cfUnderwaterDays = cfa?.underwater?.longest_underwater_days ?? metrics?.underwater?.longest_underwater_days;
   // ETF beta 腿摘要（新报告才有；旧报告 undefined）。
   const betaInfo = (report?.data_info?.beta as {
     enabled?: boolean; symbol?: string; trade_count?: number; pnl?: number;
@@ -1292,7 +1291,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                             <XAxis dataKey="date" tickFormatter={(value: string) => value.slice(5, 10)} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} minTickGap={48} dy={8} />
                             <YAxis yAxisId="money" tickFormatter={(value: number) => `${(value / 10000).toFixed(0)}万`} tick={{ fill: '#85858f', fontSize: 11 }} axisLine={false} tickLine={false} width={52} domain={['auto', 'auto']} />
                             <YAxis yAxisId="drawdown" orientation="right" tickFormatter={(value: number) => `${(value * 100).toFixed(0)}%`} tick={{ fill: '#9a9aa3', fontSize: 11 }} axisLine={false} tickLine={false} width={42} domain={['auto', 0]} />
-                            <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="rounded-lg border bg-popover p-3 text-xs shadow-md"><strong className="block text-foreground">{label}</strong>{[['账户权益', money(payload[0].payload.equity)], ['账户权益（含出金）', money(payload[0].payload.equity_incl_withdrawal)], ['实际投入', money(payload[0].payload.invested)], ['可用现金', money(payload[0].payload.cash)], ['持仓市值', money(payload[0].payload.market_value)], ['回撤（不含提现）', percent(payload[0].payload.drawdown)], ['持仓数量', integer(payload[0].payload.position_qty)]].map(([k, v]) => <div key={String(k)} className="mt-1 flex items-center justify-between gap-4"><span className="text-muted-foreground">{k}</span><b className="font-mono text-foreground">{v}</b></div>)}</div> : null} />
+                            <Tooltip content={({ active, payload, label }) => active && payload?.length ? <div className="rounded-lg border bg-popover p-3 text-xs shadow-md"><strong className="block text-foreground">{label}</strong>{[['账户权益', money(payload[0].payload.equity)], ['账户权益（含出金）', money(payload[0].payload.equity_incl_withdrawal)], ['实际投入', money(payload[0].payload.invested)], ['可用现金', money(payload[0].payload.cash)], ['持仓市值', money(payload[0].payload.market_value)], ['回撤（含提现）', percent(payload[0].payload.drawdown)], ['持仓数量', integer(payload[0].payload.position_qty)]].map(([k, v]) => <div key={String(k)} className="mt-1 flex items-center justify-between gap-4"><span className="text-muted-foreground">{k}</span><b className="font-mono text-foreground">{v}</b></div>)}</div> : null} />
                             <Area yAxisId="money" type="monotone" dataKey="equity" stroke="#5046d8" strokeWidth={2.2} fill="url(#equityFill)" activeDot={{ r: 4, fill: '#5046d8', stroke: '#fff', strokeWidth: 2 }} />
                              <Line yAxisId="money" type="monotone" dataKey="equity_incl_withdrawal" stroke="#64748b" strokeWidth={1.6} strokeDasharray="6 4" dot={false} />
                             <Line yAxisId="money" type="monotone" dataKey="invested" stroke="#8b8b98" strokeWidth={1.5} dot={false} strokeDasharray="5 4" />
@@ -1301,7 +1300,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                         </ResponsiveContainer>
                       ) : <EmptyState compact title="暂无权益曲线" description="报告未返回可绘制的时序数据。" />}
                     </div>
-                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>左轴：资金（万元） · 右轴：回撤（%，不含提现）</span><span>期末 {report.equity_curve[report.equity_curve.length - 1]?.date || '—'}</span></div>
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>左轴：资金（万元） · 右轴：回撤（%，含提现）</span><span>期末 {report.equity_curve[report.equity_curve.length - 1]?.date || '—'}</span></div>
                   </Panel>
 
                   <Panel className="xl:col-start-2 xl:row-start-1 xl:row-span-2" contentClassName="flex-1 flex flex-col" title="本轮风险诊断" description="从资金占用到尾部风险的横向检查" action={<ShieldAlert className="size-4" />}>
