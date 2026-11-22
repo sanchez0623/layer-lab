@@ -1044,17 +1044,21 @@ class LayeredTStrategy(Strategy):
             target = average_t_price * (1 + self.config.t_target_net_spread + self._t_roundtrip_cost())
             quantity = min(position.t_qty, position.permanent_sellable_qty)
             can_sell = quantity >= board_sell_threshold(bar.symbol)
-            # T+1 尾盘硬截止：做T资金最迟在 T+1 日 t_exit_cutoff（默认 14:50）无条件平掉。
-            # 仅隔夜仓触发（t_qty > today_t_buy_qty）：T0 当日新建仓 is_overnight=False 不强平，
-            # 可持有到 T1，兑现「资金 T0 或 T1 做完、T1 的 14:50 是截止点」。
+            # 尾盘硬截止：按 t_exit_cutoff_day 指定截止日（T+0 建仓当日 / T+1 次日，默认），
+            # 到 t_exit_cutoff（默认 14:50）仍未止盈则无条件平掉。T+1 口径下 T0 当日新建仓
+            # is_overnight=False 不强平，可持有到 T1，兑现「资金 T0 或 T1 做完」；
+            # T+0 口径则不看隔夜与否，当日到点必平（做T资金当日了结）。
             cutoff = datetime.strptime(self.config.t_exit_cutoff, "%H:%M").time()
+            cutoff_day = self.config.t_exit_cutoff_day
             is_overnight = position.t_qty > position.today_t_buy_qty
-            if current_time >= cutoff and is_overnight:
+            reached_cutoff = current_time >= cutoff and (cutoff_day == "T+0" or is_overnight)
+            if reached_cutoff:
                 if can_sell:
                     self.t_exit_submitted = True
                     return [OrderRequest(
                         symbol=bar.symbol, side="SELL", quantity=quantity, purpose="T",
-                        execution_mode="NEXT_BAR", reason="T+1尾盘截止平T",
+                        execution_mode="NEXT_BAR",
+                        reason="T日尾盘截止平T" if cutoff_day == "T+0" else "T+1尾盘截止平T",
                     )]
                 return []
             # 净利止盈：达到目标价即平T（T0 当天满足就当天做完，无需等到 T1）。

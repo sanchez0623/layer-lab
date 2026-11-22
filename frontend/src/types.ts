@@ -55,8 +55,10 @@ export interface StrategyConfig {
   t_target_spread?: number;
   /** 做T净利止盈阈值（小数，0.03 = 扣完成本后净赚 3% 平T）；可在模拟盘账户配置里改，下一根K线起生效 */
   t_target_net_spread?: number;
-  /** 做T的T+1日尾盘硬截止时间（HH:MM，默认 14:50），到点仍未止盈则无条件强平；T0 当日不强平 */
+  /** 做T的尾盘硬截止时间（HH:MM，默认 14:50），到点仍未止盈则无条件强平；截止日见 t_exit_cutoff_day */
   t_exit_cutoff?: string;
+  /** 做T硬截止的截止日：T+0 = 建仓当日到点即强平 / T+1 = 次日尾盘截止（默认，T0 当日不强平） */
+  t_exit_cutoff_day?: 'T+0' | 'T+1';
   /** 已废弃：做T金额现跟随当前加仓档 installment_amounts[sequence_index]（满仓后取最大档），本字段不再参与做T计算，仅为兼容后端 config 保留 */
   t_order_amount?: number;
   /** 超期降阈：持有 ≥ 该交易日数后，价格轨/账户轨止盈阈值降为 holding_tp_override；与 holding_tp_override 必须同时配置 */
@@ -403,6 +405,8 @@ export interface EquityPoint {
   invested: number;
   drawdown: number;
   position_qty: number;
+  /** 含出金权益 = equity + 截至当日的累计提现（TWR 口径同源）。旧报告无此字段。 */
+  equity_incl_withdrawal?: number;
 }
 
 /** 回测报告「每月盈亏」：按自然月汇总的账户权益变动（后端 monthly_breakdown 口径）。 */

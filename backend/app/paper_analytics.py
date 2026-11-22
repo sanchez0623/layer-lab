@@ -188,6 +188,7 @@ CLOSE_REASON_LABELS: dict[str, str] = {
     "超期强平": "超期强平",
     "事件熔断": "事件熔断",
     "T+1尾盘截止平T": "T+1 尾盘强平",
+    "T日尾盘截止平T": "T 日尾盘强平",
     "T净利止盈": "T 净利止盈",
     "整体止盈_先平T": "整体止盈",
     "整体止盈_永久仓": "整体止盈",
@@ -223,8 +224,8 @@ def close_reason_label(reason: str | None) -> str | None:
         return "Armed 量价背离（辅助清仓）"
     if "VWAP" in text:
         return "VWAP 账户回撤（辅助清仓）"
-    if "T+1" in text and ("强平" in text or "截止" in text):
-        return "T+1 尾盘强平"
+    if ("T+1" in text or "T日" in text) and ("强平" in text or "截止" in text):
+        return "T+1 尾盘强平" if "T+1" in text else "T 日尾盘强平"
     if "强平" in text:
         return "超期强平"
     if "止盈" in text:
@@ -674,8 +675,9 @@ def paper_strategy_switches(account: BrokerAccount) -> dict[str, Any]:
                 _fmt_pct(config.t_target_net_spread), _SWITCH_GROUP_T,
             ),
             _switch(
-                "t_exit_cutoff", "T+1 尾盘截止", t_on,
-                str(config.t_exit_cutoff), _SWITCH_GROUP_T, "T+1 尾盘强平",
+                "t_exit_cutoff", f"{config.t_exit_cutoff_day} 尾盘截止", t_on,
+                f"{config.t_exit_cutoff_day} {config.t_exit_cutoff}",
+                _SWITCH_GROUP_T, f"{config.t_exit_cutoff_day} 尾盘强平",
             ),
             _switch(
                 "t_deep_drop_pct", "深跌幅当日做 T",

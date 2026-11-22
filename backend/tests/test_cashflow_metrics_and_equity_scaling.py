@@ -149,3 +149,29 @@ def test_performance_metrics_exposes_exposure_breakdown() -> None:
     assert metrics["exposure_stock"] == pytest.approx((0.0 + 0.2 + 0.0) / 3, rel=1e-12)
     assert metrics["exposure_beta"] == pytest.approx((0.0 + 0.1 + 0.5) / 3, rel=1e-12)
     assert metrics["idle_ratio"] == pytest.approx(1 / 3, rel=1e-12)
+
+
+def test_performance_metrics_writes_equity_incl_withdrawal_per_point() -> None:
+    """含出金权益逐点落库：提现日前等于原始 equity，提现日及其后加回累计提现。
+
+    原始 equity 已扣掉提现已落袋的钱（负台阶），``equity_incl_withdrawal`` 把「截至当日的
+    累计提现」加回，与 TWR 口径同源——曲线字段复用同一次累计计算，不另写累加逻辑。
+    """
+    curve = _curve([1_000_000.0, 1_050_000.0, 970_000.0, 1_080_000.0, 1_100_000.0])
+    withdrawals = [{"date": curve[2]["date"], "amount": 80_000.0, "period_profit": 50_000.0}]
+    performance_metrics(
+        curve, 1_000_000.0, [], [], 0.0, 0.0, 0.0, 0.0, 0.0,
+        withdrawals=withdrawals,
+    )
+    for index in range(2):  # 提现日之前：累计提现为 0，含出金 = 原始权益。
+        assert curve[index]["equity_incl_withdrawal"] == pytest.approx(curve[index]["equity"], rel=1e-12)
+    for index in range(2, 5):  # 提现日及其后：加回 8 万。
+        assert curve[index]["equity_incl_withdrawal"] == pytest.approx(curve[index]["equity"] + 80_000.0, rel=1e-12)
+
+
+def test_no_withdrawal_keeps_equity_incl_withdrawal_identical() -> None:
+    """从未出金时派生字段与原始权益逐点相等（不引入无提现报告的额外台阶）。"""
+    curve = _curve([1_000_000.0, 1_010_000.0, 1_005_000.0])
+    performance_metrics(curve, 1_000_000.0, [], [], 0.0, 0.0, 0.0, 0.0, 0.0, withdrawals=[])
+    for point in curve:
+        assert point["equity_incl_withdrawal"] == pytest.approx(point["equity"], rel=1e-12)

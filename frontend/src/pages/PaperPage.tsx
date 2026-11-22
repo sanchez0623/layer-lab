@@ -611,13 +611,15 @@ export default function PaperPage() {
     }
   };
 
-  // 做T净利止盈 + T+1截止时间：改完立刻 PATCH 账户 config，下一根K线起的新操作即用新值。
+  // 做T净利止盈 + 尾盘硬截止（截止日 T+0/T+1 + 截止时刻）：改完立刻 PATCH 账户 config，下一根K线起的新操作即用新值。
   const [tSpreadInput, setTSpreadInput] = useState('');
   const [savingTSpread, setSavingTSpread] = useState(false);
   const tNetSpread = account?.config?.t_target_net_spread ?? defaultConfig.t_target_net_spread ?? 0.03;
   const [tCutoffInput, setTCutoffInput] = useState('');
   const [savingTCutoff, setSavingTCutoff] = useState(false);
   const tCutoff = account?.config?.t_exit_cutoff ?? defaultConfig.t_exit_cutoff ?? '14:50';
+  const [tCutoffDayInput, setTCutoffDayInput] = useState('');
+  const tCutoffDay = account?.config?.t_exit_cutoff_day ?? defaultConfig.t_exit_cutoff_day ?? 'T+1';
   // 超期降阈：持有 ≥N 交易日后止盈降到 override（两项需同时配置才生效）。
   const [holdingDaysInput, setHoldingDaysInput] = useState('');
   const [holdingTpInput, setHoldingTpInput] = useState('');
@@ -914,16 +916,25 @@ export default function PaperPage() {
   const saveTCutoff = async () => {
     if (!account) return;
     const value = tCutoffInput.trim();
-    if (!/^\d{1,2}:\d{2}$/.test(value)) { setError('T+1截止时间需为 HH:MM 格式，如 14:50。'); return; }
-    const [hh, mm] = value.split(':').map(Number);
-    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) { setError('T+1截止时间需为合法的 24 小时制时间。'); return; }
-    const normalized = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    if (value && !/^\d{1,2}:\d{2}$/.test(value)) { setError('截止时间需为 HH:MM 格式，如 14:50。'); return; }
+    let normalized = tCutoff;
+    if (value) {
+      const [hh, mm] = value.split(':').map(Number);
+      if (hh < 0 || hh > 23 || mm < 0 || mm > 59) { setError('截止时间需为合法的 24 小时制时间。'); return; }
+      normalized = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    }
+    // 下拉框改截止日（T+0 建仓当日 / T+1 次日），未动下拉则不传该字段。
+    const day = tCutoffDayInput || tCutoffDay;
+    const patch: Partial<StrategyConfig> = {};
+    if (value) patch.t_exit_cutoff = normalized;
+    if (tCutoffDayInput) patch.t_exit_cutoff_day = day as StrategyConfig['t_exit_cutoff_day'];
     setSavingTCutoff(true); setError('');
     try {
-      const next = await api.updateAccountConfig(account.id, { t_exit_cutoff: normalized });
+      const next = await api.updateAccountConfig(account.id, patch);
       setAccount(next);
       setTCutoffInput('');
-      toast.success(`做T的T+1尾盘截止时间已更新为 ${normalized}，下一根K线起生效。`);
+      setTCutoffDayInput('');
+      toast.success(`做T尾盘截止已更新为 ${day} ${normalized}，下一根K线起生效。`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '做T截止时间更新失败。');
     } finally {
@@ -1319,15 +1330,19 @@ export default function PaperPage() {
           )}
 
           {account.auto_strategy && (
-            <Panel className="mb-3" title="做 T 止盈与截止" description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；到 T+1 尾盘截止时间仍未止盈则无条件强平。改动保存后下一根 K 线起生效。" action={<Badge tone="indigo">即时生效</Badge>}>
+            <Panel className="mb-3" title="做 T 止盈与截止" description="T 仓扣完成本后净利达到该幅度即平 T（T0 当天满足就当天做完）；截止日到截止时间（默认 T+1 14:50）仍未止盈则无条件强平。改动保存后下一根 K 线起生效。" action={<Badge tone="indigo">即时生效</Badge>}>
               <div className="grid gap-2 lg:grid-cols-2">
                 <div className="flex items-start gap-2">
                   <Field label="净利止盈（%）" hint={`当前 ${number(tNetSpread * 100, 2)}%（扣成本后）`} className="flex-1"><NumberInput unit="%" min={0} max={100} step={0.1} allowEmpty placeholder={number(tNetSpread * 100, 2)} value={tSpreadInput} onChange={setTSpreadInput} disabled={savingTSpread} /></Field>
                   <Button size="sm" className="mt-[24px] h-8" onClick={() => void saveTNetSpread()} disabled={savingTSpread || tSpreadInput === ''}>{savingTSpread ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTSpread ? '正在保存' : '保存止盈'}</Button>
                 </div>
                 <div className="flex items-start gap-2">
-                  <Field label="T+1 截止时间" hint={`当前 ${tCutoff}（HH:MM，尾盘强平）`} className="flex-1"><Input type="time" step={300} value={tCutoffInput} onChange={(event) => setTCutoffInput(event.target.value)} disabled={savingTCutoff} /></Field>
-                  <Button size="sm" className="mt-[24px] h-8" onClick={() => void saveTCutoff()} disabled={savingTCutoff || tCutoffInput === ''}>{savingTCutoff ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTCutoff ? '正在保存' : '保存截止'}</Button>
+                  <Field label="截止日" hint="T+1 = 次日尾盘截止（默认）；T+0 = 建仓当日到点即强平" className="w-44"><SelectField value={tCutoffDayInput || tCutoffDay} onValueChange={setTCutoffDayInput} disabled={savingTCutoff} options={[
+                    { value: 'T+1', label: 'T+1 · 次日尾盘（默认）' },
+                    { value: 'T+0', label: 'T+0 · 建仓当日' },
+                  ]} ariaLabel="做 T 截止日" /></Field>
+                  <Field label="截止时间" hint={`当前 ${tCutoff}（HH:MM，尾盘强平）`} className="flex-1"><Input type="time" step={300} value={tCutoffInput} onChange={(event) => setTCutoffInput(event.target.value)} disabled={savingTCutoff} /></Field>
+                  <Button size="sm" className="mt-[24px] h-8" onClick={() => void saveTCutoff()} disabled={savingTCutoff || (tCutoffInput === '' && tCutoffDayInput === '')}>{savingTCutoff ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTCutoff ? '正在保存' : '保存截止'}</Button>
                 </div>
               </div>
               <div className="mt-1 flex flex-wrap items-end gap-2 border-t pt-2">
@@ -1405,7 +1420,7 @@ export default function PaperPage() {
                   <Button size="sm" className="h-8" onClick={() => void saveRepo()} disabled={savingRepo}>{savingRepo ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingRepo ? '正在保存' : '保存逆回购'}</Button>
                 </div>
               </div>
-              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">留空表示沿用当前值（止盈 {number(tNetSpread * 100, 2)}%、截止 {tCutoffDay} {tCutoff}）；填入新值后点保存。做 T 为正 T，卖出走可卖底仓份额、不裸卖。</p>
             </Panel>
           )}
 

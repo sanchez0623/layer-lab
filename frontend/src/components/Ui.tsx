@@ -21,13 +21,15 @@ export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?:
 }
 
 export function Panel({
-  title, description, action, children, className = '', flush = false,
+  title, description, action, children, className = '', contentClassName = '', flush = false,
 }: {
   title?: string;
   description?: string;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** 内容区额外类名：用于让面板内容自身控制布局（如 flex 撑满高度）。 */
+  contentClassName?: string;
   /** 无内边距模式：表格 / 自定义布局直接贴边。 */
   flush?: boolean;
 }) {
@@ -42,7 +44,7 @@ export function Panel({
           {action && <div className="flex shrink-0 items-center gap-2 text-muted-foreground">{action}</div>}
         </CardHeader>
       )}
-      {flush ? children : <CardContent className="px-3.5 pb-3.5">{children}</CardContent>}
+      {flush ? children : <CardContent className={cn('px-3.5 pb-3.5', contentClassName)}>{children}</CardContent>}
     </Card>
   );
 }

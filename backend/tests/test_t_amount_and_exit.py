@@ -1,12 +1,14 @@
-"""做T金额跟随加仓档 + 净利止盈 + T+1日尾盘截止的回归测试。
+"""做T金额跟随加仓档 + 净利止盈 + 尾盘硬截止（T+0/T+1）的回归测试。
 
 覆盖：
 1. 做T单笔金额不再用固定 t_order_amount，改为跟随当前加仓档
    installment_amounts[sequence_index]（满仓 sequence_index>=16 取最大档）。
 2. 做T平仓为「扣成本后净利止盈」：目标价 = 均价×(1 + t_target_net_spread + 往返成本率)，
    扣费后净赚 t_target_net_spread（默认 3%）即平T，T0 当天满足就当天做完。
-3. 做T资金硬截止：T+1 日 t_exit_cutoff（默认 14:50）仍未止盈则无条件强平；
-   T0 当日不强平（仅隔夜仓 t_qty>today_t_buy_qty 触发），保证资金最迟 T+1 收盘前了结。
+3. 做T资金硬截止：截止日 t_exit_cutoff_day（T+1 默认 / T+0 可配）的 t_exit_cutoff
+   （默认 14:50）仍未止盈则无条件强平。T+1 口径下 T0 当日不强平（仅隔夜仓
+   t_qty>today_t_buy_qty 触发），保证资金最迟 T+1 收盘前了结；T+0 口径不看隔夜与否，
+   当日到点必平。
 """
 
 from datetime import datetime, timedelta
@@ -192,3 +194,79 @@ def test_t_exit_config_validation():
     # 合法值可正常构造
     ok = StrategyConfig(t_target_net_spread=0.03, t_exit_cutoff="14:50")
     assert ok.t_target_net_spread == 0.03 and ok.t_exit_cutoff == "14:50"
+
+
+def _day_account(*, cutoff_day: str, t_qty: int = 1_000, today_t_qty: int = 0) -> BrokerAccount:
+    """指定截止日口径的账户：today_t_qty=0 为隔夜仓（T1），= t_qty 为当日新建仓（T0）。"""
+    acct = BrokerAccount(
+        initial_cash=2_000_000.0,
+        config=StrategyConfig(t_exit_cutoff_day=cutoff_day),
+        name="t",
+    )
+    acct.sequence_index = 5
+    # 昨日建 6000 股底仓（今日可卖充足，做T卖出走可卖永久仓），均价 100
+    pos = Position(symbol=SYM, permanent_qty=6_000, permanent_cost=600_000.0, last_price=100.0)
+    pos.t_qty = t_qty
+    pos.t_cost = t_qty * 100.0
+    pos.today_t_buy_qty = today_t_qty
+    acct.positions[SYM] = pos
+    return acct
+
+
+def test_t0_cutoff_forces_exit_same_day_even_for_fresh_t_position():
+    """t_exit_cutoff_day=T+0：当日新建 T 仓（未达净利目标）到点 → 无条件强平，reason=T日尾盘截止平T。"""
+    acct = _day_account(cutoff_day="T+0", today_t_qty=1_000)  # 当日新建仓
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 14, 50), 101.0)  # 未达净利目标 ≈103.09
+    requests = strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08)
+    assert len(requests) == 1
+    assert requests[0].side == "SELL" and requests[0].purpose == "T"
+    assert requests[0].reason == "T日尾盘截止平T"
+    assert requests[0].quantity == 1_000
+    assert strat.t_exit_submitted is True
+
+
+def test_t0_cutoff_no_force_before_cutoff():
+    """T+0 口径下截止时间前（10:40）仍未止盈 → 不强平（还有时间等止盈）。"""
+    acct = _day_account(cutoff_day="T+0", today_t_qty=1_000)
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 10, 40), 101.0)
+    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
+
+
+def test_t1_day_overnight_still_forced_at_cutoff():
+    """t_exit_cutoff_day=T+1（默认）：隔夜仓到截止点强平，reason 仍是 T+1尾盘截止平T（口径未回归）。"""
+    acct = _day_account(cutoff_day="T+1", today_t_qty=0)  # 隔夜仓
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 14, 50), 101.0)
+    requests = strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08)
+    assert len(requests) == 1
+    assert requests[0].reason == "T+1尾盘截止平T"
+
+
+def test_t1_day_same_day_position_never_forced():
+    """t_exit_cutoff_day=T+1：当日新建 T 仓到点不强平（可持有到 T1），与 T+0 口径形成对照。"""
+    acct = _day_account(cutoff_day="T+1", today_t_qty=1_000)  # 当日仓
+    strat = LayeredTStrategy(acct.config)
+    strat.start_day(True)
+    bar = _m5(datetime(2026, 11, 10, 14, 50), 101.0)
+    assert strat.on_intraday(_history(), [bar], bar, acct, live_turnover=0.08) == []
+
+
+def test_exit_cutoff_day_validation():
+    """截止日只允许 T+0 / T+1（含大小写与写法变体都要在源头 400），且可序列化回读。"""
+    import pytest
+    with pytest.raises(ValueError):
+        StrategyConfig(t_exit_cutoff_day="T+2")
+    with pytest.raises(ValueError):
+        StrategyConfig(t_exit_cutoff_day="T0")
+    with pytest.raises(ValueError):
+        StrategyConfig(t_exit_cutoff_day="t+1")
+    ok = StrategyConfig(t_exit_cutoff_day="T+0")
+    assert ok.t_exit_cutoff_day == "T+0"
+    # 默认 T+1，保证老账户/回测报告缺该键时行为不变（from_dict 未知键才报错，缺键走默认）。
+    assert StrategyConfig.from_dict({}).t_exit_cutoff_day == "T+1"
+    assert StrategyConfig().to_dict()["t_exit_cutoff_day"] == "T+1"

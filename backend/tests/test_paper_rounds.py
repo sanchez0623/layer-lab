@@ -547,7 +547,7 @@ def test_paper_strategy_switches_reads_config_snapshot():
     assert items["vwap_drawdown"]["value"] == "3%"
     assert items["enable_t"]["enabled"] is False
     assert items["t_min_base_entries"]["enabled"] is False
-    assert items["t_exit_cutoff"]["value"] == "14:50"
+    assert items["t_exit_cutoff"]["value"] == "T+1 14:50"
     assert items["t_deep_drop_pct"]["enabled"] is False
     assert items["add_tier_strict"]["enabled"] is False
     assert items["add_tier_strict"]["value"] == "全档统一"
@@ -583,6 +583,7 @@ def test_close_reason_label_maps_known_reasons_and_passes_unknown():
     assert close_reason_label("价格轨收益达到15%") == "止盈（价格轨/账户轨）"
     assert close_reason_label("账户轨收益达到15%") == "止盈（价格轨/账户轨）"
     assert close_reason_label("T+1尾盘截止平T") == "T+1 尾盘强平"
+    assert close_reason_label("T日尾盘截止平T") == "T 日尾盘强平"
     assert close_reason_label("某个全新退出原因") == "某个全新退出原因"
     assert close_reason_label(None) is None
     assert close_reason_label("") is None

@@ -18,7 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from . import auth
 from .backtest import (
-    FunnelRotationBacktest, apply_repo_income, decompose_round_pnl, monthly_breakdown,
+    FunnelRotationBacktest, apply_repo_income, cashflow_adjusted_series,
+    decompose_round_pnl, monthly_breakdown,
     performance_metrics, repo_rate_for_date, run_funnel_backtest,
 )
 from .backtest_jobs import BacktestBusyError, BacktestJobManager, Execution
@@ -234,7 +235,7 @@ class AccountConfigRequest(BaseModel):
 
     费率字段（commission_rate 等）归 /fees 端点管，这里显式拒绝，避免两处写同一
     状态打架。改完立刻生效：策略每根 K 线都从 account.config 读取（如做T净利止盈
-    t_target_net_spread、T+1截止 t_exit_cutoff），下一根 K 的操作即用新值。
+    t_target_net_spread、T+1截止 t_exit_cutoff / t_exit_cutoff_day），下一根 K 的操作即用新值。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -242,6 +243,9 @@ class AccountConfigRequest(BaseModel):
     enable_t: bool | None = None
     t_target_net_spread: float | None = Field(default=None, ge=0, le=1)
     t_exit_cutoff: str | None = Field(default=None, pattern=r"^\d{1,2}:\d{2}$")
+    # 做T硬截止的截止日：T+0 = 建仓当日到点强平 / T+1 = 次日尾盘截止（默认）。
+    # 后端 __post_init__ 同口径兜底（拼错写法直接 400）。
+    t_exit_cutoff_day: str | None = Field(default=None, pattern=r"^T\+[01]$")
     # 超期降阈：持有 ≥N 交易日后止盈降到 override。两项需同时配置才生效
     # （strategy._effective_take_profit 任一为 None 即维持原止盈）。
     max_holding_days: int | None = Field(default=None, ge=1, le=250)
@@ -502,6 +506,28 @@ def _ensure_extended_metrics(report: dict) -> dict:
     return report
 
 
+def _ensure_equity_incl_withdrawal(report: dict) -> dict:
+    """旧报告 equity_curve 没有「含出金权益」：读取时按累计提现离线补齐。
+
+    新报告在 ``performance_metrics`` 里逐点写好了 ``equity_incl_withdrawal``（= 当日 equity
+    + 截至当日的累计提现，TWR 口径同源）；这里只兜底存量报告——它们落库时还没有该字段，
+    但主报告的 ``withdrawals``（含 date/amount）完整持久化，据此离线补齐即可，不重跑回测。
+    累计口径复用共用的 ``cashflow_adjusted_series``，与指标块的 TWR 序列同一套算法（铁律 1）。
+
+    必须在 ``_slim_records`` 抽走 withdrawals 之前调用。
+    """
+    equity_curve = report.get("equity_curve")
+    if not isinstance(equity_curve, list) or not equity_curve:
+        return report
+    if all("equity_incl_withdrawal" in point for point in equity_curve):
+        return report
+    withdrawals = report.get("withdrawals") if isinstance(report.get("withdrawals"), list) else []
+    adjusted, _ = cashflow_adjusted_series([dict(point) for point in equity_curve], withdrawals)
+    for point, equity_incl in zip(equity_curve, adjusted):
+        point["equity_incl_withdrawal"] = equity_incl
+    return report
+
+
 def _ensure_beta_win_rate(report: dict) -> dict:
     """旧报告没有 ETF 交易回合胜率：读取时从已持久化的 ``data_info.beta.fills`` 重算。
 
@@ -636,7 +662,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.0.9",
+        version="3.0.14",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1975,7 +2001,9 @@ def create_app() -> FastAPI:
         _decompose_report_rounds(report)
         return _slim_records(
             _slim_rotation_trail(
-                _ensure_beta_win_rate(_ensure_extended_metrics(_ensure_monthly(report)))
+                _ensure_equity_incl_withdrawal(
+                    _ensure_beta_win_rate(_ensure_extended_metrics(_ensure_monthly(report)))
+                )
             )
         )
 

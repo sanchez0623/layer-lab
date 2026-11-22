@@ -172,9 +172,13 @@ class StrategyConfig:
     # 做T净利止盈阈值：扣掉双边佣金/经手费/证管费/过户费/印花税/滑点后净赚该比例即平T（0~1 小数）。
     # 目标价 = T仓均价 ×(1 + t_target_net_spread + 往返成本估算)，成本估算见 strategy._t_roundtrip_cost。
     t_target_net_spread: float = 0.03
-    # 做T资金硬截止：T+1 日到达该时刻（HH:MM，24小时制）仍未止盈则无条件尾盘强平。
-    # T0 当日不强平（可持有到 T1），保证做T资金最迟在 T+1 收盘前了结。
+    # 做T资金硬截止：截止日到达该时刻（HH:MM，24小时制）仍未止盈则无条件尾盘强平。
+    # 截止日由 t_exit_cutoff_day 指定（T+0 = 建仓当日，T+1 = 次日，默认）。
+    # 默认 T+1 即「T0 当日不强平（可持有到 T1）」，保证做T资金最迟在 T+1 收盘前了结。
     t_exit_cutoff: str = "14:50"
+    # 做T硬截止的截止日口径：T+0 = 建仓当日到点即强平（做T资金当日必须了结）；
+    # T+1（默认）= 次日尾盘截止，T0 当日不强平。校验见 __post_init__。
+    t_exit_cutoff_day: str = "T+1"
     deep_loss_threshold: float = -0.10
     # 超期持仓降阈止盈：持有超过 max_holding_days 个交易日后，价格轨/账户轨止盈阈值
     # 降为 holding_tp_override（0~1 小数）。None 表示关闭该逻辑（维持 price_take_profit）。
@@ -288,7 +292,11 @@ class StrategyConfig:
         try:
             datetime.strptime(self.t_exit_cutoff, "%H:%M")
         except (TypeError, ValueError):
-            raise ValueError("t_exit_cutoff 必须是合法的 HH:MM 时间（做T的T+1日尾盘强平截止点）")
+            raise ValueError("t_exit_cutoff 必须是合法的 HH:MM 时间（做T尾盘强平截止点）")
+        # 做T硬截止的截止日：只允许 T+0（建仓当日）/ T+1（次日，默认）两档。
+        # 在源头拦下拼写错误（如 "T0"/"t+1"），避免面板选了却悄悄退回默认口径。
+        if self.t_exit_cutoff_day not in ("T+0", "T+1"):
+            raise ValueError("t_exit_cutoff_day 必须是 T+0 或 T+1（做T硬截止的截止日）")
         # 深跌幅当日做T阈值：20cm 板（创业板/科创板）日内 -10% 才算极端恐慌事件，
         # 阈值过低会频繁触发低质量做T。0 视为关闭（归一化为 None，便于前端开关传值）；
         # 开启时必须 >= 10%。

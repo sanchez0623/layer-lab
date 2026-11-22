@@ -377,14 +377,23 @@ def test_paper_account_config_update_applies_to_new_operations(tmp_path, monkeyp
 
     # 截止时间也能改（HH:MM）
     updated_cut = client.post(f"/api/paper/accounts/{account['id']}/config",
-                              json={"t_exit_cutoff": "14:45"})
+                             json={"t_exit_cutoff": "14:45"})
     assert updated_cut.status_code == 200, updated_cut.text
     assert updated_cut.json()["config"]["t_exit_cutoff"] == "14:45"
+
+    # 截止日（T+0/T+1）局部更新：模拟盘面板下拉框选中即 PATCH
+    updated_day = client.post(f"/api/paper/accounts/{account['id']}/config",
+                              json={"t_exit_cutoff_day": "T+0"})
+    assert updated_day.status_code == 200, updated_day.text
+    assert updated_day.json()["config"]["t_exit_cutoff_day"] == "T+0"
+    assert client.post(f"/api/paper/accounts/{account['id']}/config",
+                       json={"t_exit_cutoff_day": "T+2"}).status_code == 422
 
     # 重读（走持久化往返）仍是新值
     reloaded = client.get(f"/api/paper/accounts/{account['id']}").json()
     assert reloaded["config"]["t_target_net_spread"] == 0.04
     assert reloaded["config"]["t_exit_cutoff"] == "14:45"
+    assert reloaded["config"]["t_exit_cutoff_day"] == "T+0"
 
     # 费率字段归 /fees 管，这里显式拒绝
     rejected = client.post(f"/api/paper/accounts/{account['id']}/config",
@@ -715,3 +724,33 @@ def test_ensure_extended_metrics_backfills_stock_win_rate():
     out = _ensure_extended_metrics(report)
     assert out["metrics"]["stock_win_rate"] == pytest.approx(0.5)
     # win_rate 是核心字段（真实报告本就带），本函数只兜底 4 个扩展键、不回填它。
+
+
+def test_ensure_equity_incl_withdrawal_backfills_per_point():
+    """旧报告 equity_curve 缺「含出金权益」：按累计提现逐点补齐，提现日之前等于原始权益。"""
+    from app.main import _ensure_equity_incl_withdrawal
+
+    curve = [
+        {"date": "2025-01-01", "equity": 100.0},
+        {"date": "2025-01-02", "equity": 110.0},
+        {"date": "2025-01-03", "equity": 80.0},
+    ]
+    report = {"equity_curve": curve, "withdrawals": [{"date": "2025-01-03", "amount": 40.0}]}
+    out = _ensure_equity_incl_withdrawal(report)
+    assert [point["equity_incl_withdrawal"] for point in out["equity_curve"]] == [
+        pytest.approx(100.0), pytest.approx(110.0), pytest.approx(120.0),
+    ]
+
+
+def test_ensure_equity_incl_withdrawal_idempotent_and_skips_without_data():
+    """已有该字段不覆盖；缺 equity_curve 或无提现明细时原样返回（幂等）。"""
+    from app.main import _ensure_equity_incl_withdrawal
+
+    done = {"equity_curve": [{"date": "2025-01-01", "equity": 100.0,
+                             "equity_incl_withdrawal": 200.0}]}
+    assert _ensure_equity_incl_withdrawal(done)["equity_curve"][0]["equity_incl_withdrawal"] == 200.0
+
+    no_curve = {"withdrawals": []}
+    assert _ensure_equity_incl_withdrawal(no_curve) == no_curve
+    empty_curve = {"equity_curve": [], "withdrawals": []}
+    assert _ensure_equity_incl_withdrawal(empty_curve) == empty_curve

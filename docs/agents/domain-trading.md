@@ -19,9 +19,9 @@
 - **做 T 退出（净利止盈 + T+1 硬截止）**
   - 平 T 目标价 = T 仓均价 ×(1 + `t_target_net_spread` + `_t_roundtrip_cost()`)，即**扣完成本后净赚 `t_target_net_spread`（默认 3%）**才平，不是毛价差。
   - 成本率由 `_t_roundtrip_cost()` 统一估算（双边佣金/经手费/证管费/过户费 + 卖出印花税 + 双边滑点 ≈0.1%）；准入门槛 `_t_eligible` 复用同一口径。
-  - 资金硬截止：**T+1 日 `t_exit_cutoff`（默认 14:50）仍未止盈则无条件强平**（reason「T+1尾盘截止平T」）。
-  - 用 `position.t_qty > today_t_buy_qty` 区分隔夜仓（T1）与当日仓（T0）——**T0 当日不强平**可留到 T1，保证做 T 资金最迟 T+1 收盘前了结。
-  - 两个参数都在模拟盘做 T 面板可视化编辑。
+  - 资金硬截止：**截止日 `t_exit_cutoff_day`（默认 `T+1`，下拉可选 `T+0`）到 `t_exit_cutoff`（默认 14:50）仍未止盈则无条件强平**（reason「T+1尾盘截止平T」/「T日尾盘截止平T」）。
+  - 用 `position.t_qty > today_t_buy_qty` 区分隔夜仓（T1）与当日仓（T0）——**`T+1` 口径下 T0 当日不强平**可留到 T1，保证做 T 资金最迟 T+1 收盘前了结；`T+0` 口径不看隔夜与否、当日到点必平。
+  - 三个参数（`t_target_net_spread` / `t_exit_cutoff_day` / `t_exit_cutoff`）都在模拟盘做 T 面板与回测页可视化编辑。
   - ⚠️ 旧的 `t_target_spread`（毛价差）**已废弃**，不再驱动平 T，仅保留字段兼容老账户快照，别再读它。
 - **做T准入的四阈值已可视化（2.5.0 起）**
   - `t_min_amplitude`(4%) / `t_min_turnover`(3%) / `t_max_turnover`(12%) / `t_min_expected_net_spread`(3%)。

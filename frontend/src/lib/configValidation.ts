@@ -20,7 +20,8 @@ export type ConfigIssueMap = Partial<Record<keyof StrategyConfig, string>>;
 export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> = {
   t_deep_drop_pct: '深跌幅当日做T',
   t_target_net_spread: '做 T 净利止盈',
-  t_exit_cutoff: '做 T T+1 截止时间',
+  t_exit_cutoff: '做 T 截止时间',
+  t_exit_cutoff_day: '做 T 截止日',
   t_min_amplitude: '做 T 最小振幅',
   t_min_turnover: '做 T 换手率下限',
   t_max_turnover: '做 T 换手率上限',
@@ -82,6 +83,11 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   const cutoff = config.t_exit_cutoff;
   if (cutoff !== undefined && !isTimeOfDay(cutoff)) {
     issue('t_exit_cutoff', '须为合法的 HH:MM 时间（如 14:50）');
+  }
+  // 硬截止的截止日：只允许 T+0（建仓当日）/ T+1（次日，默认）两档，与后端同口径。
+  const cutoffDay = config.t_exit_cutoff_day;
+  if (cutoffDay !== undefined && cutoffDay !== 'T+0' && cutoffDay !== 'T+1') {
+    issue('t_exit_cutoff_day', '须为 T+0 或 T+1（截止时间落在建仓当日还是次日）');
   }
   const amplitude = config.t_min_amplitude;
   if (amplitude !== undefined && !(isNum(amplitude) && amplitude > 0 && amplitude <= 1)) {
