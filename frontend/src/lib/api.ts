@@ -213,6 +213,9 @@ export const api = {
   // 删除报告并级联清理同 ID 的后台任务 / 检查点；运行中任务后端返回 409。
   deleteBacktest: (id: string) =>
     request<{ deleted: boolean; id: string }>(`/backtests/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  // 重命名报告：只改展示名称，不影响报告数据；后端返回 {id, name}。
+  renameBacktest: (id: string, name: string) =>
+    request<{ id: string; name: string }>(`/backtests/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   /* ---------- 后台回测作业（进度 / 取消 / 续跑） ----------
      复用 request<T>，409（已有回测在跑）等错误会抛 ApiError 且带 .status，由调用方识别「忙」。 */
   runBacktestJob: (payload: BacktestJobRequest) =>

@@ -184,6 +184,53 @@ def test_delete_backtest_rejects_running_job(api):
 
 
 # ---------------------------------------------------------------------------
+# 重命名：PATCH /api/backtests/{id} 同步 name 列与 payload.name
+# ---------------------------------------------------------------------------
+
+
+def test_rename_backtest_updates_name_and_payload(api):
+    application, client = api
+    storage = application.state.storage
+    storage.save_backtest(_report("bt-ren", "旧名称"))
+
+    response = client.patch("/api/backtests/bt-ren", json={"name": "  新名称  "})
+    assert response.status_code == 200, response.text
+    assert response.json() == {"id": "bt-ren", "name": "新名称"}
+
+    # 详情 payload 的 name 同步更新。
+    detail = client.get("/api/backtests/bt-ren").json()
+    assert detail["name"] == "新名称"
+    # 列表摘要列（name）同步更新，可按新名称搜到。
+    listed = client.get("/api/backtests", params={"q": "新名称"}).json()
+    assert listed["total"] == 1
+    assert listed["items"][0]["name"] == "新名称"
+
+
+def test_rename_backtest_missing_id_returns_404(api):
+    _application, client = api
+    assert client.patch("/api/backtests/nope", json={"name": "任意"}).status_code == 404
+
+
+def test_rename_backtest_rejects_blank_name(api):
+    application, client = api
+    storage = application.state.storage
+    storage.save_backtest(_report("bt-blank", "原名"))
+    assert client.patch("/api/backtests/bt-blank", json={"name": "   "}).status_code == 400
+    assert client.patch("/api/backtests/bt-blank", json={"name": ""}).status_code == 400
+    # 非法输入不改动原名称。
+    assert client.get("/api/backtests/bt-blank").json()["name"] == "原名"
+
+
+def test_rename_backtest_rejects_overlong_name(api):
+    application, client = api
+    storage = application.state.storage
+    storage.save_backtest(_report("bt-long", "原名"))
+    assert client.patch("/api/backtests/bt-long", json={"name": "名" * 201}).status_code == 400
+    # 边界内 200 字允许。
+    assert client.patch("/api/backtests/bt-long", json={"name": "名" * 200}).status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # 年化收益率「买入持有」三基准（compute_buy_hold_benchmarks 纯函数）
 # ---------------------------------------------------------------------------
 

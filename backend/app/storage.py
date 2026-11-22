@@ -188,6 +188,27 @@ class SQLiteStorage:
             connection.execute("DELETE FROM backtest_jobs WHERE id=?", (backtest_id,))
         return cursor.rowcount > 0
 
+    def rename_backtest(self, backtest_id: str, new_name: str) -> bool:
+        """重命名回测报告：同步更新 name 摘要列与 payload 里的 name 字段。
+
+        列表搜索按 name 列过滤，详情端点按 payload 下发，两者必须一致，否则会出现
+        「列表已改名、详情还是旧名」的割裂。payload 单份可能十几 MB，这里只改一个字段，
+        仍需整体读改写；改名是低频操作，可接受。
+        """
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT payload FROM backtests WHERE id=?", (backtest_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            payload = json.loads(row["payload"])
+            payload["name"] = new_name
+            connection.execute(
+                "UPDATE backtests SET name=?, payload=? WHERE id=?",
+                (new_name, json.dumps(payload, ensure_ascii=False, allow_nan=False), backtest_id),
+            )
+        return True
+
     def save_paper(self, state: dict[str, Any]) -> None:
         payload = json.dumps(state, ensure_ascii=False, allow_nan=False)
         with self._lock, self._connect() as connection:
