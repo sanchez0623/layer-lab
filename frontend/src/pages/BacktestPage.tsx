@@ -60,7 +60,7 @@ const fallbackConfig: StrategyConfig = {
   force_exit_holding_days: 0,
   // 加仓按档位先松后紧：A3 浮亏信号逐档加严（档1 最松 → 档4 = 原始 A3）。
   add_tier_strict: true,
-  // 深跌幅当日做T：日内跌幅 ≥ 10% 绕过底仓笔数门槛（0 = 关闭）。
+  // 深跌幅当日做T：日内跌幅 ≥ 该值绕过底仓笔数门槛（大于 0 即可，不强制 ≥10%；0 = 关闭）。
   t_deep_drop_pct: 0.10,
   // 做T准入四阈值：最小振幅 / 换手率区间 / 最小期望净利（振幅扣掉一次往返成本后）。
   t_min_amplitude: 0.04,
@@ -376,7 +376,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
 
   // 回测表单草稿自动保存：任何改动 700ms 后把整份表单 PUT 到服务端。
   // 初始金额暂不合法（用户清空重输）时跳过，避免每敲一个字符报一次 422。
-  // 前端校验不通过（如深跌幅阈值 < 10%）也不发请求：后端必然 400，改为字段下方 tips + 底部红字提示。
+  // 前端校验不通过（如做T阈值越界）也不发请求：后端必然 400，改为字段下方 tips + 底部红字提示。
   useEffect(() => {
     if (!draftHydratedRef.current) return;
     if (!Number.isFinite(initialCash) || initialCash <= 0) return;
@@ -401,7 +401,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
         setDraftError('');
       }).catch((cause) => {
         setDraftStatus('error');
-        // 后端 detail 里就是具体原因（如「t_deep_drop_pct 必须 >= 10%…」），原样透出，
+        // 后端 detail 里就是具体原因（如「t_deep_drop_pct 必须…」），原样透出，
         // 别再只显示一句泛泛的「保存失败」让用户去翻 Network 面板。
         setDraftError(cause instanceof Error ? cause.message : '');
       });
@@ -988,8 +988,8 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                       <Field label="做 T 截止时间" hint="截止日到点仍未止盈则尾盘强平" error={configIssues.t_exit_cutoff}>
                         <Input type="time" step={300} value={config.t_exit_cutoff ?? '14:50'} onChange={(event) => updateConfig('t_exit_cutoff', event.target.value)} />
                       </Field>
-                      <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（≥10%，20cm 板极端恐慌线）；0 = 关闭" error={configIssues.t_deep_drop_pct}>
-                        <NumberInput unit="%" min={0} max={20} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
+                      <Field label="深跌幅当日做T（%）" hint="日内跌幅 ≥ 该值绕过底仓笔数门槛（大于 0 即可，不强制 ≥10%）；0 = 关闭" error={configIssues.t_deep_drop_pct}>
+                        <NumberInput unit="%" min={0} max={100} step={0.5} value={Number((((config.t_deep_drop_pct ?? 0.10) || 0) * 100).toFixed(1))} onChange={(value) => updateConfig('t_deep_drop_pct', Number(value) === 0 ? 0 : Number(value) / 100)} />
                       </Field>
                       <Field label="做 T 最小振幅（%）" hint="近5根平均振幅低于该值不做 T" error={configIssues.t_min_amplitude}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_amplitude ?? 0.04) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_amplitude', Number(value) / 100)} />

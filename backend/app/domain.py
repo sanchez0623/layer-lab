@@ -198,8 +198,8 @@ class StrategyConfig:
     # 之前硬编码为 4（「第5笔起正T」），现改为可配置。深跌幅当日做T仍可绕过（见 t_deep_drop_pct）。
     t_min_base_entries: int = 4
     # 深跌幅当日做T：当日盘中跌幅（相对前收盘）≥ 此阈值时，绕过底仓笔数门槛
-    # （sequence_index≥4）允许做T。创业板/科创板 20cm 涨跌幅，-10% 已是极端恐慌事件
-    # 才值得抢反弹。None = 关闭；__post_init__ 校验：非 None 时必须 >= 0.10。
+    # （sequence_index≥4）允许做T。默认 0.10（20cm 板 -10% 极端恐慌线），
+    # 但可调到更低门槛。None = 关闭；__post_init__ 校验：非 None 时须 (0,1]。
     t_deep_drop_pct: float | None = 0.10
     # ---- 指数 beta 腿（ETF）------------------------------------------------
     # 个股轮动空仓期间，用创业板 ETF 承接 beta，避免「大门关闭 → 整段上涨 0 收益」。
@@ -297,14 +297,15 @@ class StrategyConfig:
         # 在源头拦下拼写错误（如 "T0"/"t+1"），避免面板选了却悄悄退回默认口径。
         if self.t_exit_cutoff_day not in ("T+0", "T+1"):
             raise ValueError("t_exit_cutoff_day 必须是 T+0 或 T+1（做T硬截止的截止日）")
-        # 深跌幅当日做T阈值：20cm 板（创业板/科创板）日内 -10% 才算极端恐慌事件，
-        # 阈值过低会频繁触发低质量做T。0 视为关闭（归一化为 None，便于前端开关传值）；
-        # 开启时必须 >= 10%。
+        # 深跌幅当日做T阈值：当日盘中跌幅（相对前收盘）≥ 此值时绕过底仓笔数门槛。
+        # 0 视为关闭（归一化为 None，便于前端开关传值）；开启时只要 > 0 即可，
+        # 不再强制 ≥ 10%——用户可自由设置 10% 以下的低门槛做T回测。
         if self.t_deep_drop_pct is not None:
-            if float(self.t_deep_drop_pct) == 0:
+            value = float(self.t_deep_drop_pct)
+            if value == 0:
                 self.t_deep_drop_pct = None
-            elif float(self.t_deep_drop_pct) < 0.10:
-                raise ValueError("t_deep_drop_pct 必须 >= 10%（20cm 板极端恐慌线，保证做T成功率）")
+            elif not 0 < value <= 1:
+                raise ValueError("t_deep_drop_pct 必须是大于0且不超过1的小数（深跌幅当日做T阈值，0 = 关闭）")
         # 做T准入四阈值：已可视化可调，须在源头拦下自相矛盾或无意义的值
         # （如换手上限低于下限、振幅门槛为 0），避免改完阈值后做T准入悄悄恒 False。
         if not 0 < float(self.t_min_amplitude) <= 1:
