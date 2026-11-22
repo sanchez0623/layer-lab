@@ -59,6 +59,10 @@ export interface StrategyConfig {
   t_exit_cutoff?: string;
   /** 已废弃：做T金额现跟随当前加仓档 installment_amounts[sequence_index]（满仓后取最大档），本字段不再参与做T计算，仅为兼容后端 config 保留 */
   t_order_amount?: number;
+  /** 价格轨止盈阈值（小数，0.15 = 15%）：持仓浮盈达到该幅度即触发价格轨清仓；也是超期降阈的基准值 */
+  price_take_profit?: number;
+  /** 账户轨止盈阈值（小数，0.15 = 15%）：账户口径浮盈达到该幅度触发清仓（当前实际清仓判定沿用价格轨阈值） */
+  account_take_profit?: number;
   /** 超期降阈：持有 ≥ 该交易日数后，价格轨/账户轨止盈阈值降为 holding_tp_override；与 holding_tp_override 必须同时配置 */
   max_holding_days?: number | null;
   /** 超期降阈后的止盈阈值（小数，0.03 = 3%）；与 max_holding_days 必须同时配置 */
