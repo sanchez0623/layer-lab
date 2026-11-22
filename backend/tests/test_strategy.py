@@ -324,13 +324,19 @@ def test_t_min_base_entries_validation():
 
 
 def test_deep_drop_pct_validation():
-    """t_deep_drop_pct < 10% 报错（20cm 板极端恐慌线，保证做T成功率）。"""
-    with pytest.raises(ValueError):
-        StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=0.05)
+    """t_deep_drop_pct 开启时须 (0,1]；10% 以下不再报错（可设低门槛做T回测）。"""
+    # 10% 以下现在合法（放宽原 ≥10% 恐慌线约束）
+    StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=0.05)
+    StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=0.02)
     # None=关闭，合法
     StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=None)
     # 0 视为关闭（归一化为 None）：前端开关关掉时传 0
     assert StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=0).t_deep_drop_pct is None
+    # 越界（<=0 已归一化为关闭；>1 或负数）报错
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=1.5)
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, t_deep_drop_pct=-0.05)
 
 
 def test_tiered_a3_spec_progression():

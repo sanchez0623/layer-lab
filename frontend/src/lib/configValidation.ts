@@ -49,7 +49,7 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   repo_yield_max: '逆回购年化上限',
 };
 
-/** 把「字段 + 文案」拼成一句可读提示：`深跌幅当日做T：开启时须 ≥ 10%…`。 */
+/** 把「字段 + 文案」拼成一句可读提示：`深跌幅当日做T：须为大于 0 且不超过 100% 的小数…`。 */
 export const describeConfigIssue = (field: keyof StrategyConfig, message: string): string =>
   `${CONFIG_FIELD_LABELS[field] ?? String(field)}：${message}`;
 
@@ -72,10 +72,10 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   };
 
   // ---- 做 T 相关 -----------------------------------------------------------
-  // 深跌幅当日做T：None / 0 = 关闭；开启时必须 >= 10%（20cm 板极端恐慌线）。
+  // 深跌幅当日做T：None / 0 = 关闭；开启时须为大于 0 且不超过 100% 的小数（不再强制 ≥ 10%）。
   const deepDrop = config.t_deep_drop_pct;
-  if (deepDrop !== null && deepDrop !== undefined && isNum(deepDrop) && deepDrop !== 0 && deepDrop < 0.1) {
-    issue('t_deep_drop_pct', '开启时须 ≥ 10%（20cm 板极端恐慌线）；填 0 = 关闭');
+  if (deepDrop !== null && deepDrop !== undefined && isNum(deepDrop) && deepDrop !== 0 && !(deepDrop > 0 && deepDrop <= 1)) {
+    issue('t_deep_drop_pct', '须为大于 0 且不超过 100% 的小数（0 = 关闭）');
   }
   const netSpread = config.t_target_net_spread;
   if (isNum(netSpread) && !(netSpread > 0 && netSpread < 1)) {

@@ -256,7 +256,7 @@ class AccountConfigRequest(BaseModel):
     installment_scale_mode: str | None = Field(default=None, pattern=r"^(fixed|equity)$")
     installment_scale_floor: float | None = Field(default=None, gt=0, le=1)
     # 深跌幅当日做T：日内跌幅（相对前收）≥ 该值绕过底仓笔数门槛；传 0 = 关闭
-    # （__post_init__ 归一化为 None），开启时必须 >= 0.10（20cm 板极端恐慌线）。
+    # （__post_init__ 归一化为 None），开启时须 (0,1]，不再强制 >= 0.10。
     t_deep_drop_pct: float | None = Field(default=None, ge=0, le=1)
     # 做T准入四阈值（0~1 小数）：最小平均振幅 / 换手率上下限 / 期望净利（振幅扣掉
     # 一次往返成本后仍需达到）。之前只在 domain.py 有默认值、前端与接口都不可见，
@@ -636,7 +636,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.0.11",
+        version="3.0.12",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
