@@ -587,3 +587,136 @@ def test_close_reason_label_maps_known_reasons_and_passes_unknown():
     assert close_reason_label("某个全新退出原因") == "某个全新退出原因"
     assert close_reason_label(None) is None
     assert close_reason_label("") is None
+
+
+# ---------------------------------------------------------------------------
+# 10. 持有交易日按交易日历计（净值快照稀疏时不再低估）
+# ---------------------------------------------------------------------------
+
+from app.paper_analytics import _holding_days  # noqa: E402  (集中在本节测 helper)
+
+
+# 稀疏净值：建仓 11-13，最新快照 11-20，中间只有 11-20 一个点（回放/重置后真实场景）。
+_SPARSE_DATES = ["2025-11-20"]
+# 完整交易日历（升序）：11-13(四)、11-14(五)、周末休市、11-17(一)…11-20(四)。
+_FULL_CALENDAR = [
+    "2025-11-13", "2025-11-14", "2025-11-17", "2025-11-18", "2025-11-19", "2025-11-20",
+]
+
+
+def test_holding_days_uses_trading_calendar_when_available():
+    """核心 bug 回归：稀疏净值 + 完整日历 → 按日历计 6 个交易日（含首尾），而非 1。"""
+    assert _holding_days(_SPARSE_DATES, "2025-11-13", "2025-11-20", _FULL_CALENDAR) == 6
+
+
+def test_holding_days_falls_back_to_equity_dates_without_calendar():
+    """日历不可用（None/空）→ 降级为按净值快照日期计数（旧行为）。"""
+    assert _holding_days(_SPARSE_DATES, "2025-11-13", "2025-11-20", None) == 1
+    assert _holding_days(_SPARSE_DATES, "2025-11-13", "2025-11-20", []) == 1
+
+
+def test_holding_days_entry_equals_latest_snapshot_is_one_day():
+    """建仓日 == 最新快照日 → 1 日（含首尾）。"""
+    assert _holding_days(["2025-11-13"], "2025-11-13", "2025-11-13", _FULL_CALENDAR) == 1
+    # 无日历、快照含该日 → 同样 1 日。
+    assert _holding_days(["2025-11-13"], "2025-11-13", "2025-11-13", None) == 1
+
+
+def test_holding_days_spans_weekend_and_holiday():
+    """跨周末（及一个节假日）只按日历交易日计，不被自然日或净值缺口干扰。
+
+    周五建仓、下周一出场，中间隔周末：日历只有周五、周一两天 → 2（含首尾）。
+    """
+    calendar = ["2025-11-14", "2025-11-17"]  # 周五、周一（周末 11-15/16 休市）
+    assert _holding_days([], "2025-11-14", "2025-11-17", calendar) == 2
+
+
+def test_holding_days_calendar_count_zero_falls_back():
+    """日历覆盖区间但全休市（计数 0）→ 回落净值口径，不返回 0。"""
+    # 日历里没有 11-13..11-20 任何一天（如日历未覆盖该区间），计数 0 → 降级按净值。
+    unrelated_calendar = ["2025-12-01", "2025-12-02"]
+    assert _holding_days(_SPARSE_DATES, "2025-11-13", "2025-11-20", unrelated_calendar) == 1
+
+
+def test_holding_days_empty_calendar_returns_none_without_snapshots():
+    """既无日历也无净值快照 → None（不瞎算，回归原语义）。"""
+    assert _holding_days([], "2025-11-13", "2025-11-20", None) is None
+
+
+def test_paper_rounds_passes_trading_dates_to_holding_days():
+    """端到端：paper_rounds 透传 trading_dates，各轮 holding_days 与 avg_holding_days 随之按日历计。"""
+    account = BrokerAccount(1_000_000, zero_fee_config(), name="日历口径")
+    run_fill(account, date="2025-11-13", symbol="TEST", side="BUY", quantity=100, price=10.0)
+    account.mark("TEST", 10.0)
+    # 稀疏净值：只有 11-20 一个快照点。
+    sparse_curve = [
+        {"date": "2025-11-20", "ts": "2025-11-20T15:00:00", "equity": 1_000_000.0, "beta_value": 0.0},
+    ]
+    rows = paper_rounds(account, sparse_curve, trading_dates=_FULL_CALENDAR)
+    assert rows[0]["holding_days"] == 6
+    # 该轮 OPEN（未平），avg_holding_days 只聚合已平轮 → 无已平轮时为 None。
+    metrics = paper_strategy_metrics(account, rows)
+    assert metrics["avg_holding_days"] is None
+    # 不传日历 → 降级按净值快照计数 → 1。
+    rows_no_cal = paper_rounds(account, sparse_curve)
+    assert rows_no_cal[0]["holding_days"] == 1
+
+
+class _FakeQuanStore:
+    """端点级测试用：受控 trade_days，模拟 application.state.quan_store。"""
+
+    def __init__(self, trade_days):
+        self._trade_days = trade_days
+
+    def trade_days(self, start, end):
+        s, e = str(start)[:10], str(end)[:10]
+        return [d for d in self._trade_days if s <= d <= e]
+
+
+def test_rounds_endpoint_uses_trading_calendar_for_holding_days(tmp_path, monkeypatch):
+    """端点级：注入假 quan_store 后，GET /rounds 的 holding_days 按日历口径。"""
+    application = _app(tmp_path, monkeypatch)
+    client = TestClient(application)
+    account = client.post("/api/paper/accounts", json={
+        "name": "日历端点", "initial_cash": 1_000_000,
+    }).json()
+    account_id = account["id"]
+    acc, _peaks = build_two_round_account(account_id=account_id)
+    application.state.storage.save_paper(acc.to_dict(include_internal=True))
+    # 稀疏 live 净值：只落 2025-01-20 一天（R001 建仓 01-02、清仓 01-10）。
+    application.state.storage.save_paper_equity(
+        account_id,
+        {"date": "2025-01-20", "ts": "2025-01-20T15:00:00", "equity": 1_002_700.0, "beta_value": 0.0},
+        source="live",
+    )
+    # 注入假日历：覆盖 01-02..01-20 的交易日。
+    calendar = [
+        "2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08",
+        "2025-01-09", "2025-01-10", "2025-01-13", "2025-01-14", "2025-01-16",
+        "2025-01-17", "2025-01-20",
+    ]
+    monkeypatch.setattr(application.state, "quan_store", _FakeQuanStore(calendar))
+
+    body = client.get(f"/api/paper/accounts/{account_id}/rounds").json()
+    # R001: 01-02..01-10；R002(OPEN, as_of=最后净值日 01-20): 01-13..01-20。均按日历含首尾。
+    assert body["items"][0]["holding_days"] == 7   # 01-02,03,06,07,08,09,10
+    assert body["items"][1]["holding_days"] == 5   # R002 OPEN, as_of=01-20: 01-13,14,16,17,20
+
+    summary = client.get(f"/api/paper/accounts/{account_id}/rounds/summary").json()
+    # 只有 R001 已平（holding_days=7），avg_holding_days 按日历口径。
+    assert summary["strategy_metrics"]["avg_holding_days"] == pytest.approx(7.0)
+
+
+def test_rounds_endpoint_falls_back_without_quan_store(tmp_path, monkeypatch):
+    """端点级：quan_store 为 None（默认 fixture）→ holding_days 降级按净值快照计数。"""
+    application = _app(tmp_path, monkeypatch)
+    client = TestClient(application)
+    account = client.post("/api/paper/accounts", json={
+        "name": "降级端点", "initial_cash": 1_000_000,
+    }).json()
+    _seed_rounds(application, account["id"])
+    assert application.state.quan_store is None
+
+    body = client.get(f"/api/paper/accounts/{account['id']}/rounds").json()
+    # build_equity_curve 在 R001 区间（01-02..01-10）有 7 个净值日 → 降级口径仍 7。
+    assert body["items"][0]["holding_days"] == 7

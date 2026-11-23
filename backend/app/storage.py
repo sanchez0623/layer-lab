@@ -9,8 +9,10 @@ from typing import Any
 from .domain import Dataset, utc_now
 from .pagination import paginate
 
-# 模拟盘净值快照的两种来源：实时 tick 与 /advance 缓存回放。回放数据不能混进
-# live 序列（否则回放历史会把「真实净值曲线」污染成当初的模拟结果）。
+# 模拟盘净值快照来源：实时 tick 与 /advance 数据集回放，统一写入 live 序列
+# （/advance 是真实的账户状态推进，净值随状态落库，与 live-tick 路径一致）。
+# ``replay`` 标签仍保留：读取端（list_paper_equity_daily 的 source 参数）可查
+# 历史 replay 行，但当前写入路径不再产生新的 replay 数据。
 PAPER_EQUITY_SOURCES = ("live", "replay")
 
 # 与回测 equity_curve 对齐的字段（回测见 backtest.py 的 equity_curve.append）。

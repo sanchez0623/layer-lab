@@ -662,7 +662,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.0.18",
+        version="3.0.19",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -835,7 +835,8 @@ def create_app() -> FastAPI:
         ``when`` 是行情时间（bar.timestamp 或 ISO 字符串）：``date`` 取交易日、
         ``ts`` 取行情时间戳。同一 ``(account_id,date,ts)`` 幂等覆盖；同一天多次写入
         由 ts 区分，读取端用 ``list_paper_equity_daily`` 取当日最后一条。
-        ``source="replay"`` 只用于 /advance 缓存回放，绝不写进 live 序列。
+        ``source`` 默认 live；``/advance`` 数据集回放同样走 live 序列（它是真实的账户
+        状态推进，净值随状态落库，与 live-tick 一致），不再单独区分 replay。
 
         字段口径：``invested`` = 全部永久仓成本（与回测单标的 ``permanent_cost`` 同义），
         ``position_qty`` = 个股总持仓（永久+T，用于 exposure/均值），
@@ -1018,8 +1019,8 @@ def create_app() -> FastAPI:
         快照 ``bar`` 只负责撮合与日终信号；``detect_intraday=False`` 时（当日还没有
         已收盘 5 分钟 bar）跳过盘中检测，避免用未完成 bar 反复计数。
 
-        ``daily_close=True`` 的日终分支会额外落一条净值快照；``source`` 区分实时
-        （live，默认）与 /advance 缓存回放（replay，不能混进真实净值序列）。
+        ``daily_close=True`` 的日终分支会额外落一条净值快照；``source`` 默认 live，
+        /advance 数据集回放同样写 live 序列（与 live-tick 一致）。
         """
         strategy: LayeredTStrategy | None = None
         is_new_day = account.current_date != bar.date
@@ -1438,7 +1439,17 @@ def create_app() -> FastAPI:
                         dataset = bundle.get(key)
                         if dataset is not None:
                             storage.save_dataset(dataset)
-                    daily_dataset = bundle.get("daily") or daily_dataset
+                    new_daily = bundle.get("daily")
+                    if new_daily is not None:
+                        daily_dataset = new_daily
+                        # 账户已绑定数据集时，把指针挪到新数据集并落库：否则指针永远停在
+                        # 旧 CSV，每天重复拉取+堆积孤儿数据集，且容器重启后第一次 tick 仍
+                        # 用旧日线算 previous_three_low/previous_five_volume 等历史指标。
+                        # 仅在「本已绑定」时前进——未绑定（None，如轮动待换票）保持 None，
+                        # 由换票流程负责绑定，不在此越界赋值。
+                        if account.dataset_id and account.dataset_id != new_daily.id:
+                            account.dataset_id = new_daily.id
+                            save_paper(account)
                     index_dataset = bundle.get("index") or index_dataset
                 except (requests.RequestException, ValueError):
                     pass  # 刷新失败保持旧数据集，次日再试
@@ -2227,6 +2238,35 @@ def create_app() -> FastAPI:
         return {"beta": paper_beta_summary(account), "derived_from": "cashflow"}
 
     # -- 轮次明细 / 策略指标 / 策略开关（阶段 3） --------------------------
+    def _paper_round_trading_dates(
+        account: BrokerAccount, equity_curve: list[dict[str, Any]],
+    ) -> list[str] | None:
+        """构造覆盖各轮次区间的升序交易日历，供 ``paper_rounds`` 按交易日计持有天数。
+
+        区间 = 各轮最早成交日（≈建仓日）→ 最后净值日（无净值时今天）。日历不可用
+        （quan_store 缺失 / 无候选日 / trade_days 异常）时返回 None，由 ``paper_rounds``
+        内部降级为按净值快照日期计数（旧行为）。
+        """
+        quan = application.state.quan_store
+        if quan is None:
+            return None
+        fill_dates = [
+            str(fill.timestamp)[:10] for fill in (account.trades or [])
+            if fill.purpose != "BETA" and fill.timestamp
+        ]
+        curve_dates = [str(p.get("date")) for p in (equity_curve or []) if p.get("date")]
+        candidates = [d for d in fill_dates + curve_dates if d]
+        if not candidates:
+            return None
+        start = min(candidates)
+        end = max(curve_dates) if curve_dates else datetime.now().strftime("%Y-%m-%d")
+        # 兜底：OPEN 轮 as_of 可能晚于最后净值日（盘后新成交、日历未更新），end 取两者较大值
+        end = max(end, datetime.now().strftime("%Y-%m-%d"))
+        try:
+            return quan.trade_days(start, end)
+        except Exception:  # noqa: BLE001 - 日历异常按不可用降级
+            return None
+
     @application.get("/api/paper/accounts/{account_id}/rounds")
     def paper_rounds_endpoint(
         account_id: str, params: tuple[int, int] = Depends(page_params),
@@ -2238,7 +2278,11 @@ def create_app() -> FastAPI:
         """
         account = get_paper(account_id)
         page, page_size = params
-        rows = paper_rounds(account, storage.list_paper_equity_daily(account_id))
+        equity_curve = storage.list_paper_equity_daily(account_id)
+        rows = paper_rounds(
+            account, equity_curve,
+            trading_dates=_paper_round_trading_dates(account, equity_curve),
+        )
         return paginate(rows, page=page, page_size=page_size)
 
     @application.get("/api/paper/accounts/{account_id}/rounds/summary")
@@ -2248,7 +2292,11 @@ def create_app() -> FastAPI:
         只聚合轮次 + 成交能精确算出的字段，不含任何依赖净值曲线的统计风险指标。
         """
         account = get_paper(account_id)
-        rows = paper_rounds(account, storage.list_paper_equity_daily(account_id))
+        equity_curve = storage.list_paper_equity_daily(account_id)
+        rows = paper_rounds(
+            account, equity_curve,
+            trading_dates=_paper_round_trading_dates(account, equity_curve),
+        )
         return {
             "strategy_metrics": paper_strategy_metrics(account, rows),
             "derived_from": "rounds",
@@ -2561,9 +2609,12 @@ def create_app() -> FastAPI:
             while session_start > 0 and bars[session_start - 1].date == bar.date:
                 session_start -= 1
             recent = bars[session_start:account.cursor + 1]
+            # /advance 是真实的账户状态推进（会改并持久化 positions/cash/cursor），
+            # 日终净值随状态落 live 序列，与 live-tick 路径一致；否则「选股带入」这类
+            # 只靠 advance 驱动的账户，live 净值序列永远为空，pnl/持有交易日全废。
             apply_bar(
                 account, bar, daily_history=daily_history, index_history=index_history,
-                recent_bars=recent, daily_close=daily_close, source="replay",
+                recent_bars=recent, daily_close=daily_close, source="live",
             )
             account.cursor += 1
             account.status = "ACTIVE" if account.cursor < len(bars) else "COMPLETED"

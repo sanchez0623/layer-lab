@@ -7,8 +7,8 @@ underwater/cashflow_adjusted/monthly/exposure*/idle_ratio 全部依赖逐日净�
 
 1. storage 层：建表 / 写入 / 读取 roundtrip、同日多 ts 取最后一条、source 隔离、
    INSERT OR REPLACE 幂等；
-2. 写入钩子接线：live-tick 日终、手工 /ticks 日终、/advance 缓存回放（replay，
-   不能混进 live 序列）；
+2. 写入钩子接线：live-tick 日终、手工 /ticks 日终、/advance 数据集回放（统一写
+   live 序列，与 live-tick 一致；source=replay 仅保留给历史行的读取端）；
 3. /equity 端点契约：字段与回测 equity_curve 对齐、coverage、404、422；
 4. 旧 DB（没有 paper_equity 表）启动自动建表，不影响既有账户读取。
 """
@@ -377,8 +377,13 @@ def test_manual_tick_writes_snapshot_only_at_day_close(client):
     assert body["items"][0]["ts"] == "2026-11-12T15:00:00"
 
 
-def test_advance_writes_replay_source_never_live(application, client, tmp_path):
-    """/advance 是缓存回放：写 source=replay，绝不能混进 live 序列。"""
+def test_advance_writes_live_source_and_is_idempotent(application, client, tmp_path):
+    """/advance 是真实的账户状态推进：日终净值随状态落 live 序列，与 live-tick 一致。
+
+    回归保护：修复前 /advance 写 source=replay（不进 live），导致「选股带入」这类
+    只靠 advance 驱动的账户 live 净值序列永远为空，pnl/持有交易日全废。同时验证
+    重复 advance 同一段（PK account_id+date+ts）幂等覆盖，不产生重复行。
+    """
     bars = _daily_bars("sh.688200", [10.0, 11.0])
     path = tmp_path / "cache" / "688200_daily.csv"
     write_bars_csv(path, bars)
@@ -397,13 +402,16 @@ def test_advance_writes_replay_source_never_live(application, client, tmp_path):
     assert advanced.status_code == 200, advanced.text
 
     live = client.get(f"/api/paper/accounts/{account_id}/equity").json()
-    assert live["count"] == 0, "回放数据混进了 live 净值序列"
-
-    replay = client.get(
-        f"/api/paper/accounts/{account_id}/equity", params={"source": "replay"},
-    ).json()
-    assert replay["count"] == 2
-    assert [item["date"] for item in replay["items"]] == ["2026-10-01", "2026-10-02"]
-    assert replay["coverage"] == {
+    assert live["count"] == 2, "advance 日终净值应落 live 序列"
+    assert [item["date"] for item in live["items"]] == ["2026-10-01", "2026-10-02"]
+    assert live["coverage"] == {
         "start": "2026-10-01", "end": "2026-10-02", "count": 2,
     }
+
+    # 重复 advance 同一段：幂等覆盖，live 行数不增。
+    repeat = client.post(
+        f"/api/paper/accounts/{account_id}/advance", json={"bars": 2},
+    )
+    assert repeat.status_code == 200, repeat.text
+    again = client.get(f"/api/paper/accounts/{account_id}/equity").json()
+    assert again["count"] == 2, "重复 advance 不应产生重复 live 快照"

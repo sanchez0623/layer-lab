@@ -297,14 +297,27 @@ def _round_pnl(
     return money(account.equity + withdraw_in_round - account.initial_cash), True
 
 
-def _holding_days(dates: list[str], start_date: str, end_day: str | None) -> int | None:
-    """持有交易日数（含首尾，按已落库的逐日净值日期计）。
+def _holding_days(
+    dates: list[str], start_date: str, end_day: str | None,
+    trading_dates: list[str] | None = None,
+) -> int | None:
+    """持有交易日数（含首尾）。
 
-    没有逐日净值数据时不近似（交易日历不在本模块），返回 None。
+    优先按交易日历 ``trading_dates``（升序，[start, end] 闭区间）计数——净值快照
+    序列稀疏（如回放建仓/重置后 live 序列只有零星几天）时，按快照计数会严重低估，
+    日历口径不受快照密度影响。日历不可用（None/空）或日历计数为 0（节假日/未覆盖）
+    时，回落到旧的「按已落库逐日净值日期计」口径。两者都拿不到则返回 None（不瞎算）。
     """
-    if not dates or not end_day:
+    if not end_day:
         return None
-    return max(0, bisect_right(dates, end_day) - bisect_left(dates, start_date))
+    start_text, end_text = str(start_date)[:10], str(end_day)[:10]
+    if trading_dates:
+        count = bisect_right(trading_dates, end_text) - bisect_left(trading_dates, start_text)
+        if count > 0:
+            return count
+    if not dates:
+        return None
+    return max(0, bisect_right(dates, end_text) - bisect_left(dates, start_text))
 
 
 def _build_close_diagnostic(
@@ -342,12 +355,17 @@ def _build_close_diagnostic(
 
 def paper_rounds(
     account: BrokerAccount, equity_curve: list[dict[str, Any]] | None = None,
+    trading_dates: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """从成交流水重建模拟盘轮次明细（字段与回测 ``rounds`` 同构）。
 
     参数 ``equity_curve``：``storage.list_paper_equity_daily`` 的逐日行
     （date/equity/beta_value...，与回测 equity_curve 对齐）。空列表 = 账户还没有
     任何逐日净值快照，此时 ``pnl`` 留 None（不瞎算），三腿分拆也无从谈起。
+
+    参数 ``trading_dates``：升序交易日历（覆盖各轮区间），供 ``holding_days`` 按
+    交易日计（不受净值快照密度影响）。None/空时 ``holding_days`` 降级为按净值快照
+    日期计数（旧行为）。
 
     返回按建仓顺序编号（R001 起）的轮次列表；``status=OPEN`` 的轮次
     ``end_date=None``，pnl 用当前账户权益收尾。
@@ -418,7 +436,7 @@ def paper_rounds(
             closed=closed, is_first_round=number == 1,
             withdraw_in_round=withdraw_in_round,
         )
-        holding_days = _holding_days(dates, start_date, as_of)
+        holding_days = _holding_days(dates, start_date, as_of, trading_dates)
 
         stock_pnl = beta_pnl = None
         if pnl is not None:
