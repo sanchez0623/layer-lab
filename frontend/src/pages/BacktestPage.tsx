@@ -532,7 +532,9 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
       jobIdRef.current = jobId;
       setRunning(true);
       const view = await api.backtestJobProgress(jobId);
-      setJobView(view);
+      // 续跑成功即清掉中断时写入的 error（后端 resume 已置 error=None），红字提示立刻消失，
+      // 不再残留到进度条/终态；真正再次出错时后端会写入新 error，红字才会重新出现。
+      setJobView({ ...view, error: null });
       if (JOB_TERMINAL_STATUSES.includes(view.status)) await settleJob(view);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '续跑失败，请稍后重试。');
