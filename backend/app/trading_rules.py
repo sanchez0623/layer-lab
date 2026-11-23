@@ -33,10 +33,11 @@ class BoardRules:
 
     数量字段（min_qty/step/odd_lot_threshold）单位为股；
     limit_order_cap / market_order_cap 是**单笔申报上限股数**（不是金额！）：
-    沪深交易所对各板块市价/限价申报的笔数上限以「股」为单位，例如创业板市价单笔
-    不超过 5 万股、限价单笔不超过 10 万股；**ETF 与股票不同**，单笔申报上限统一为
-    100 万份（限价/市价均同）。早期版本曾误把该上限按「元」建模，导致回测里大额
-    止盈卖单被误判 REJECTED，此处统一纠正为股数口径。
+    沪深交易所对各板块市价/限价申报的笔数上限以「股」为单位，例如创业板限价单笔
+    不超过 30 万股、市价单笔不超过 15 万股（深交所《交易规则》3.3.9）；沪深主板与
+    B股不单列市价上限，统一适用「单笔申报不超过 100 万股(份)」；**ETF 与股票不同**，
+    单笔申报上限统一为 100 万份（限价/市价均同）。早期版本曾误把该上限按「元」建模，
+    导致回测里大额止盈卖单被误判 REJECTED，此处统一纠正为股数口径。
     """
 
     board: str                 # 板块名，如「科创板」
@@ -52,7 +53,9 @@ class BoardRules:
 
     @property
     def cage_label(self) -> str:
-        """价格笼子的展示口径。"""
+        """价格笼子的展示口径。cage_pct<=0 表示该板块不适用价格笼子（如 ETF）。"""
+        if self.cage_pct <= 0:
+            return "不适用"
         if self.cage_abs_floor <= 0:
             return f"纯 {self.cage_pct * 100:g}%"
         return f"{self.cage_pct * 100:g}% 与 {self.cage_abs_floor:g} 元孰高"
@@ -98,45 +101,48 @@ def _all_rules() -> dict[str, BoardRules]:
         ),
         "创业板": BoardRules(
             board="创业板", min_qty=100, step=100,
-            limit_order_cap=100_000.0, market_order_cap=50_000.0,
+            limit_order_cap=300_000.0, market_order_cap=150_000.0,
             odd_lot_threshold=100, limit_pct=0.20,
             cage_pct=0.02, cage_abs_floor=0.10, rule_basis=_RULE_BASIS,
         ),
         "沪市主板": BoardRules(
             board="沪市主板", min_qty=100, step=100,
-            limit_order_cap=1_000_000.0, market_order_cap=100_000.0,
+            limit_order_cap=1_000_000.0, market_order_cap=1_000_000.0,
             odd_lot_threshold=100, limit_pct=0.10,
             cage_pct=0.02, cage_abs_floor=0.10, rule_basis=_RULE_BASIS,
         ),
         "深市主板": BoardRules(
             board="深市主板", min_qty=100, step=100,
-            limit_order_cap=1_000_000.0, market_order_cap=100_000.0,
+            limit_order_cap=1_000_000.0, market_order_cap=1_000_000.0,
             odd_lot_threshold=100, limit_pct=0.10,
             cage_pct=0.02, cage_abs_floor=0.10, rule_basis=_RULE_BASIS,
         ),
         "沪市B股": BoardRules(
             board="沪市B股", min_qty=100, step=100,
-            limit_order_cap=1_000_000.0, market_order_cap=100_000.0,
+            limit_order_cap=1_000_000.0, market_order_cap=1_000_000.0,
             odd_lot_threshold=100, limit_pct=0.10,
             cage_pct=0.02, cage_abs_floor=0.10, rule_basis=_RULE_BASIS,
         ),
         "深市B股": BoardRules(
             board="深市B股", min_qty=100, step=100,
-            limit_order_cap=1_000_000.0, market_order_cap=100_000.0,
+            limit_order_cap=1_000_000.0, market_order_cap=1_000_000.0,
             odd_lot_threshold=100, limit_pct=0.10,
             cage_pct=0.02, cage_abs_floor=0.10, rule_basis=_RULE_BASIS,
         ),
         # 交易所交易基金（ETF）：深市 159xxx / 沪市 51x/56x/58x。
-        # 股票型 ETF 为 T+1、100 份整数手；创业板 ETF 跟踪创业板，涨跌幅 ±20%
-        # （2020 年创业板注册制改革后同步放宽），其余 ETF ±10% 不在本期建模范围。
-        # 单笔申报上限：ETF 统一为 100 万份（限价/市价均同），与股票不同
-        # （创业板/科创板市价 5 万、限价 10 万；主板市价 10 万、限价 100 万）。
+        # 股票型 ETF 为 T+1、100 份整数手；跟踪科创板/创业板的 ETF 涨跌幅 ±20%
+        # （一般 ETF ±10%），本系统仅建模 20cm 的创业板 ETF 159915。
+        # 单笔申报上限：ETF 统一为 100 万份（限价/市价均同），与股票不同。
+        # 价格笼子：沪深「±2% 与 0.1 元孰高」条款的主语是「买卖股票」，基金不适用，
+        # ETF 仅受涨跌幅与最小变动单位约束，故 cage_pct/cage_abs_floor 均为 0。
         "ETF": BoardRules(
             board="ETF", min_qty=100, step=100,
             limit_order_cap=1_000_000.0, market_order_cap=1_000_000.0,
             odd_lot_threshold=100, limit_pct=0.20,
-            cage_pct=0.02, cage_abs_floor=0.10,
-            rule_basis=f"依据{_HU_SHEN_ZHU_BAN}基金交易口径（T+1、100份整数手、单笔上限100万份、创业板ETF ±20%）",
+            cage_pct=0.0, cage_abs_floor=0.0,
+            rule_basis=f"依据{_HU_SHEN_ZHU_BAN}基金交易口径（T+1、100份整数手、单笔上限100万份、"
+                       f"ETF 不适用价格笼子、跟踪科创板/创业板的 ETF 为 ±20%——一般 ETF 为 ±10%，"
+                       f"本系统仅建模 20cm 的创业板ETF 159915）",
         ),
     }
 
@@ -241,10 +247,10 @@ def validate_order_amount(
 ) -> str:
     """按板块校验单笔申报数量上限（限价/市价分别计，单位为**股**）。
 
-    沪深交易所对各板块的单笔申报上限以「股」计（如创业板市价单笔 ≤5 万股、
-    限价单笔 ≤10 万股；**ETF 为 100 万份**，限价/市价同口径），与委托金额、
-    价格无关，故本函数只看数量；``unit_price`` 参数仅为兼容旧调用方保留，
-    不参与判定。上限为 0 表示未建模（合成标的回退口径），直接放行。
+    沪深交易所对各板块的单笔申报上限以「股」计（如创业板限价单笔 ≤30 万股、市价单笔
+    ≤15 万股；沪深主板/B股统一单笔 ≤100 万股(份)；**ETF 为 100 万份**，限价/市价同
+    口径），与委托金额、价格无关，故本函数只看数量；``unit_price`` 参数仅为兼容旧
+    调用方保留，不参与判定。上限为 0 表示未建模（合成标的回退口径），直接放行。
     注意：市价单没有委托价也能校验，broker 层不应因缺价格跳过。
     """
     rules = rules_for(symbol)
@@ -271,9 +277,9 @@ def split_quantity(symbol: str, quantity: int, order_type: str = "MARKET") -> li
     """把一笔委托数量按板块单笔申报上限拆成多笔合规子单数量。
 
     背景：清仓/止盈常需一次卖出整个持仓（如创业板 176,200 股），但交易所对
-    单笔市价申报有上限（创业板/科创板市价 5 万股、主板 10 万股、**ETF 100 万份**），
-    整笔提交必被拒。此函数返回每笔都 ``<= cap`` 且满足 ``min_qty``/``step``
-    的子单数量，供 broker 逐笔提交。
+    单笔市价申报有上限（创业板市价 15 万股、科创板市价 5 万股、沪深主板/B股/ETF
+    统一 100 万股(份)），整笔提交必被拒。此函数返回每笔都 ``<= cap`` 且满足
+    ``min_qty``/``step`` 的子单数量，供 broker 逐笔提交。
 
     规则：
     - ``quantity <= 0`` → ``[]``；未超额或该板块未建模上限（合成标的）→ 原样一笔。
@@ -325,6 +331,8 @@ def price_cage_bounds(symbol: str, reference_price: float) -> tuple[float, float
 
     - 科创板：纯 ±2%。
     - 创业板/沪深主板：±2% 与 ±0.1 元孰高（低价股用绝对值放宽）。
+    - ETF：不适用价格笼子（沪深该条款主语是「买卖股票」，基金只受涨跌幅与
+      最小变动单位约束），cage_pct=0 → 返回 None。
     """
     rules = rules_for(symbol)
     if rules.cage_pct <= 0 or reference_price <= 0:
