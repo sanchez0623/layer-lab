@@ -311,7 +311,7 @@ export default function PaperPage() {
     return () => { cancelled = true; };
   }, [derivedAccountId, configSnapshotKey]);
 
-  // 六板块规则全表：进页面拉一次，供「全部板块」对比视图使用。
+  // 板块规则全表：进页面拉一次，供「全部板块」对比视图使用（后端返回含 B股，渲染时过滤）。
   useEffect(() => {
     let cancelled = false;
     api.tradingRulesAll()
@@ -1787,14 +1787,14 @@ export default function PaperPage() {
 
           <div className="mb-3 flex items-start gap-1.5 text-[10px] leading-4 text-muted-foreground"><CircleDollarSign className="mt-0.5 size-3.5 shrink-0" /><span>账户权益与盈亏均由本地后端仿真状态计算。模拟结果不代表实盘表现，也不构成收益承诺。</span></div>
 
-          <Panel className="mb-3" title={`交易规则 · ${rulesView === 'all' ? '全部板块对比' : (tradingRules?.board || '按标的加载')}`} description={rulesView === 'all' ? '六板块口径并列对比；下单校验仍以当前标的所属板块为准' : (tradingRules ? (tradingRules.is_modeled_board ? tradingRules.rules.rule_basis : '合成标的无板块，回退「100股整数手 + ±20%」旧口径') : '输入 6 位标的代码后加载其板块交易规则')} action={<div className="flex items-center gap-2"><Segmented value={rulesView} onChange={(value) => setRulesView(value as 'current' | 'all')} options={[{ value: 'current', label: '当前标的' }, { value: 'all', label: '全部板块' }]} /><Button variant="outline" size="sm" onClick={() => setRulesOpen(!rulesOpen)}>{rulesOpen ? '收起' : '展开'}</Button></div>}>
+          <Panel className="mb-3" title={`交易规则 · ${rulesView === 'all' ? '全部板块对比' : (tradingRules?.board || '按标的加载')}`} description={rulesView === 'all' ? '创业板/科创板/沪深主板/ETF 口径并列对比；B股不在模拟交易范围；下单校验仍以当前标的所属板块为准' : (tradingRules ? (tradingRules.is_modeled_board ? tradingRules.rules.rule_basis : '合成标的无板块，回退「100股整数手 + ±20%」旧口径') : '输入 6 位标的代码后加载其板块交易规则')} action={<div className="flex items-center gap-2"><Segmented value={rulesView} onChange={(value) => setRulesView(value as 'current' | 'all')} options={[{ value: 'current', label: '当前标的' }, { value: 'all', label: '全部板块' }]} /><Button variant="outline" size="sm" onClick={() => setRulesOpen(!rulesOpen)}>{rulesOpen ? '收起' : '展开'}</Button></div>}>
             {rulesView === 'all' ? (
-              allBoards.length === 0 ? <Loading label="正在加载六板块规则全表" /> : (
+              allBoards.length === 0 ? <Loading label="正在加载板块规则全表" /> : (
                 <div className="grid gap-2">
                   <Table>
                     <TableHeader><TableRow><TableHead>板块</TableHead><TableHead className="text-right">最小申报</TableHead><TableHead className="text-right">递增</TableHead><TableHead className="text-right">限价上限</TableHead><TableHead className="text-right">市价上限</TableHead><TableHead className="text-right">零股卖出</TableHead><TableHead className="text-right">涨跌幅</TableHead><TableHead className="text-right">价格笼子</TableHead></TableRow></TableHeader>
                     <TableBody>
-                      {allBoards.map((board) => {
+                      {allBoards.filter((b) => !b.board.includes('B股')).map((board) => {
                         const isCurrent = tradingRules?.board === board.board;
                         return <TableRow key={board.board} className={isCurrent ? 'bg-accent/40' : ''}><TableCell><strong className="inline-flex items-center gap-1.5">{board.board}{isCurrent && <Badge tone="indigo">当前</Badge>}</strong></TableCell><TableCell className="text-right font-mono text-[12px]">{integer(board.min_qty)} 股</TableCell><TableCell className="text-right font-mono text-[12px]">{board.step === 1 ? '1 股' : `${integer(board.step)} 整数倍`}</TableCell><TableCell className="text-right font-mono text-[12px]">{board.limit_order_cap > 0 ? `${integer(board.limit_order_cap)} 股` : '未建模'}</TableCell><TableCell className="text-right font-mono text-[12px]">{board.market_order_cap > 0 ? `${integer(board.market_order_cap)} 股` : '未建模'}</TableCell><TableCell className="text-right font-mono text-[12px]">{board.odd_lot_label}</TableCell><TableCell className="text-right font-mono text-[12px]">{number(board.limit_pct * 100, 0)}%</TableCell><TableCell className="text-right font-mono text-[12px]">{board.cage_label}</TableCell></TableRow>;
                       })}

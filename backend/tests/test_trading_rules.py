@@ -108,15 +108,16 @@ def test_star_order_amount_caps():
 
 
 def test_gem_and_main_order_amount_caps():
-    # 创业板：限价 ≤10 万股、市价 ≤5 万股；沪市主板：限价 ≤100 万股、市价 ≤10 万股。
-    assert validate_order_amount("sz.300001", 100_000, "LIMIT") == ""
-    assert validate_order_amount("sz.300001", 100_001, "LIMIT") != ""
-    assert validate_order_amount("sz.300001", 50_000, "MARKET") == ""
-    assert validate_order_amount("sz.300001", 50_001, "MARKET") != ""
+    # 创业板：限价 ≤30 万股、市价 ≤15 万股（深交所 3.3.9）；
+    # 沪市主板：限价/市价统一 ≤100 万股（现行规则主板不单列 10 万股市价上限）。
+    assert validate_order_amount("sz.300001", 300_000, "LIMIT") == ""
+    assert validate_order_amount("sz.300001", 300_001, "LIMIT") != ""
+    assert validate_order_amount("sz.300001", 150_000, "MARKET") == ""
+    assert validate_order_amount("sz.300001", 150_001, "MARKET") != ""
     assert validate_order_amount("sh.600519", 1_000_000, "LIMIT") == ""
     assert validate_order_amount("sh.600519", 1_000_001, "LIMIT") != ""
-    assert validate_order_amount("sh.600519", 100_000, "MARKET") == ""
-    assert validate_order_amount("sh.600519", 100_001, "MARKET") != ""
+    assert validate_order_amount("sh.600519", 1_000_000, "MARKET") == ""
+    assert validate_order_amount("sh.600519", 1_000_001, "MARKET") != ""
 
 
 def test_synthetic_symbol_has_no_amount_cap():
@@ -254,10 +255,16 @@ def test_etf_board_rules_and_detection():
     etf = rules_for("sz.159915")
     assert etf.min_qty == 100 and etf.step == 100
     assert etf.limit_pct == 0.20          # 创业板 ETF 涨跌幅 ±20%
-    assert etf.cage_label == "2% 与 0.1 元孰高"
+    assert etf.cage_label == "不适用"      # ETF 不适用价格笼子
     # 普通个股不会被误判成 ETF
     assert board_of("sz.300001") == "创业板"
     assert board_of("sh.600519") == "沪市主板"
+
+
+def test_etf_has_no_price_cage():
+    """ETF 不适用价格笼子：bounds 返回 None、限价笼子校验恒放行。"""
+    assert price_cage_bounds("sz.159915", 100.0) is None
+    assert validate_limit_price_cage("sz.159915", 200.0, 100.0) == ""
 
 
 def test_etf_order_quantity_and_amount_caps():
@@ -328,10 +335,10 @@ def test_manual_star_order_201_accepted_by_api(tmp_path, monkeypatch):
 # ---------------- 单笔申报上限拆分 ----------------
 
 def test_order_share_cap_per_board_and_order_type():
-    assert order_share_cap("sz.300045", "MARKET") == 50_000
-    assert order_share_cap("sz.300045", "LIMIT") == 100_000
+    assert order_share_cap("sz.300045", "MARKET") == 150_000
+    assert order_share_cap("sz.300045", "LIMIT") == 300_000
     assert order_share_cap("sh.688200", "MARKET") == 50_000
-    assert order_share_cap("sh.600519", "MARKET") == 100_000
+    assert order_share_cap("sh.600519", "MARKET") == 1_000_000
     # ETF 单笔申报上限 100 万份（限价/市价同口径）。
     assert order_share_cap("sz.159915", "MARKET") == 1_000_000
     assert order_share_cap("sz.159915", "LIMIT") == 1_000_000
@@ -339,19 +346,21 @@ def test_order_share_cap_per_board_and_order_type():
 
 
 def test_split_quantity_gem_large_liquidation():
-    """回归：创业板 176,200 股整笔市价卖出超 5 万股上限，必须拆成 4 笔。"""
+    """回归：创业板 176,200 股整笔市价卖出超 15 万股上限，必须拆成 2 笔。"""
     chunks = split_quantity("sz.300045", 176_200, "MARKET")
-    assert chunks == [50_000, 50_000, 50_000, 26_200]
-    assert all(0 < qty <= 50_000 and qty % 100 == 0 for qty in chunks)
+    assert chunks == [150_000, 26_200]
+    assert all(0 < qty <= 150_000 and qty % 100 == 0 for qty in chunks)
     assert sum(chunks) == 176_200
 
 
 def test_split_quantity_uses_limit_cap_for_limit_orders():
-    assert split_quantity("sz.300045", 176_200, "LIMIT") == [100_000, 76_200]
+    # 创业板限价单笔上限 30 万股：176,200 股一笔记可容纳，单笔返回。
+    assert split_quantity("sz.300045", 176_200, "LIMIT") == [176_200]
 
 
 def test_split_quantity_main_board_and_synthetic():
-    assert split_quantity("sh.600519", 120_000, "MARKET") == [100_000, 20_000]
+    # 沪市主板市价单笔上限 100 万股：120,000 股单笔即可容纳。
+    assert split_quantity("sh.600519", 120_000, "MARKET") == [120_000]
     # 合成标的未建模上限：原样一笔，不改变旧回测/旧测试行为。
     assert split_quantity("TEST", 500_000, "MARKET") == [500_000]
 
@@ -382,9 +391,9 @@ def test_split_quantity_odd_lot_liquidation_single_chunk():
 def test_submit_split_emits_cap_conformant_child_orders():
     account = BrokerAccount(100_000_000, config())
     orders = account.submit_split(request("sz.300045", quantity=176_200))
-    assert len(orders) == 4
+    assert len(orders) == 2
     assert sum(order.quantity for order in orders) == 176_200
-    assert all(order.status == "PENDING" and order.quantity <= 50_000 for order in orders)
+    assert all(order.status == "PENDING" and order.quantity <= 150_000 for order in orders)
 
 
 def test_submit_still_rejects_oversize_manual_order():
@@ -396,10 +405,11 @@ def test_submit_still_rejects_oversize_manual_order():
 
 
 def test_liquidation_of_large_position_splits_and_never_rejected():
-    """回归 REPORT/4ECFE242：整笔 176,200 股清仓被拆成 4 笔合规卖单，不再刷拒绝。
+    """回归 REPORT/4ECFE242：整笔 176,200 股清仓被拆成合规卖单，不再刷拒绝。
 
-    历史 bug：策略把整个持仓当一笔市价卖单提交，超创业板 5 万股上限被拒，
+    历史 bug：策略把整个持仓当一笔市价卖单提交，超创业板单笔上限被拒，
     且 liquidating 状态每根 K 线重发，单份报告刷出 2.4 万条相同拒绝。
+    现行创业板市价单笔上限 15 万股，176,200 股拆成 2 笔（15 万 + 2.62 万）。
     """
     from datetime import datetime
 
@@ -420,8 +430,8 @@ def test_liquidation_of_large_position_splits_and_never_rejected():
     submit_split_requests(account, requests, datetime(2024, 10, 8, 13, 25), events, warnings)
 
     sells = [order for order in account.orders if order.side == "SELL"]
-    assert len(sells) == 4
+    assert len(sells) == 2
     assert sum(order.quantity for order in sells) == 176_200
     assert all(order.status == "PENDING" for order in sells)
     assert warnings == []
-    assert len(events) == 4
+    assert len(events) == 2
