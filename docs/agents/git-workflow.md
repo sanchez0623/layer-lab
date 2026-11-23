@@ -89,3 +89,42 @@ git -c http.sslbackend=openssl push "https://x-access-token:$tok@github.com/sanc
   另外 `git-credential-wincred.exe ... No such file or directory` 的 erase/store 报错同样是**无害噪音**
   （沙箱里 helper 缺失），只要内嵌 token 的 push 最终成功就忽略。
 - token 全程只在内存、不回显、不落盘；临时读取脚本用完即删（`$tok = $null`）。
+
+### HTTPS push 被 DNS 污染卡死时：切 SSH over 443（2026-11-23 实测解法）
+
+上面那套 HTTPS + token 方法依赖能连上 `github.com:443`。但凌晨时段可能遇到
+**DNS 污染**：`Resolve-DnsName github.com` 把域名解析到被墙的 IP（如实测解析到
+`20.247.166.64`，连接直接 `Connection was reset` / `port 443 Could not connect`），
+而 `curl --resolve github.com:443:140.82.121.4 https://github.com/` 用可用 IP 直连
+却返回 200——证明**纯 DNS 解析问题，不是凭据、不是代码**。此时重试 HTTPS push 无效，
+改 hosts 又需管理员权限（沙箱内 `Access denied`）。
+
+**可靠绕法：走 SSH over 443**（`ssh.github.com:443` 是另一个域名+端口，通常不在污染范围）。
+项目已预配好 SSH（`~/.ssh/config` 里 `Host github.com` → `HostName ssh.github.com` /
+`Port 443` / `IdentityFile ~/.ssh/id_ed25519`），无需额外配置：
+
+```powershell
+# 1) 探测 SSH 端点连通 + 认证（首次会写 known_hosts，输出含 "Hi sanchez0623!" 即成功；
+#    ssh -T 正常退出码是 1，因为 GitHub 不提供 shell，别当成失败）
+ssh -T git@github.com -o StrictHostKeyChecking=accept-new -o ConnectTimeout=20
+# 2) 直接用 SSH URL 推送（不必先改 remote，一次性）：
+git push git@github.com:sanchez0623/layer-lab.git main
+# 3) 验证远端确实收到（比对远端 HEAD 是否等于本地 commit）：
+git ls-remote git@github.com:sanchez0623/layer-lab.git main
+```
+
+诊断顺序（push 卡住时按此排查，别一上来就怀疑凭据）：
+1. `Test-NetConnection github.com -Port 443` 通不通；不通则 `Resolve-DnsName github.com`
+   看解析到的 IP，再用 `curl --resolve github.com:443:<可用IP> https://github.com/` 测
+   该 IP 能否完成 TLS（HTTP 200 = IP 可用，纯 DNS 问题）。
+2. DNS 被污染 → 走上面 SSH over 443（首选，已验证稳定）。
+3. 临时把 remote 切成 SSH（可选，一劳永逸避开 HTTPS 的 DNS 干扰）：
+   `git remote set-url origin git@github.com:sanchez0623/layer-lab.git`
+   **完全可逆**，随时切回 HTTPS：`git remote set-url origin https://github.com/sanchez0623/layer-lab.git`
+   （只动本仓库 `.git/config` 一行 URL，不影响线上/其他仓库/SSH key；原 HTTPS token 凭据保留，
+   切回即用。切完 `git fetch origin` + `git push --dry-run origin main` 双向验证。）
+4. 本地代理（Clash 等）没开时别指望 `http.proxy`——先 `Get-NetTCPConnection -State Listen`
+   确认代理端口真在监听，否则 `ProxyServer` 里配的端口（如 7897）是死的。
+
+> 经验：HTTPS 推送「fetch 偶尔通、push 稳定失败」且重试 4+ 次全挂时，基本可判定是
+> DNS 污染而非抖动，直接跳到 SSH 方案，别在 HTTPS 重试上耗时间。
