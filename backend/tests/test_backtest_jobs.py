@@ -331,6 +331,48 @@ def test_resume_after_recover_completes(tmp_path):
     assert len(finished) == 1
 
 
+def test_update_job_error_none_clears_persisted_error(tmp_path):
+    """update_job(error=None) 必须真把 error 写成 NULL（清空）。
+
+    回归锁：旧实现里所有列共用「value is not None 才更新」的约定，导致 resume 时
+    传 error=None 被当成「没传这个参数」跳过，中断时落库的错误文案永远清不掉，
+    前端点「继续」后红字提示一路残留（2026-11-24 踩坑）。
+    """
+    storage = SQLiteStorage(tmp_path / "clear_error.db")
+    job_id = _seed_orphan_job(storage, "INTERRUPTED")
+    storage.update_job(job_id, error="进程重启导致回测中断，可从检查点续传。")
+    assert storage.get_job(job_id)["error"] == "进程重启导致回测中断，可从检查点续传。"
+
+    storage.update_job(job_id, error=None)   # resume 续跑时的清空动作
+    assert storage.get_job(job_id)["error"] is None
+
+
+def test_resume_clears_interrupted_error_in_progress_view(tmp_path):
+    """resume 后轮询 get_progress 拿到的 error 必须为空——前端红字提示据此消失。
+
+    复刻线上场景：recover_interrupted 写入中断 error → 点「继续」resume →
+    轮询期间/终态 get_progress 都不应再带回中断文案（否则前端红字残留到终态）。
+    """
+    storage = SQLiteStorage(tmp_path / "resume_clear.db")
+    finished: list[dict] = []
+
+    def builder(params, hooks, resume_state, checkpoint):
+        engine = _PacedEngine(total_days=2, pace=None)
+        engine.hooks = hooks
+        return Execution(engine, lambda report: finished.append(report))
+
+    manager = BacktestJobManager(storage, builder)
+    job_id = _seed_orphan_running_job(storage)
+    manager.recover_interrupted()
+    assert manager.get_progress(job_id)["error"]     # 中断时确有 error
+
+    manager.resume(job_id)                           # 点「继续」
+    assert manager.get_progress(job_id)["error"] is None   # 续跑即清（轮询不再带回红字）
+    job = wait_for_terminal(manager, storage, job_id)
+    assert job["status"] == "COMPLETED"
+    assert job["error"] is None                      # 终态也不残留中断文案
+
+
 # --------------------------------------------------------------------------
 # 6. 边界
 # --------------------------------------------------------------------------
