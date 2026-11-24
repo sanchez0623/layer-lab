@@ -666,12 +666,14 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
     }
   };
 
-  // 浏览器前进/后退：reportId prop 变化时打开或关闭详情。打开走 loadReport（内部已同步 hash），
-  // 关闭走 closeDetail。用「实时 hash」做守卫：组件内点击已自行写好 hash，此处不重复动作，
-  // 故 hash 由本组件写入触发的 reportId 回流不会再触发打开/关闭，避免死循环。
+  // 浏览器前进/后退 + 刷新恢复：reportId prop 变化时打开或关闭详情。
+  // 只用 report?.id 做守卫即可：loadReport 异步完成后 report.id === initialReportId，
+  // hash 回流再触发 effect 时条件为 false，自然跳过，不会死循环。
+  // 不再额外比对 readBacktestHashId()（刷新时 hash 与 initialReportId 必然相同，
+  // 那个守卫会错误地阻止初始加载，导致刷新后永远停在 run tab 而不进详情）。
   useEffect(() => {
     if (initialReportId) {
-      if (initialReportId !== report?.id && readBacktestHashId() !== initialReportId) {
+      if (initialReportId !== report?.id) {
         void loadReport(initialReportId);
       }
     } else if (viewingReport && !readBacktestHashId()) {
