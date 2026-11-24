@@ -13,7 +13,7 @@ from typing import Any, Literal
 import requests
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from . import auth
@@ -665,7 +665,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.2.0",
+        version="3.2.2",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage
@@ -1598,6 +1598,22 @@ def create_app() -> FastAPI:
             "trading_calendar": application.state.fuyao_calendar.status(),
             "realtime_interval_seconds": REALTIME_INTERVAL_SECONDS,
         }
+
+    @application.get("/api/data/{filename}")
+    def download_data(filename: str):
+        """下载 quan 数据文件（daily.parquet / adj_factor.parquet 等），供本地回测复用。
+
+        只允许访问 quan 数据目录内的单个文件（``Path(name).name`` 防路径穿越）。
+        """
+        if quan_store is None:
+            raise HTTPException(404, "quan 数据源未启用")
+        name = Path(filename).name
+        if not name:
+            raise HTTPException(400, "非法文件名")
+        file = quan_store.path / name
+        if not file.is_file():
+            raise HTTPException(404, f"文件不存在: {name}")
+        return FileResponse(file, filename=name, media_type="application/octet-stream")
 
     @application.get("/api/strategy/defaults")
     def strategy_defaults():
