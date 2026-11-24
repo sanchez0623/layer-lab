@@ -180,6 +180,10 @@ class StrategyConfig:
     # T+1（默认）= 次日尾盘截止，T0 当日不强平。校验见 __post_init__。
     t_exit_cutoff_day: str = "T+1"
     deep_loss_threshold: float = -0.10
+    # 硬止损（开关：0 = 关闭，负值 = 启用）。持仓价格收益 ≤ stop_loss_pct 时立即清仓，
+    # 不等 force_exit_holding_days 强平。与 deep_loss_threshold（只记录深亏日期不触发）
+    # 不同——这是真正触发平仓的止损线。默认 0 = 关闭（向后兼容）。
+    stop_loss_pct: float = 0.0
     # 超期持仓降阈止盈：持有超过 max_holding_days 个交易日后，价格轨/账户轨止盈阈值
     # 降为 holding_tp_override（0~1 小数）。None 表示关闭该逻辑（维持 price_take_profit）。
     # 目的：避免资金被长期套牢在「既不到 15% 止盈、也不触发 Armed 背离」的缓慢阴跌标的里。
@@ -321,6 +325,10 @@ class StrategyConfig:
         if not 0 <= forced <= 250:
             raise ValueError("force_exit_holding_days 必须在 0~250 个交易日之间（0 = 不限）")
         self.force_exit_holding_days = forced
+        # 硬止损：0 = 关闭；负值必须是 [-1, 0) 内的止损比例（如 -0.10 = -10%）。
+        if not -1 <= float(self.stop_loss_pct) <= 0:
+            raise ValueError("stop_loss_pct 必须在 [-1, 0] 内（0 = 关闭，负值 = 止损比例）")
+        self.stop_loss_pct = float(self.stop_loss_pct)
         self.installment_amounts = [float(x) for x in self.installment_amounts]
         # ---- ETF beta 腿校验 -------------------------------------------------
         symbol = str(self.etf_symbol or "").strip().lower()

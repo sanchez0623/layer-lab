@@ -98,6 +98,13 @@ class ScreenerConfig:
     boards: list[str] = field(default_factory=lambda: ["创业板", "科创板"])
     chg20_max: float = -0.15            # L1: Chg20D < -15%
     week52_drawdown: float = 0.30       # L1: Close < High250 × (1-0.30)
+    # ---- L1 企稳（开关，默认全关 = 原行为，向后兼容）----------------------
+    # 深跌股均值回归最怕「价值陷阱」：跌了还继续跌。以下参数要求入选时已有企稳信号，
+    # 避免选到仍在下杀、只跌不反弹的标的。默认全关（False/0/None）保持原 L1 行为。
+    # 注意：策略按 chg20d 选最深（最可能价值陷阱），企稳信号是收紧方向。
+    l1_above_ma20: bool = False          # 要求 close > 20日均线（站上均线 = 企稳）
+    l1_stabilize_days: int = 0           # 要求 close > 近 N 日最低（止跌；0 = 关闭）
+    l1_min_rebound: float | None = None  # 要求 chg20d > 该值（防自由落体；None = 关闭）
     day_change_max: float = 0.05        # L2: 当日涨幅 > 5% 否决
     min_amount: float = 5e8             # L3: 当日成交额 ≥ 5亿
     min_avg_amount_20d: float = 5e8     # L3: 20日均成交额 ≥ 5亿
@@ -140,6 +147,13 @@ class ScreenerConfig:
                 raise ValueError(f"{name} 必须是有限数值")
             setattr(self, name, value)
         self.min_listing_sessions = max(0, int(self.min_listing_sessions))
+        # L1 企稳校验：stabilize_days 非负整数；min_rebound 为 None 或在 [-1,0) 内。
+        self.l1_stabilize_days = max(0, int(self.l1_stabilize_days))
+        if self.l1_min_rebound is not None:
+            value = float(self.l1_min_rebound)
+            if not -1 <= value < 0:
+                raise ValueError("l1_min_rebound 必须是 [-1,0) 内的小数（None = 关闭）")
+            self.l1_min_rebound = value
         self.max_deep_checks = max(0, int(self.max_deep_checks))
         self.blacklist = [str(item) for item in (self.blacklist or [])]
 
@@ -712,6 +726,20 @@ def run_screener(
                 continue
             drawdown = 1 - close / week52_high
             if not (chg20d < cfg.chg20_max and close < week52_high * (1 - cfg.week52_drawdown)):
+                continue
+            # L1 企稳（开关，默认全关 = 原行为）：深跌入选后要求已有止跌/企稳信号，
+            # 避免选到仍在下杀的价值陷阱。bars 已保证 ≥21 根（上面 len(bars)<21 兜底）。
+            if cfg.l1_above_ma20:
+                window20 = bars[-20:]
+                ma20 = sum(bar.close for bar in window20) / len(window20)
+                if close <= ma20:
+                    continue
+            if cfg.l1_stabilize_days > 0:
+                # 排除当日：close 必须站上前 N 日最低（止跌），否则视为仍在下杀。
+                recent_low = min(bar.low for bar in bars[-cfg.l1_stabilize_days - 1:-1])
+                if close <= recent_low:
+                    continue
+            if cfg.l1_min_rebound is not None and chg20d <= cfg.l1_min_rebound:
                 continue
             prev_close = bars[-1].prev_close
             if prev_close is None or prev_close <= 0:

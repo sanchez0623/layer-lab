@@ -64,6 +64,20 @@ export default function ScreenerConfigPanel({ value, onChange, fundamentalLocked
           <Param label="距52周高回撤" hint="收盘价低于 250 日高点回撤线">
             <NumberInput unit="%" min={0} step={1} value={percentValue(value.week52_drawdown)} onChange={(raw) => setRatio('week52_drawdown', raw)} />
           </Param>
+          <Param label="L1 企稳：站上20日线" hint="要求收盘 > 20日均线（企稳），避免选到仍在下杀的价值陷阱">
+            <Switch checked={value.l1_above_ma20} onCheckedChange={(checked) => patch({ l1_above_ma20: checked })} />
+          </Param>
+          <Param label="L1 企稳：止跌 N 日" hint="要求收盘 > 近 N 日最低（止跌）；0 = 关闭">
+            <NumberInput unit="日" min={0} step={1} precision={0} value={value.l1_stabilize_days} onChange={(raw) => patch({ l1_stabilize_days: Math.max(0, Number(raw) || 0) })} />
+          </Param>
+          <Param label="L1 企稳：20日跌幅下限" hint="要求 20日涨跌幅 > 该值（防自由落体）；留空 = 关闭">
+            <NumberInput unit="%" step={1} allowEmpty value={value.l1_min_rebound != null ? percentValue(value.l1_min_rebound) : ''} onChange={(raw) => {
+              if (raw.trim() === '') { patch({ l1_min_rebound: null }); return; }
+              const parsed = Number(raw);
+              if (!Number.isFinite(parsed)) return;
+              patch({ l1_min_rebound: parsed / 100 });
+            }} />
+          </Param>
         </>
       ),
     },

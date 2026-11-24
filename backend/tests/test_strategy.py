@@ -179,6 +179,46 @@ def test_force_exit_holding_days_validation():
     ).force_exit_holding_days == 30
 
 
+def test_stop_loss_liquidates_when_loss_hits_threshold():
+    """硬止损：持仓价格收益 ≤ 止损线即立即清仓（不等最大持仓天数强平）。"""
+    account = funded_account()  # 建仓成本 10.0
+    config = StrategyConfig(slippage_bps=0, volume_participation=1.0, stop_loss_pct=-0.10)
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    strategy.round_entry_date = "2025-01-01"
+    # 持有 3 天，浮亏 -10%（9.0/10.0-1）：触发硬止损清仓。
+    history = [daily(i, 9.0) for i in range(1, 4)]
+    requests = strategy.on_daily(history, [], account, 3, False)
+    assert any(item.side == "SELL" and item.purpose == "PERMANENT" for item in requests)
+    assert strategy.liquidating is True
+    assert strategy.close_reason == "止损10%"
+
+
+def test_stop_loss_zero_disables():
+    """stop_loss_pct = 0（默认）：不触发硬止损，浮亏也不清仓（向后兼容）。"""
+    account = funded_account()  # 建仓成本 10.0
+    config = StrategyConfig(slippage_bps=0, volume_participation=1.0)  # stop_loss_pct 默认 0
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    strategy.round_entry_date = "2025-01-01"
+    history = [daily(i, 9.0) for i in range(1, 30)]  # 浮亏 -10%，但止损关闭
+    strategy.on_daily(history, [], account, 29, False)
+    assert strategy.liquidating is False
+
+
+def test_stop_loss_validation():
+    """stop_loss_pct 必须在 [-1, 0] 内（0 = 关闭）。"""
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, stop_loss_pct=-1.5)
+    with pytest.raises(ValueError):
+        StrategyConfig(slippage_bps=0, volume_participation=1.0, stop_loss_pct=0.5)
+    assert StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, stop_loss_pct=-0.10
+    ).stop_loss_pct == -0.10
+
+
 def test_round_entry_date_survives_state_roundtrip():
     """state_dict/load_state 必须保留 round_entry_date：live 模拟盘重启后超期降阈仍生效。"""
     account = funded_account()

@@ -197,6 +197,7 @@ CLOSE_REASON_LABELS: dict[str, str] = {
 
 _FORCE_EXIT_PATTERN = re.compile(r"最大持仓\s*(\d+)\s*日强平")
 _ROUND_STOP_PATTERN = re.compile(r"超期持仓\s*(\d+)\s*日")
+_STOP_LOSS_PATTERN = re.compile(r"止损\s*(\d+)\s*%")
 
 
 def close_reason_label(reason: str | None) -> str | None:
@@ -218,6 +219,9 @@ def close_reason_label(reason: str | None) -> str | None:
     if matched:
         # 超期持仓 N 日 → 止盈阈值降档，本质仍是止盈。
         return "止盈（价格轨/账户轨）"
+    matched = _STOP_LOSS_PATTERN.search(text)
+    if matched:
+        return f"止损（{int(matched.group(1))}%）"
     if "价格轨" in text or "账户轨" in text:
         return "止盈（价格轨/账户轨）"
     if "Armed" in text or "量价背离" in text:
@@ -746,6 +750,15 @@ def paper_strategy_switches(account: BrokerAccount) -> dict[str, Any]:
                 _SWITCH_GROUP_EXIT,
                 "超期强平（{n} 日）".format(n=int(config.force_exit_holding_days))
                 if int(config.force_exit_holding_days) > 0 else "超期强平",
+            ),
+            _switch(
+                "stop_loss_pct", "硬止损",
+                float(config.stop_loss_pct) < 0,
+                f"{abs(float(config.stop_loss_pct)) * 100:.0f}%"
+                if float(config.stop_loss_pct) < 0 else "关闭",
+                _SWITCH_GROUP_EXIT,
+                f"止损{abs(float(config.stop_loss_pct)) * 100:.0f}%"
+                if float(config.stop_loss_pct) < 0 else "硬止损",
             ),
         ],
         _SWITCH_GROUP_BETA: [

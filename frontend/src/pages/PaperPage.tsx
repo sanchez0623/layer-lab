@@ -991,6 +991,32 @@ export default function PaperPage() {
     }
   };
 
+  // 硬止损：持仓价格收益 ≤ 该线立即清仓（0 = 关闭，负值 = 止损比例）。
+  const [stopLossInput, setStopLossInput] = useState('');
+  const [savingStopLoss, setSavingStopLoss] = useState(false);
+  const stopLossPct = account?.config?.stop_loss_pct ?? 0;
+  const saveStopLoss = async () => {
+    if (!account) return;
+    const value = Number(stopLossInput);
+    if (!Number.isFinite(value) || value < -100 || value > 0) {
+      setError('硬止损需为 -100%~0 之间的数值（0 = 关闭）。');
+      return;
+    }
+    setSavingStopLoss(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { stop_loss_pct: value / 100 });
+      setAccount(next);
+      setStopLossInput('');
+      toast.success(value < 0
+        ? `硬止损已更新为 -${Math.abs(value)}%（浮亏到线即平仓）。`
+        : '硬止损已关闭（0 = 不触发）。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : '硬止损更新失败。');
+    } finally {
+      setSavingStopLoss(false);
+    }
+  };
+
   const toggleEtfBeta = async (enabled: boolean) => {
     if (!account) return;
     setSavingEtf(true); setError('');
@@ -1466,6 +1492,16 @@ export default function PaperPage() {
                 <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveForceExit()} disabled={savingForceExit || forceExitInput === ''}>{savingForceExit ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingForceExit ? '正在保存' : '保存强平'}</Button>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">独立于超期降阈止盈：那个只把止盈阈值从 15% 降下来，这个到期直接强制清仓。0 = 不限（默认）。</p>
+            </Panel>
+          )}
+
+          {account.auto_strategy && (
+            <Panel className="mb-3" title="硬止损（强制平仓）" description={`持仓浮亏达该比例立即平仓，不等最大持仓天数强平（0 = 关闭）。当前：${stopLossPct < 0 ? `浮亏 ≤ ${Math.abs(stopLossPct * 100).toFixed(0)}% → 平仓` : '关闭'}`} action={<Badge tone={stopLossPct < 0 ? 'indigo' : 'neutral'}>{stopLossPct < 0 ? '已开启' : '关闭'}</Badge>}>
+              <div className="grid items-start gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                <Field label="止损比例（%，负值）" hint="0 = 关闭；如 -10 = 浮亏10%平仓"><NumberInput unit="%" min={-100} max={0} step={1} allowEmpty placeholder={String((stopLossPct * 100).toFixed(0))} value={stopLossInput} onChange={setStopLossInput} disabled={savingStopLoss} /></Field>
+                <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveStopLoss()} disabled={savingStopLoss || stopLossInput === ''}>{savingStopLoss ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingStopLoss ? '正在保存' : '保存止损'}</Button>
+              </div>
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">与超期强平互补：止损是「亏到线就走」，超期强平是「持有太久就走」。0 = 关闭（默认）。</p>
             </Panel>
           )}
 

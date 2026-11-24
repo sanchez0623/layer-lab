@@ -219,6 +219,90 @@ def test_l1_boundaries(tmp_path):
     assert result.pool[0].sessions == 40
 
 
+def test_l1_above_ma20_filter(tmp_path):
+    """L1 企稳 l1_above_ma20：要求 close > 20日均线，否则否决（避价值陷阱）。"""
+    store = UniverseStore(tmp_path / "u.db")
+    open_indices(store)
+    # 价值陷阱：深跌但未站上 MA20（close 60 ≤ MA20 98）——应否决。
+    add_stock(store, "sz.300003", "未企稳", BOARD_GEM, last=60.0)
+    # 深跌后已站上 MA20（close 68 > MA20 ≈ 66.6），且单日涨幅 ≤5% 不触发 L2——应保留。
+    code = "sz.300004"
+    closes = [100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50, 52, 54, 56, 58, 60, 62, 64, 66, 67, 68]
+    store.upsert_rows([UniverseRow(code=code, board=BOARD_GEM, name="企稳样本")])
+    store.upsert_daily(code, make_bars(code, closes))
+
+    loose = run_screener(store, None, cfg())
+    assert loose.funnel["after_l1"] == 2
+    strict = run_screener(store, None, cfg(l1_above_ma20=True))
+    assert strict.funnel["after_l1"] == 1
+    assert strict.pool[0].code == "sz.300004"
+
+
+def test_l1_stabilize_days_filter(tmp_path):
+    """L1 企稳 l1_stabilize_days：要求 close > 前 N 日最低（止跌），否则否决。"""
+    store = UniverseStore(tmp_path / "u.db")
+    open_indices(store)
+    # 仍在下杀：close 55 ≤ 前5日最低 59.4 —— 应否决。
+    code = "sz.300005"
+    closes = [100] * 18 + [70, 60, 55]
+    store.upsert_rows([UniverseRow(code=code, board=BOARD_GEM, name="下杀样本")])
+    store.upsert_daily(code, make_bars(code, closes))
+    # 已止跌：close 50 > 前5日最低 44.55 —— 应保留。
+    code2 = "sz.300006"
+    closes2 = [100] * 15 + [45, 46, 47, 48, 49, 50]
+    store.upsert_rows([UniverseRow(code=code2, board=BOARD_GEM, name="止跌样本")])
+    store.upsert_daily(code2, make_bars(code2, closes2))
+
+    loose = run_screener(store, None, cfg())
+    assert loose.funnel["after_l1"] == 2
+    strict = run_screener(store, None, cfg(l1_stabilize_days=5))
+    assert strict.funnel["after_l1"] == 1
+    assert strict.pool[0].code == "sz.300006"
+
+
+def test_l1_min_rebound_filter(tmp_path):
+    """L1 企稳 l1_min_rebound：要求 chg20d > 阈值（防自由落体），否则否决。"""
+    store = UniverseStore(tmp_path / "u.db")
+    open_indices(store)
+    # 自由落体：chg20d -40%（≤ -25%）—— 应否决。week52 高点用 highs 抬高到 120。
+    code = "sz.300007"
+    closes = [100] * 20 + [60]
+    highs = [120.0] + [101.0] * 19 + [60.6]
+    store.upsert_rows([UniverseRow(code=code, board=BOARD_GEM, name="自由落体")])
+    store.upsert_daily(code, make_bars(code, closes, highs=highs))
+    # 浅跌反弹：chg20d -20%（> -25%）—— 应保留。
+    code2 = "sz.300008"
+    closes2 = [100] * 20 + [80]
+    store.upsert_rows([UniverseRow(code=code2, board=BOARD_GEM, name="浅跌样本")])
+    store.upsert_daily(code2, make_bars(code2, closes2, highs=highs))
+
+    loose = run_screener(store, None, cfg())
+    assert loose.funnel["after_l1"] == 2
+    strict = run_screener(store, None, cfg(l1_min_rebound=-0.25))
+    assert strict.funnel["after_l1"] == 1
+    assert strict.pool[0].code == "sz.300008"
+
+
+def test_l1_stabilize_validation():
+    """L1 企稳校验：stabilize_days 非负整数；min_rebound 为 None 或在 [-1,0) 内。"""
+    with pytest.raises(ValueError):
+        cfg(l1_min_rebound=-1.5)
+    with pytest.raises(ValueError):
+        cfg(l1_min_rebound=0.5)
+    parsed = ScreenerConfig.from_dict({
+        "boards": [BOARD_GEM, BOARD_STAR],
+        "l1_above_ma20": True, "l1_stabilize_days": 5, "l1_min_rebound": -0.25,
+    })
+    assert parsed.l1_above_ma20 is True
+    assert parsed.l1_stabilize_days == 5
+    assert parsed.l1_min_rebound == -0.25
+    # 默认全部关闭（向后兼容）。
+    default = ScreenerConfig()
+    assert default.l1_above_ma20 is False
+    assert default.l1_stabilize_days == 0
+    assert default.l1_min_rebound is None
+
+
 def test_as_of_older_than_recent_tail_window(tmp_path):
     """as_of 早于「最近 260 根」时仍要取到截至 as_of 的历史（长区间回测回归）。
 

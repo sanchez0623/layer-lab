@@ -252,6 +252,9 @@ class AccountConfigRequest(BaseModel):
     holding_tp_override: float | None = Field(default=None, ge=0, le=1)
     # 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平；0 = 不限/关闭。
     force_exit_holding_days: int | None = Field(default=None, ge=0, le=250)
+    # 硬止损（开关：0 = 关闭，负值 = 启用）。持仓价格收益 ≤ 止损线即立即清仓，
+    # 不等 force_exit_holding_days 强平。与 deep_loss_threshold（只记录不触发）不同。
+    stop_loss_pct: float | None = Field(default=None, ge=-1, le=0)
     # 加仓按档位先松后紧（A3 浮亏信号逐档加严）；false = 全档统一原始 A3。
     add_tier_strict: bool | None = None
     # 16 笔金额的规模口径：fixed=绝对金额（默认，向后兼容）/
@@ -662,7 +665,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.1.0",
+        version="3.2.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage

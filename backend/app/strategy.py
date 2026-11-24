@@ -510,6 +510,14 @@ class LayeredTStrategy(Strategy):
             )
             self._set_close_signal("账户轨止盈", bar, account)
             return self._liquidation_requests(position, mode)
+        # 硬止损（开关：stop_loss_pct < 0 才启用，0 = 关闭）。持仓价格收益 ≤ 止损线即
+        # 立即清仓，不等 force_exit_holding_days 强平。放在止盈检查之后（止盈优先）、
+        # 强平之前（止损先于超期兜底）——浮亏到线即离场，不再等背离/回撤/超期信号。
+        if self.config.stop_loss_pct < 0 and price_return <= self.config.stop_loss_pct:
+            self.liquidating = True
+            self.close_reason = f"止损{abs(self.config.stop_loss_pct) * 100:.0f}%"
+            self._set_close_signal("止损", bar, account)
+            return self._liquidation_requests(position, mode)
         # 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
         # 放在止盈检查之后（价/账户轨止盈优先，触发即走上面），但先于 Armed 背离
         # 辅助清仓——超期是硬兜底，不再等背离/回撤信号。

@@ -28,6 +28,7 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   t_min_expected_net_spread: '做 T 最小期望净利',
   t_min_base_entries: '做 T 底仓笔数门槛',
   force_exit_holding_days: '最大持仓天数',
+  stop_loss_pct: '硬止损',
   volume_participation: '成交量参与上限',
   slippage_bps: '滑点',
   slippage_model: '滑点模型',
@@ -120,6 +121,11 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   const forceDays = config.force_exit_holding_days;
   if (forceDays !== undefined && !(isNum(forceDays) && Number.isInteger(forceDays) && forceDays >= 0 && forceDays <= 250)) {
     issue('force_exit_holding_days', '须为 0~250 个交易日之间的整数（0 = 不限）');
+  }
+  // 硬止损：[-100%, 0] 内（0 = 关闭，负值 = 止损比例）。
+  const stopLoss = config.stop_loss_pct;
+  if (stopLoss !== undefined && !(isNum(stopLoss) && stopLoss >= -1 && stopLoss <= 0)) {
+    issue('stop_loss_pct', '须为 -100%~0 之间（0 = 关闭，负值 = 止损比例）');
   }
 
   // ---- 交易摩擦 / 撮合 ------------------------------------------------------

@@ -58,6 +58,8 @@ const fallbackConfig: StrategyConfig = {
   holding_tp_override: 0.03,
   // 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
   force_exit_holding_days: 0,
+  // 硬止损：持仓价格收益 ≤ 该线立即清仓（0 = 关闭，负值 = 止损比例）。
+  stop_loss_pct: 0,
   // 加仓按档位先松后紧：A3 浮亏信号逐档加严（档1 最松 → 档4 = 原始 A3）。
   add_tier_strict: true,
   // 深跌幅当日做T：日内跌幅 ≥ 该值绕过底仓笔数门槛（大于 0 即可，不强制 ≥10%；0 = 关闭）。
@@ -138,6 +140,9 @@ const fallbackScreener: ScreenerConfig = {
   boards: ['创业板', '科创板'],
   chg20_max: -0.15,
   week52_drawdown: 0.3,
+  l1_above_ma20: false,
+  l1_stabilize_days: 0,
+  l1_min_rebound: null,
   day_change_max: 0.05,
   min_amount: 5e8,
   min_avg_amount_20d: 5e8,
@@ -1084,6 +1089,9 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                     </Field>
                     <Field label="最大持仓天数" hint="持有 ≥N 个交易日后无条件强平（兜底）；0 = 不限" error={configIssues.force_exit_holding_days}>
                       <NumberInput unit="交易日" min={0} max={250} step={1} value={config.force_exit_holding_days ?? 0} onChange={(value) => updateConfig('force_exit_holding_days', Number(value))} />
+                    </Field>
+                    <Field label="硬止损（%）" hint="持仓浮亏达该比例立即清仓（不等最大持仓天数强平）；0 = 关闭" error={configIssues.stop_loss_pct}>
+                      <NumberInput unit="%" min={-100} max={0} step={1} value={config.stop_loss_pct != null ? Number((config.stop_loss_pct * 100).toFixed(1)) : 0} onChange={(value) => updateConfig('stop_loss_pct', Number(value) / 100)} />
                     </Field>
                   </FormGrid>
                 </div>

@@ -67,6 +67,8 @@ export interface StrategyConfig {
   holding_tp_override?: number | null;
   /** 硬性最大持仓天数：持有 ≥ 该交易日数后无条件强平（0 = 不限/关闭）；独立于 max_holding_days（超期降阈） */
   force_exit_holding_days?: number;
+  /** 硬止损（小数，0 = 关闭，-0.10 = -10% 止损）：持仓价格收益 ≤ 该线即立即清仓，不等最大持仓天数强平 */
+  stop_loss_pct?: number;
   /** 加仓按档位先松后紧：A3 浮亏信号随 16 笔序列档位逐级加严（false = 全档统一原始 A3） */
   add_tier_strict?: boolean;
   /** 深跌幅当日做T：日内跌幅 ≥ 该值（小数，0.10 = 10%）绕过底仓笔数门槛；null/0 = 关闭 */
@@ -1025,6 +1027,12 @@ export interface ScreenerConfig {
   boards: string[];
   chg20_max: number;
   week52_drawdown: number;
+  /** L1 企稳：要求收盘 > 20日均线（站上均线 = 企稳；默认关闭） */
+  l1_above_ma20: boolean;
+  /** L1 企稳：要求收盘 > 近 N 日最低（止跌；0 = 关闭） */
+  l1_stabilize_days: number;
+  /** L1 企稳：要求 20日涨跌幅 > 该值（防自由落体；null = 关闭） */
+  l1_min_rebound: number | null;
   day_change_max: number;
   min_amount: number;
   min_avg_amount_20d: number;
