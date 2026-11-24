@@ -442,13 +442,19 @@ class SQLiteStorage:
     ) -> None:
         fields = ["updated_at"]
         values: list[Any] = [utc_now()]
+        # 其它列沿用「None 即未传、跳过」的约定（避免把已有值抹成 NULL 撞 NOT NULL 约束）。
         for column, value in (
             ("status", status), ("progress", progress), ("cursor_date", cursor_date),
-            ("cursor_index", cursor_index), ("total_days", total_days), ("error", error),
+            ("cursor_index", cursor_index), ("total_days", total_days),
         ):
             if value is not None:
                 fields.append(column)
                 values.append(value)
+        # error 例外：必须支持显式清空。resume 续跑时要写 NULL 抹掉中断时落库的错误文案，
+        # 若沿用上面的「None 即跳过」，error=None 会被当成没传、永远清不掉，前端点「继续」
+        # 后红字提示一路残留（2026-11-24 实测踩坑）。这里始终写入（有文案写文案，None 写 NULL）。
+        fields.append("error")
+        values.append(error)
         placeholders = ", ".join(f"{name}=?" for name in fields)
         values.append(job_id)
         with self._lock, self._connect() as connection:
