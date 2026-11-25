@@ -159,6 +159,13 @@ class StrategyConfig:
     atr_period: int = 14
     divergence_ticks: int = 3
     vwap_drawdown: float = 0.04
+    # 方案A 两段式止盈（达标转 trailing）：浮盈达到激活点（price_take_profit，默认 15%）后
+    # 不立即清仓，转移动止盈；从激活后的账户浮盈峰值回撤 trailing_drawdown_pct 才清仓。
+    # False = 完全旧行为（到 price_take_profit 即一次性全清）。
+    trailing_take_profit_enabled: bool = False
+    # trailing 激活后允许的浮盈回撤幅度（0~1 小数），默认 6%。仅 enabled=True 时生效。
+    # 激活点复用 price_take_profit，不额外设阈值。
+    trailing_drawdown_pct: float = 0.06
     # 做T准入四阈值（可视化可调，见模拟盘「做 T 准入门槛」面板与回测页）：
     # 近 5 根平均振幅下限（0.04 = 4%）、换手率区间 [0.03, 0.12]、
     # 期望净利下限（振幅扣掉一次往返成本后仍需 ≥ 0.03）。
@@ -279,6 +286,10 @@ class StrategyConfig:
         self.installment_scale_floor = float(self.installment_scale_floor)
         if not 0 < self.volume_participation <= 1:
             raise ValueError("volume_participation 必须在(0,1]内")
+        # 方案A 两段式止盈：trailing 回撤幅度须在 (0,1] 内（浮盈回撤比例，不含 0）。
+        if not 0 < float(self.trailing_drawdown_pct) <= 1:
+            raise ValueError("trailing_drawdown_pct 必须在 (0,1] 内（trailing 浮盈回撤清仓比例）")
+        self.trailing_drawdown_pct = float(self.trailing_drawdown_pct)
         if self.divergence_ticks < 1:
             raise ValueError("divergence_ticks 必须至少为1")
         for name in ("commission_rate", "stamp_tax_rate", "handling_fee_rate", "regulatory_fee_rate", "transfer_fee_rate"):

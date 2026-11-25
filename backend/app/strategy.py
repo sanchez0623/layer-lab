@@ -128,6 +128,11 @@ STRATEGY_STATE_FIELDS: list[tuple[str, str, object]] = [
     ("t_traded_today", "bool", False),
     ("recent_long_upper", "bool", False),
     ("event_halt", "bool", False),
+    # 方案A 两段式止盈（达标转 trailing）运行态：浮盈达到激活点（price_take_profit）后
+    # 不立即清仓，转移动止盈。trailing_armed=已激活；trailing_peak_return=激活后账户浮盈峰值。
+    # 独立于 account_return_peak（那个被 _set_armed 在 Armed 区间重置，会破坏 trailing 基准）。
+    ("trailing_armed", "bool", False),
+    ("trailing_peak_return", "float", 0.0),
     ("entry_submitted_date", "date", None),
     ("add_submitted_date", "date", None),
     ("round_entry_date", "date", None),
@@ -252,6 +257,9 @@ class LayeredTStrategy(Strategy):
         self.t_traded_today = False
         self.recent_long_upper = False
         self.event_halt = False
+        # 方案A 两段式止盈（达标转 trailing）运行态，见 STRATEGY_STATE_FIELDS 注释。
+        self.trailing_armed = False
+        self.trailing_peak_return = 0.0
         # 尾盘首仓已在本交易日提交（防同日 15:00 日终信号重复建仓）。
         self.entry_submitted_date: str | None = None
         # 尾盘加仓已在本交易日提交（防同日 15:00 日终信号重复加仓）。
@@ -337,6 +345,9 @@ class LayeredTStrategy(Strategy):
         self.divergence_count = 0
         self.vwap_count = 0
         self.account_return_peak = 0.0
+        # 轮次闭合：清掉 trailing 运行态（新一轮重新从 0 判定两段式止盈）。
+        self.trailing_armed = False
+        self.trailing_peak_return = 0.0
         self.round_t_start = account.t_net_profit
         self.t_order_submitted = False
         self.t_exit_submitted = False
@@ -352,7 +363,7 @@ class LayeredTStrategy(Strategy):
         self.liquidating = True
         self.close_reason = reason
 
-    def _set_close_signal(self, trigger: str, bar: Bar, account: BrokerAccount) -> None:
+    def _set_close_signal(self, trigger: str, bar: Bar, account: BrokerAccount, **extra: object) -> None:
         """记录清仓信号诊断：本轮首次判定清仓那一根 K 线的收盘价与触发类型。
 
         信号价 = 决策 K 线的 close；成交价 = 下一根 bar 开盘（含滑点）。两者之差
@@ -373,6 +384,10 @@ class LayeredTStrategy(Strategy):
             "signal_time": timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp),
             "price_return": price_return,
         }
+        # 附加诊断字段（如 trailing 的峰值/回撤阈值）：透出到 close_diagnostic，
+        # 便于报告页归因「激活点 → 峰值 → 回撤出场」全过程。
+        if extra:
+            signal.update(extra)
         self._close_signal = signal
         self.last_close_signal = dict(signal)
         # 立即写一份到账户状态（本 tick 结束还会由 state_dict() 整体覆盖，双写保证
@@ -407,6 +422,35 @@ class LayeredTStrategy(Strategy):
         price_return = floating / position.permanent_cost
         account_return = (floating + account.t_net_profit - round_t_start) / position.permanent_cost
         return price_return, account_return
+
+    def _take_profit_hit(self, trigger: str, ret: float, effective_tp: float, holding_days: int,
+                         tp_overridden: bool, bar: Bar, account: BrokerAccount, mode: str) -> list[OrderRequest] | None:
+        """价格轨/账户轨止盈共用的「激活 trailing or 旧清仓」分支（单一真相源）。
+
+        方案A 开关开：首次达到激活点不立即清仓，转 trailing（置 trailing_armed/峰值/
+        liquidating 闩锁），返回 None（调用方继续走到 trailing 判定块）。
+        开关关：完全旧行为，到点即一次性清仓，返回清仓委托。
+        价格轨与账户轨任一先到激活点都走这里——账户轨（含做T净利）常先于价格轨到点，
+        两者都必须挂 trailing，否则账户轨会抢在 trailing 激活前用旧逻辑清仓。
+        """
+        if self.config.trailing_take_profit_enabled and not self.trailing_armed:
+            self.trailing_armed = True
+            price_return, account_return = self._returns(account, bar.symbol, bar.close, self.round_t_start)
+            self.trailing_peak_return = max(price_return, account_return)
+            self.liquidating = True
+            return None
+        if not self.config.trailing_take_profit_enabled:
+            # 开关关 = 完全旧行为：到点即一次性清仓。
+            self.liquidating = True
+            self.close_reason = (
+                f"超期持仓{holding_days}日_{'账户轨' if '账户' in trigger else ''}止盈降至{effective_tp * 100:.0f}%"
+                if tp_overridden else f"{trigger}收益达到{effective_tp * 100:.0f}%"
+            )
+            self._set_close_signal(trigger + "止盈", bar, account)
+            return self._liquidation_requests(account.position(bar.symbol), mode)
+        # trailing_armed 已 True（激活后的后续 bar 仍 ≥ 激活点）：返回 None，
+        # 调用方落到 trailing 判定块统一处理（更新峰值 / 判回撤）。
+        return None
 
     def _set_armed(self, account: BrokerAccount, armed: bool, account_return: float) -> None:
         if armed and not self.armed:
@@ -495,21 +539,17 @@ class LayeredTStrategy(Strategy):
             self._set_close_signal("事件熔断", bar, account)
             return self._liquidation_requests(position, mode)
         if price_return >= effective_tp:
-            self.liquidating = True
-            self.close_reason = (
-                f"超期持仓{holding_days}日_止盈降至{effective_tp * 100:.0f}%"
-                if tp_overridden else f"价格轨收益达到{effective_tp * 100:.0f}%"
-            )
-            self._set_close_signal("价格轨止盈", bar, account)
-            return self._liquidation_requests(position, mode)
+            # 方案A 两段式止盈：见 _take_profit_hit。返回非 None = 旧清仓（开关关）；
+            # 返回 None = 已激活 trailing 或 trailing_armed 已 True，落到下方 trailing 判定块。
+            result = self._take_profit_hit("价格轨", price_return, effective_tp, holding_days,
+                                           tp_overridden, bar, account, mode)
+            if result is not None:
+                return result
         if account_return >= effective_tp:
-            self.liquidating = True
-            self.close_reason = (
-                f"超期持仓{holding_days}日_账户轨止盈降至{effective_tp * 100:.0f}%"
-                if tp_overridden else f"账户轨收益达到{effective_tp * 100:.0f}%"
-            )
-            self._set_close_signal("账户轨止盈", bar, account)
-            return self._liquidation_requests(position, mode)
+            result = self._take_profit_hit("账户轨", account_return, effective_tp, holding_days,
+                                           tp_overridden, bar, account, mode)
+            if result is not None:
+                return result
         # 硬止损（开关：stop_loss_pct < 0 才启用，0 = 关闭）。持仓价格收益 ≤ 止损线即
         # 立即清仓，不等 force_exit_holding_days 强平。放在止盈检查之后（止盈优先）、
         # 强平之前（止损先于超期兜底）——浮亏到线即离场，不再等背离/回撤/超期信号。
@@ -527,6 +567,28 @@ class LayeredTStrategy(Strategy):
             self.close_reason = f"最大持仓{int(self.config.force_exit_holding_days)}日强平"
             self._set_close_signal("超期强平", bar, account)
             return self._liquidation_requests(position, mode)
+        # 方案A 两段式止盈：trailing 已激活 → 追踪激活后账户浮盈峰值，从峰值回撤
+        # ≥ trailing_drawdown_pct 才清仓。放在 liquidating 闩锁（下方 :530）之前，
+        # 这样激活后每根 bar 都能更新峰值/判回撤，不被闩锁短路。
+        # 已激活即 return，使 Armed 背离/VWAP 分支（15% 以下的顶部保护）彻底不可达
+        # —— 15% 以上只听 trailing 的，避免 VWAP 抢在 trailing 之前把大趋势仓位踢出局。
+        if self.trailing_armed:
+            self.trailing_peak_return = max(self.trailing_peak_return, account_return)
+            drawdown = self.trailing_peak_return - account_return
+            if drawdown >= self.config.trailing_drawdown_pct:
+                self.liquidating = True
+                self.close_reason = (
+                    f"移动止盈回撤{self.config.trailing_drawdown_pct * 100:.0f}%"
+                    f"_峰值{self.trailing_peak_return * 100:.0f}%"
+                )
+                self._set_close_signal(
+                    "移动止盈", bar, account,
+                    trailing_peak_return=self.trailing_peak_return,
+                    trailing_drawdown_pct=self.config.trailing_drawdown_pct,
+                )
+                return self._liquidation_requests(position, mode)
+            # 已激活但未回撤到位 → 不清仓，也不进 Armed 背离分支。
+            return []
         if self.liquidating:
             return self._liquidation_requests(position, mode)
         if price_return >= self.config.price_armed:

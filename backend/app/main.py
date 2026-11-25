@@ -304,6 +304,9 @@ class AccountConfigRequest(BaseModel):
     # 合并进 StrategyConfig 后由 __post_init__ 校验 model ∈ {fixed,impact} 且 k >= 0，非法值 400。
     slippage_model: str | None = None
     impact_coefficient: float | None = Field(default=None, ge=0)
+    # 方案A 两段式止盈：达标转移动止盈开关 + 从浮盈峰值回撤的清仓比例（激活点复用 price_take_profit）。
+    trailing_take_profit_enabled: bool | None = None
+    trailing_drawdown_pct: float | None = Field(default=None, gt=0, le=1)
     # 闲置资金逆回购：空仓/未占用现金每日盘后结算模拟国债逆回购收益。
     # repo_yield_min/max 为年化小数（0.010=1.00%）；合并进 StrategyConfig 后由
     # __post_init__ 校验 0 <= min <= max 且都在 [0, 0.1]（年化最多 10%），非法值 400。
@@ -665,7 +668,7 @@ def create_app() -> FastAPI:
     storage = SQLiteStorage(os.environ.get("WB_DB_PATH", str(data_dir / "app.db")))
     application = FastAPI(
         title="A股分层加仓做T回测与模拟交易",
-        version="3.2.2",
+        version="3.3.0",
         description="历史行情来自 quan_quant parquet 数据目录（前复权），实时快照与5分钟K线来自腾讯行情；本地撮合，不连接券商。",
     )
     application.state.storage = storage

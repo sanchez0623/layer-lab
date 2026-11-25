@@ -47,6 +47,8 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   idle_cash_repo_enabled: '闲置资金逆回购',
   repo_yield_min: '逆回购年化下限',
   repo_yield_max: '逆回购年化上限',
+  trailing_take_profit_enabled: '达标转 Trailing',
+  trailing_drawdown_pct: 'Trailing 回撤清仓',
 };
 
 /** 把「字段 + 文案」拼成一句可读提示：`深跌幅当日做T：须为大于 0 且不超过 100% 的小数…`。 */
@@ -220,6 +222,16 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   const scaleFloor = config.installment_scale_floor;
   if (scaleMode === 'equity' && !(isNum(scaleFloor) && scaleFloor > 0 && scaleFloor <= 1)) {
     issue('installment_scale_floor', '须为 0~100%（不含 0）的倍数（放大倍数下限）');
+  }
+
+  // ---- 方案A 两段式止盈（达标转 Trailing）------------------------------------
+  // 仅在开关开启时校验配套的回撤比例：浮盈到价格轨止盈（price_take_profit）后转 trailing，
+  // 从浮盈峰值回撤 trailing_drawdown_pct 即清仓。
+  if (config.trailing_take_profit_enabled) {
+    const trailDd = config.trailing_drawdown_pct;
+    if (trailDd !== undefined && !(isNum(trailDd) && trailDd > 0 && trailDd <= 1)) {
+      issue('trailing_drawdown_pct', '须为 0~100%（不含 0）的小数（从浮盈峰值回撤多少清仓）');
+    }
   }
 
   return issues;

@@ -125,6 +125,10 @@ export interface StrategyConfig {
   repo_yield_min?: number;
   /** 逆回购年化收益率上限（小数，0.015 = 1.50%）；上限最多 10% 防误填 */
   repo_yield_max?: number;
+  /** 方案A 两段式止盈：浮盈达到价格轨止盈（price_take_profit，默认15%）后转 trailing；false=旧的到点即清仓 */
+  trailing_take_profit_enabled?: boolean;
+  /** trailing 激活后，从浮盈峰值回撤该比例即清仓（小数，0.06 = 6%）；仅在 trailing_take_profit_enabled 时生效 */
+  trailing_drawdown_pct?: number;
 }
 
 export type StrategyDefaults = Partial<StrategyConfig> & {

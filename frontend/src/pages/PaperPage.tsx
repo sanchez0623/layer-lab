@@ -1017,6 +1017,46 @@ export default function PaperPage() {
     }
   };
 
+  // 方案A 两段式止盈：达标转 trailing（激活点复用后端 price_take_profit=15%），从浮盈峰值回撤该比例清仓。
+  const [savingTrailing, setSavingTrailing] = useState(false);
+  const trailingEnabled = Boolean(account?.config?.trailing_take_profit_enabled);
+  const trailingDd = account?.config?.trailing_drawdown_pct ?? 0.06;
+  const [trailingDdInput, setTrailingDdInput] = useState('');
+  const toggleTrailing = async (checked: boolean) => {
+    if (!account) return;
+    setSavingTrailing(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { trailing_take_profit_enabled: checked });
+      setAccount(next);
+      toast.success(checked
+        ? '达标转 Trailing 已开启：浮盈到价格轨止盈后转跟踪、回撤即清仓。'
+        : '达标转 Trailing 已关闭：到点一次性清仓（旧行为）。');
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Trailing 开关更新失败。');
+    } finally {
+      setSavingTrailing(false);
+    }
+  };
+  const saveTrailingDd = async () => {
+    if (!account) return;
+    const pct = Number(trailingDdInput);
+    if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+      setError('Trailing 回撤需为 0–100 之间的百分数（不含 0）。');
+      return;
+    }
+    setSavingTrailing(true); setError('');
+    try {
+      const next = await api.updateAccountConfig(account.id, { trailing_drawdown_pct: pct / 100 });
+      setAccount(next);
+      setTrailingDdInput('');
+      toast.success(`Trailing 回撤清仓已更新为 ${number(pct, 1)}%，下一根K线起生效。`);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Trailing 回撤更新失败。');
+    } finally {
+      setSavingTrailing(false);
+    }
+  };
+
   const toggleEtfBeta = async (enabled: boolean) => {
     if (!account) return;
     setSavingEtf(true); setError('');
@@ -1502,6 +1542,18 @@ export default function PaperPage() {
                 <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveStopLoss()} disabled={savingStopLoss || stopLossInput === ''}>{savingStopLoss ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingStopLoss ? '正在保存' : '保存止损'}</Button>
               </div>
               <p className="mt-2 text-[10px] leading-4 text-muted-foreground">与超期强平互补：止损是「亏到线就走」，超期强平是「持有太久就走」。0 = 关闭（默认）。</p>
+            </Panel>
+          )}
+
+          {account.auto_strategy && (
+            <Panel className="mb-3" title="达标转 Trailing（两段式止盈）" description={`浮盈达到价格轨止盈（默认15%）后：开启则转跟踪浮盈峰值、从峰值回撤设定比例才清仓；关闭则到点一次性清仓。当前：${trailingEnabled ? `已开启 · 回撤 ${number(trailingDd * 100, 1)}% 清仓` : '关闭（到点即清仓）'}`} action={<div className="flex items-center gap-2"><span className="text-[10px] text-muted-foreground">{trailingEnabled ? '两段式止盈' : '到点即清仓'}</span><Switch checked={trailingEnabled} onCheckedChange={(checked) => void toggleTrailing(checked)} disabled={savingTrailing} /></div>}>
+              {trailingEnabled && (
+                <div className="grid items-start gap-2.5 sm:grid-cols-2 lg:grid-cols-3">
+                  <Field label="回撤清仓（%）" hint={`当前 ${number(trailingDd * 100, 1)}%（从浮盈峰值回撤多少清仓）`}><NumberInput unit="%" min={0.1} max={100} step={0.5} allowEmpty placeholder={number(trailingDd * 100, 1)} value={trailingDdInput} onChange={setTrailingDdInput} disabled={savingTrailing} /></Field>
+                  <Button size="sm" className="h-8 justify-self-start sm:mt-[24px]" onClick={() => void saveTrailingDd()} disabled={savingTrailing || trailingDdInput === ''}>{savingTrailing ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTrailing ? '正在保存' : '保存回撤'}</Button>
+                </div>
+              )}
+              <p className="mt-2 text-[10px] leading-4 text-muted-foreground">激活点复用价格轨止盈（默认15%），不额外设阈值。回撤比例越大越「拿得住」，越小越「锁利快」。改动保存后下一根 K 线起生效。</p>
             </Panel>
           )}
 

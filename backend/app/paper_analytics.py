@@ -185,6 +185,8 @@ CLOSE_REASON_LABELS: dict[str, str] = {
     "Armed量价背离三选二_3根5分钟K线": "Armed 量价背离（辅助清仓）",
     "VWAP回撤": "VWAP 账户回撤（辅助清仓）",
     "VWAP账户回撤4%_3根5分钟K线": "VWAP 账户回撤（辅助清仓）",
+    "移动止盈": "移动止盈（达标转trailing回撤）",
+    "移动止盈回撤": "移动止盈（达标转trailing回撤）",
     "超期强平": "超期强平",
     "事件熔断": "事件熔断",
     "T+1尾盘截止平T": "T+1 尾盘强平",
@@ -198,6 +200,7 @@ CLOSE_REASON_LABELS: dict[str, str] = {
 _FORCE_EXIT_PATTERN = re.compile(r"最大持仓\s*(\d+)\s*日强平")
 _ROUND_STOP_PATTERN = re.compile(r"超期持仓\s*(\d+)\s*日")
 _STOP_LOSS_PATTERN = re.compile(r"止损\s*(\d+)\s*%")
+_TRAILING_PATTERN = re.compile(r"移动止盈回撤")
 
 
 def close_reason_label(reason: str | None) -> str | None:
@@ -222,6 +225,8 @@ def close_reason_label(reason: str | None) -> str | None:
     matched = _STOP_LOSS_PATTERN.search(text)
     if matched:
         return f"止损（{int(matched.group(1))}%）"
+    if _TRAILING_PATTERN.search(text):
+        return "移动止盈（达标转trailing回撤）"
     if "价格轨" in text or "账户轨" in text:
         return "止盈（价格轨/账户轨）"
     if "Armed" in text or "量价背离" in text:
@@ -343,7 +348,8 @@ def _build_close_diagnostic(
     if isinstance(signal, dict):
         signal_day = str(signal.get("signal_time") or "")[:10]
         if signal_day and start_date <= signal_day <= end_date:
-            for key in ("trigger", "signal_price", "signal_time", "price_return"):
+            for key in ("trigger", "signal_price", "signal_time", "price_return",
+                        "trailing_peak_return", "trailing_drawdown_pct"):
                 diagnostic[key] = signal.get(key)
             diagnostic["trigger_label"] = close_reason_label(signal.get("trigger"))
             signal_price = signal.get("signal_price")

@@ -107,6 +107,10 @@ const fallbackConfig: StrategyConfig = {
   // 逆回购年化收益率下限/上限（小数，0.010 = 1.00%）。校验：0 <= min <= max <= 0.1。
   repo_yield_min: 0.010,
   repo_yield_max: 0.015,
+  // 方案A 两段式止盈：达标转 trailing（激活点复用后端 price_take_profit=15%）。
+  // 必须登记在 fallbackConfig，否则「带入回测」会静默丢弃报告快照里的值。
+  trailing_take_profit_enabled: false,
+  trailing_drawdown_pct: 0.06,
 };
 
 /** 回测仅保留漏斗轮动模式（清仓后重跑选股换票）；旧的单标的模式已下线。 */
@@ -1082,6 +1086,15 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                 {/* 止盈分组 */}
                 <div className="rounded-xl border bg-muted/25 p-3">
                   <strong className="mb-2 block text-[12px] font-semibold text-foreground/80">止盈</strong>
+                  {/* 方案A 两段式止盈：浮盈到价格轨止盈（默认15%）后转 trailing；关闭 = 旧的到点即清仓 */}
+                  <SwitchRow label="达标转 Trailing（两段式止盈）" description="开启后：浮盈达到价格轨止盈（默认15%）不立即清仓，转为跟踪浮盈峰值、从峰值回撤设定比例才清仓。关闭 = 到点即一次性清仓（旧行为）" checked={Boolean(config.trailing_take_profit_enabled)} onCheckedChange={(checked) => updateConfig('trailing_take_profit_enabled', checked)} />
+                  {config.trailing_take_profit_enabled && (
+                    <FormGrid className="mt-2">
+                      <Field label="Trailing 回撤清仓（%）" hint="转 trailing 后，从浮盈峰值回撤该比例即清仓（0~100，不含 0）。默认 6%" error={configIssues.trailing_drawdown_pct}>
+                        <NumberInput unit="%" min={0.1} max={100} step={0.5} value={Number(((config.trailing_drawdown_pct ?? 0.06) * 100).toFixed(1))} onChange={(value) => updateConfig('trailing_drawdown_pct', Number(value) / 100)} />
+                      </Field>
+                    </FormGrid>
+                  )}
                   <FormGrid>
                     <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降阈；留空=关闭">
                       <NumberInput unit="交易日" min={1} max={250} step={1} allowEmpty value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
