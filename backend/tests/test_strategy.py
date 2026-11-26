@@ -241,6 +241,109 @@ def test_holding_days_counts_only_bars_after_entry():
     assert strategy._holding_days(history) == 0
 
 
+def test_t_min_base_entries_default_allows_first_entry():
+    """做T门槛 t_min_base_entries：默认 1（首笔建仓后即可做T）；=4 回到旧行为。
+
+    直接测 _t_eligible 的 sequence 门槛：构造满足振幅/换手/盘口/价差的 bar，
+    只让 sequence_index 变化，验证门槛由 t_min_base_entries 控制。
+    （合并 feat/t-gate-and-a3-relax 时把该分支的 t_min_sequence 收编到本字段，
+    避免两套平行的做T门槛配置——单一真相源。）
+    """
+    def make_bar() -> Bar:
+        bar = daily(6, 10.0, low=9.0, volume=100_000)
+        bar.turnover_rate = 0.05
+        bar.bid, bar.ask = 9.99, 10.01
+        return bar
+
+    history = [daily(i, 10.0, low=9.6) for i in range(1, 6)]
+
+    # 默认 t_min_base_entries=1：sequence_index=1 即过门槛
+    account = funded_account()
+    account.sequence_index = 1
+    strategy = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    assert strategy._t_eligible(history, make_bar(), account,
+                                daily_amplitude=0.05, daily_turnover_rate=0.05) is True
+
+    # t_min_base_entries=4：sequence_index=1 不够，门槛挡住
+    strategy2 = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, t_min_base_entries=4,
+    ))
+    account2 = funded_account()
+    account2.sequence_index = 1
+    assert strategy2._t_eligible(history, make_bar(), account2,
+                                 daily_amplitude=0.05, daily_turnover_rate=0.05) is False
+
+    # t_min_base_entries=4 且 sequence_index=4：过门槛（回归旧行为）
+    account3 = funded_account()
+    account3.sequence_index = 4
+    assert strategy2._t_eligible(history, make_bar(), account3,
+                                 daily_amplitude=0.05, daily_turnover_rate=0.05) is True
+
+
+def test_a3_relaxed_volume_and_no_new_low():
+    """A3 放宽：oversold_volume_ratio=0.8 + a3_require_new_low=False 时更易触发加仓。
+
+    取 sequence_index=12（档4 / tier 3）——只有这一档同时受「缩量比例」与
+    「先破新低」两条约束，才能测到放宽的差异。
+    """
+    # 构造阴跌序列：建仓 @10，之后阴跌到 9.0，某日缩量反弹到前3根最低之上
+    account = funded_account()
+    account.sequence_index = 12
+    # 放宽配置：缩量阈值 0.8 + 不要求破新低
+    config = StrategyConfig(
+        slippage_bps=0, volume_participation=1.0,
+        oversold_volume_ratio=0.8, a3_require_new_low=False,
+    )
+    strategy = LayeredTStrategy(config)
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    # 阴跌：i=1..6，收盘从 9.8 跌到 9.0，最后一根温和缩量反弹
+    closes = [10.0, 9.8, 9.6, 9.4, 9.2, 9.0, 9.1]
+    history = []
+    for i, close in enumerate(closes):
+        volume = 1000 if i < 6 else 700  # 最后一根缩量（< 5日均量×0.8）
+        history.append(daily(i, close, low=close * 0.99, volume=volume))
+    # 放宽后应触发 A3
+    assert strategy._add_signal(history, account) == "浮亏超跌A3"
+
+    # 严格配置（旧默认 0.5 + 要求破新低）：同样数据不应触发
+    strict = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0,
+        oversold_volume_ratio=0.5, a3_require_new_low=True,
+    ))
+    strict.last_add_price = 10.0
+    strict.last_add_session = 0
+    assert strict._add_signal(history, account) == ""
+
+
+def test_a3_tier_off_keeps_original_strict_a3():
+    """add_tier_strict=False 保持原始 A3 严格口径：即使 a3_require_new_low=False 也要求破过新低。"""
+    account = funded_account()
+    account.sequence_index = 12
+    strategy = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0,
+        oversold_volume_ratio=0.8, a3_require_new_low=False,
+        add_tier_strict=False,
+    ))
+    strategy.last_add_price = 10.0
+    strategy.last_add_session = 0
+    closes = [10.0, 9.8, 9.6, 9.4, 9.2, 9.0, 9.1]
+    history = [
+        daily(i, close, low=close * 0.99, volume=1000 if i < 6 else 700)
+        for i, close in enumerate(closes)
+    ]
+    # 未破过新低（had_new_low 初始 False）→ 原始 A3 要求 had_low_before → 不触发
+    assert strategy._add_signal(history, account) == ""
+
+
+def test_default_a3_relaxation_enabled():
+    """默认值即放宽：oversold_volume_ratio=0.80、a3_require_new_low=False、t_min_base_entries=1。"""
+    cfg = StrategyConfig()
+    assert cfg.oversold_volume_ratio == 0.80
+    assert cfg.a3_require_new_low is False
+    assert cfg.t_min_base_entries == 1
+
+
 def test_account_track_includes_t_net_spread():
     account = funded_account()
     account.t_net_profit = 600.0
@@ -259,19 +362,19 @@ def test_account_track_includes_t_net_spread():
 
 
 def test_tiered_a3_add_strict_levels():
-    """按档位「先松后紧」：档1（sequence 0-3）宽松即触发 A3，档4 需完整原始 A3。
+    """按档位「先松后紧」：档1（sequence 0-3）宽松即触发 A3，档4 需过缩量比例线。
 
-    构造一根缩量阴跌 bar（量 = 5日均量×0.6，未破新低、close < 前3根最低）：
-    - 档1（最松，仅要求缩量）→ 触发；
-    - 档4（最严，原始 A3：需 had_new_low + close>前3根最低 + 量<均量×0.5）→ 不触发。
+    构造一根缩量阴跌 bar（量 = 5日均量×0.9，缩到 0.9 但未到档4 的 0.8 线）：
+    - 档1（最松，仅要求缩量 < 5日均量）→ 触发；
+    - 档4（最严，缩量须 < 均量×oversold_volume_ratio，默认 0.8）→ 不触发。
     """
     def build(closes, volumes):
         return [daily(i, c, low=c * 0.99, volume=v)
                 for i, (c, v) in enumerate(zip(closes, volumes))]
 
-    # 阴跌序列：末根 close 跌破前3根最低、量 = 5日均量×0.6（缩量但未砍半）
+    # 阴跌序列：末根 close 站回前3根最低之上、量 = 5日均量×0.9（缩量但 > 0.8 线）
     closes = [10.0, 9.8, 9.6, 9.4, 9.3, 9.1]
-    volumes = [1000, 1000, 1000, 1000, 1000, 600]
+    volumes = [1000, 1000, 1000, 1000, 1000, 900]
     history = build(closes, volumes)
 
     # 档1（sequence_index=0）：最松，缩量即触发
@@ -282,7 +385,7 @@ def test_tiered_a3_add_strict_levels():
     strat1.last_add_session = 0
     assert strat1._add_signal(history, acct1) == "浮亏超跌A3"
 
-    # 档4（sequence_index=12）：最严=原始 A3，缩量未砍半 + 未确认破新低 → 不触发
+    # 档4（sequence_index=12）：缩量 900 ≥ 均量×0.8=800 → 不触发
     acct4 = funded_account()
     acct4.sequence_index = 12
     strat4 = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
@@ -292,9 +395,9 @@ def test_tiered_a3_add_strict_levels():
 
 
 def test_tiered_a3_disabled_uses_uniform_original():
-    """add_tier_strict=False：全档统一用原始 A3（档1 也不再放宽）。"""
+    """add_tier_strict=False：全档统一用原始 A3（档1 位置也不再放宽）。"""
     closes = [10.0, 9.8, 9.6, 9.4, 9.3, 9.1]
-    volumes = [1000, 1000, 1000, 1000, 1000, 600]
+    volumes = [1000, 1000, 1000, 1000, 1000, 900]
     history = [daily(i, c, low=c * 0.99, volume=v)
                for i, (c, v) in enumerate(zip(closes, volumes))]
     acct = funded_account()
@@ -304,12 +407,17 @@ def test_tiered_a3_disabled_uses_uniform_original():
     ))
     strat.last_add_price = 10.0
     strat.last_add_session = 0
-    # 原始 A3 需缩量 <均量×0.5，0.6 不满足 → 不触发
+    strat.had_new_low = True  # 让「破新低」前置通过，缩量比例成为唯一决定项
+    # 全档统一路径：缩量须 < 均量×oversold_volume_ratio（默认 0.8）→ 900 ≥ 800 不满足
     assert strat._add_signal(history, acct) == ""
 
 
 def test_deep_drop_t_bypasses_sequence_gate():
-    """深跌幅当日做T：当日跌幅 ≥ t_deep_drop_pct(10%) 时，sequence_index=1 也过门槛。"""
+    """深跌幅当日做T：当日跌幅 ≥ t_deep_drop_pct(10%) 时，sequence_index=1 也过门槛。
+
+    显式 t_min_base_entries=4：本用例依赖「底仓笔数门槛拦下」，
+    不能隐式依赖默认值（默认值已改为 1，见 feat/t-gate-and-a3-relax）。
+    """
     def deep_drop_bar(drop_pct: float) -> Bar:
         bar = daily(6, 10.0 * (1 - drop_pct), low=10.0 * (1 - drop_pct) * 0.99,
                     volume=100_000)
@@ -322,7 +430,9 @@ def test_deep_drop_t_bypasses_sequence_gate():
     # 跌 12%（≥10%）→ 旁路生效，sequence_index=1 也过门槛
     account = funded_account()
     account.sequence_index = 1
-    strategy = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+    strategy = LayeredTStrategy(StrategyConfig(
+        slippage_bps=0, volume_participation=1.0, t_min_base_entries=4,
+    ))
     assert strategy._t_eligible(history, deep_drop_bar(0.12), account,
                                 daily_amplitude=0.05, daily_turnover_rate=0.05) is True
     # 跌 5%（<10%）→ 旁路不生效，sequence_index=1 被底仓笔数门槛挡住
@@ -380,40 +490,51 @@ def test_deep_drop_pct_validation():
 
 
 def test_tiered_a3_spec_progression():
-    """档位规范语义：缩量收紧（×0.5）只在档4（sequence 12-15）生效。
+    """档位规范语义（feat/t-gate-and-a3-relax 合入后，2026-11-27 起）：
 
-    场景：量 = 5日均量×0.6（缩量但未砍半）、close 9.8 站回前3日低点（9.306）之上、
-    无新低记录（除非显式置位）——
-    档1（seq 0-3）触发、档2（seq 4-7）触发（规范：+站回即可，量仍按 <均量 口径）、
-    档3（seq 8-11）因缺 had_new_low 不触发、置位后触发、
-    档4（seq 12-15）因量未砍半不触发（= 原始 A3，最严）。
-    若实现把 ×0.5 提前到档2（恢复代码的行为），seq 4 会不触发——本测试即分歧哨兵。
+    缩量比例线只在档4（sequence 12-15）生效，比例 = oversold_volume_ratio（默认 0.80）；
+    档3 的「此前破过新低」前置由 a3_require_new_low 控制（默认 False = 不要求）。
+
+    场景A（默认配置）：量 = 5日均量×0.9（缩量但 > 0.8 线）、close 9.8 站回前3日低点
+    （9.306）之上、无新低记录 →
+      档1（seq 0-3）触发（仅缩量 < 均量）、档2（seq 4-7）触发（+站回前3日低点）、
+      档3（seq 8-11）触发（a3_require_new_low=False 时不再要求破新低）、
+      档4（seq 12-15）不触发（量须 < 均量×0.8）。
+      若实现把缩量比例线提前到档3，seq 8 会不触发——本测试即分歧哨兵。
+
+    场景B：a3_require_new_low=True → 档3 回到「必须破过新低」：无新低记录不触发，
+    显式置位 had_new_low 后触发。
     """
     closes = [10.0, 10.2, 10.5, 9.6, 9.4, 9.8]
-    volumes = [1000, 1000, 1000, 1000, 1000, 600]
+    volumes = [1000, 1000, 1000, 1000, 1000, 900]
     history = [daily(i, c, low=c * 0.99, volume=v)
                for i, (c, v) in enumerate(zip(closes, volumes))]
-    # 无新低记录：档1/档2 触发，档3/档4 不触发
-    for sequence_index, expected in ((0, "浮亏超跌A3"), (4, "浮亏超跌A3"), (8, ""), (12, "")):
+
+    def signal_for(sequence_index: int, *, require_new_low: bool,
+                   had_new_low: bool) -> str:
         acct = funded_account()
         acct.sequence_index = sequence_index
-        strat = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
+        strat = LayeredTStrategy(StrategyConfig(
+            slippage_bps=0, volume_participation=1.0,
+            a3_require_new_low=require_new_low,
+        ))
         strat.last_add_price = 10.0
         strat.last_add_session = 0
-        assert strat._add_signal(history, acct) == expected, (
-            f"sequence_index={sequence_index} 应为 {expected!r}"
+        strat.had_new_low = had_new_low
+        return strat._add_signal(history, acct)
+
+    # 场景A（默认）：档1/2/3 触发，档4 被缩量比例线挡住
+    for sequence_index, expected in ((0, "浮亏超跌A3"), (4, "浮亏超跌A3"),
+                                     (8, "浮亏超跌A3"), (12, "")):
+        assert signal_for(sequence_index, require_new_low=False,
+                         had_new_low=False) == expected, (
+            f"默认配置 sequence_index={sequence_index} 应为 {expected!r}"
         )
-    # 显式置位 had_new_low：档3 触发（量未砍半仍可），档4 仍不触发（量须砍半）
-    for sequence_index, expected in ((8, "浮亏超跌A3"), (12, "")):
-        acct = funded_account()
-        acct.sequence_index = sequence_index
-        strat = LayeredTStrategy(StrategyConfig(slippage_bps=0, volume_participation=1.0))
-        strat.last_add_price = 10.0
-        strat.last_add_session = 0
-        strat.had_new_low = True
-        assert strat._add_signal(history, acct) == expected, (
-            f"had_new_low=True sequence_index={sequence_index} 应为 {expected!r}"
-        )
+
+    # 场景B：要求破新低时，档3 无新低记录不触发；显式置位后触发；档4 仍被比例线挡住
+    assert signal_for(8, require_new_low=True, had_new_low=False) == ""
+    assert signal_for(8, require_new_low=True, had_new_low=True) == "浮亏超跌A3"
+    assert signal_for(12, require_new_low=True, had_new_low=True) == ""
 
 
 def test_add_gap_uses_fill_date_immune_to_dataset_drift():

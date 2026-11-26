@@ -151,7 +151,13 @@ class StrategyConfig:
     limit_pct: float = 0.20
     right_drawdown: float = 0.05
     min_add_gap_days: int = 1
-    oversold_volume_ratio: float = 0.50
+    # 浮亏超跌A3 加仓信号放宽（见 strategy._add_signal）：
+    # - oversold_volume_ratio：当日量 < 5日均量 × 此值才算「缩量」。原 0.50 太严
+    #   （要求砍半），放宽到 0.80 让阴跌标的更容易触发加仓。
+    # - a3_require_new_low：是否要求「先破新低」作为 A3 前置。False（默认）时只要
+    #   close 站上前3根最低 + 缩量即触发，不再要求 had_new_low。
+    oversold_volume_ratio: float = 0.80
+    a3_require_new_low: bool = False
     price_armed: float = 0.10
     price_disarm: float = 0.095
     price_take_profit: float = 0.15
@@ -201,13 +207,15 @@ class StrategyConfig:
     force_exit_holding_days: int = 0
     # 加仓按档位「先松后紧」：16 笔序列分 4 档（每档 4 笔，档1=10万…档4=40万）。
     # 开启后 A3 加仓信号按档位分级——档1 最松（仅浮亏+缩量<5日均量）、
-    # 档2 +收盘站回前3日低点、档3 +此前破过新低、档4 +缩量收紧到 oversold_volume_ratio
-    # （= 原始 A3 条件，最严）。目的：早期仓位易加让资金打满，后段高门槛封顶暴露，
-    # 避免无差别摊进输家。False = 全档统一用原始 A3 条件（向后兼容）。
+    # 档2 +收盘站回前3日低点、档3 +此前破过新低（a3_require_new_low=False 时放宽）、
+    # 档4 +缩量收紧到 oversold_volume_ratio（默认 0.80，最严）。目的：早期仓位易加让
+    # 资金打满，后段高门槛封顶暴露，避免无差别摊进输家。False = 全档统一用原始 A3 条件
+    # （含「必须破过新低」，向后兼容）。
     add_tier_strict: bool = True
     # 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔）。
-    # 之前硬编码为 4（「第5笔起正T」），现改为可配置。深跌幅当日做T仍可绕过（见 t_deep_drop_pct）。
-    t_min_base_entries: int = 4
+    # 之前硬编码为 4（「第5笔起正T」），现改为可配置；默认 1 让做T在首笔建仓后即可启用。
+    # 深跌幅当日做T仍可绕过（见 t_deep_drop_pct）。
+    t_min_base_entries: int = 1
     # 深跌幅当日做T：当日盘中跌幅（相对前收盘）≥ 此阈值时，绕过底仓笔数门槛
     # （sequence_index≥4）允许做T。默认 0.10（20cm 板 -10% 极端恐慌线），
     # 但可调到更低门槛。None = 关闭；__post_init__ 校验：非 None 时须 (0,1]。
@@ -638,9 +646,9 @@ class Dataset:
 STRATEGY_RULES = [
     "初始资金400万元；16笔资金依次为10万×4、20万×4、30万×4、40万×4。",
     "永久仓只进不出，直至双轨整体止盈或事件熔断；T仓独立且不占加仓序列。",
-    "第5笔起允许正T；每日最多一次，Armed暂停，14:50后用旧仓轧平。",
+    "做T底仓笔数门槛可配置（默认 1 笔 = 首笔建仓后即可做T；深跌幅当日可绕过）；每日最多一次，Armed暂停，14:50后用旧仓轧平。",
     "浮盈右侧加仓：近期小高点回撤≥5%、不破前三天低点、间隔≥1交易日。",
-    "浮亏超跌加仓：曾创新低后出现A3，T日信号，T+1开盘执行，每日最多一笔。",
+    "浮亏超跌加仓（A3）按档位先松后紧：档1 仅浮亏+缩量，档2 +收盘站回前3日低点，档3 +此前破过新低（a3_require_new_low=False 时不要求），档4 +缩量收紧到 oversold_volume_ratio（默认 0.80）；T日信号，T+1开盘执行，每日最多一笔。",
     "换票日检查指数20日收益；20日跌幅<0时不建立新永久仓。",
     "首仓：有5分钟数据时在尾盘14:30–14:50发NEXT_BAR市价单（下一根5分钟K撮合，当日仅一笔）；无盘中数据或非尾盘时按收盘信号次日开盘执行。",
     "永久仓价格轨收益≥15%立即清；10%-15%进入Armed，<9.5%解除。",

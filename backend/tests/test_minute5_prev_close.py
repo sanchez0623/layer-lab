@@ -258,8 +258,12 @@ def _m5(ts: datetime, *, prev_close: float | None, high: float, low: float, clos
 def _account_and_strategy(
     sequence_index: int = 1, t_deep_drop_pct: float | None = 0.10,
 ) -> tuple[BrokerAccount, LayeredTStrategy]:
-    """底仓笔数不足（sequence_index < t_min_base_entries=4）的账户：只有深跌旁路能准入。"""
-    cfg = StrategyConfig(t_deep_drop_pct=t_deep_drop_pct)
+    """底仓笔数不足（sequence_index < t_min_base_entries=4）的账户：只有深跌旁路能准入。
+
+    显式锁死 t_min_base_entries=4——本文件全部用例都依赖「底仓门槛拦下」，
+    不能隐式依赖默认值（默认值曾从 4 改为 1，见 feat/t-gate-and-a3-relax）。
+    """
+    cfg = StrategyConfig(t_deep_drop_pct=t_deep_drop_pct, t_min_base_entries=4)
     acct = BrokerAccount(initial_cash=1_000_000.0, config=cfg, name="t")
     acct.sequence_index = sequence_index
     strat = LayeredTStrategy(cfg)

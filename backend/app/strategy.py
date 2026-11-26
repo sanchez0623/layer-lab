@@ -702,16 +702,23 @@ class LayeredTStrategy(Strategy):
             previous_five_volume = mean(item.volume for item in history[-6:-1])
             # 按档位「先松后紧」：sequence_index // 4 → 档1(0-3)/档2(4-7)/档3(8-11)/档4(12-15)。
             # 逐档叠加条件：档1 最松（仅浮亏+缩量<5日均量），档2 +收盘站回前3日低点，
-            # 档3 +此前破过新低，档4 +缩量收紧到 oversold_volume_ratio（= 原始 A3，最严）。
-            # add_tier_strict=False 时全档统一用原始 A3（向后兼容）。
+            # 档3 +此前破过新低（a3_require_new_low=False 时不要求），档4 +缩量收紧到
+            # oversold_volume_ratio（默认 0.80，最严）。
+            # add_tier_strict=False 时全档统一用原始 A3（含破新低前置，向后兼容）。
             if self.config.add_tier_strict:
                 tier = min(account.sequence_index // 4, 3)  # 0..3
             else:
                 tier = 3
+            # 「先破新低」前置：仅档位路径（add_tier_strict=True）受 a3_require_new_low 控制，
+            # False（默认）时不再要求 had_new_low；add_tier_strict=False 的全档统一路径保持
+            # 原始 A3 的严格口径（必须 had_low_before），向后兼容。
+            new_low_ok = had_low_before or (
+                self.config.add_tier_strict and not self.config.a3_require_new_low
+            )
             a3 = (
                 bar.volume < previous_five_volume
                 and (tier == 0 or bar.close > previous_three_low)
-                and (tier <= 1 or had_low_before)
+                and (tier <= 1 or new_low_ok)
                 and (
                     tier <= 2
                     or bar.volume < previous_five_volume * self.config.oversold_volume_ratio

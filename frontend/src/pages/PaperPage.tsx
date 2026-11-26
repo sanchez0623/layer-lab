@@ -757,11 +757,11 @@ export default function PaperPage() {
     }
   };
 
-  // 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔，默认 4 = 第5笔起）。
+  // 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔，默认 1 = 首笔建仓后即可）。
   // 深跌幅当日做T（t_deep_drop_pct）仍可绕过。单独 PATCH 保存。
   const [baseEntriesInput, setBaseEntriesInput] = useState('');
   const [savingBaseEntries, setSavingBaseEntries] = useState(false);
-  const baseEntries = account?.config?.t_min_base_entries ?? 4;
+  const baseEntries = account?.config?.t_min_base_entries ?? 1;
   const saveBaseEntries = async () => {
     if (!account) return;
     const value = Number(baseEntriesInput);
@@ -1439,7 +1439,7 @@ export default function PaperPage() {
                   <Button size="sm" className="h-8" onClick={() => void saveTGate()} disabled={savingTGate || !tGate.amplitude || !tGate.minTurnover || !tGate.maxTurnover || !tGate.netSpread}>{savingTGate ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingTGate ? '正在保存' : '保存门槛'}</Button>
                 </div>
                 <div className="mt-1.5 flex flex-wrap items-end gap-2">
-                  <Field label="底仓笔数门槛（笔）" hint="累计底仓达该笔数才允许做T准入（1~16，默认 4 = 第5笔起）；深跌幅当日可绕过" className="w-44">
+                  <Field label="底仓笔数门槛（笔）" hint="累计底仓达该笔数才允许做T准入（1~16，默认 1 = 首笔建仓后即可）；深跌幅当日可绕过" className="w-44">
                     <NumberInput unit="笔" min={1} max={16} step={1} allowEmpty placeholder={String(baseEntries)} value={baseEntriesInput} onChange={setBaseEntriesInput} disabled={savingBaseEntries} />
                   </Field>
                   <Button size="sm" className="h-8" onClick={() => void saveBaseEntries()} disabled={savingBaseEntries || baseEntriesInput === ''}>{savingBaseEntries ? <Loader2 className="animate-spin" /> : <Repeat2 />}{savingBaseEntries ? '正在保存' : '保存门槛'}</Button>

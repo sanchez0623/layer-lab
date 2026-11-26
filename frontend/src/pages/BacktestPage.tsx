@@ -73,8 +73,8 @@ const fallbackConfig: StrategyConfig = {
   t_min_turnover: 0.03,
   t_max_turnover: 0.12,
   t_min_expected_net_spread: 0.03,
-  // 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（默认 4 = 第5笔起）。
-  t_min_base_entries: 4,
+  // 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（默认 1 = 首笔建仓后即可）。
+  t_min_base_entries: 1,
   // 指数 beta 腿默认开启（需求：空仓期默认用创业板 ETF 承接 beta，可手动关闭）。
   etf_beta_enabled: true,
   // beta 腿与个股「并存」（不互斥）：必须登记在 fallbackConfig 里，否则 mergeKnown
@@ -1062,8 +1062,8 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                       <Field label="做 T 最小期望净利（%）" hint="振幅扣掉一次往返成本后仍需 ≥ 该值" error={configIssues.t_min_expected_net_spread}>
                         <NumberInput unit="%" min={0} max={100} step={0.5} value={Number(((config.t_min_expected_net_spread ?? 0.03) * 100).toFixed(2))} onChange={(value) => updateConfig('t_min_expected_net_spread', Number(value) / 100)} />
                       </Field>
-                      <Field label="底仓笔数门槛（笔）" hint="累计底仓达到该笔数才允许做T准入；深跌幅当日可绕过。1~16，默认 4（第5笔起）" error={configIssues.t_min_base_entries}>
-                        <NumberInput unit="笔" min={1} max={16} step={1} value={config.t_min_base_entries ?? 4} onChange={(value) => updateConfig('t_min_base_entries', Number(value))} />
+                      <Field label="底仓笔数门槛（笔）" hint="累计底仓达到该笔数才允许做T准入；深跌幅当日可绕过。1~16，默认 1（首笔建仓后即可做T）" error={configIssues.t_min_base_entries}>
+                        <NumberInput unit="笔" min={1} max={16} step={1} value={config.t_min_base_entries ?? 1} onChange={(value) => updateConfig('t_min_base_entries', Number(value))} />
                       </Field>
                     </FormGrid>
                   )}

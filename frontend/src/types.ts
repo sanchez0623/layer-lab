@@ -85,7 +85,7 @@ export interface StrategyConfig {
   t_max_turnover?: number;
   /** 做T准入：期望净利下限（振幅扣掉一次往返成本后仍需 ≥ 该值，小数，0.03 = 3%） */
   t_min_expected_net_spread?: number;
-  /** 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔，默认 4 = 第5笔起）；深跌幅当日可绕过 */
+  /** 做T底仓笔数门槛：累计底仓（sequence_index）达到该笔数才允许做T准入（1~16 笔，默认 1 = 首笔建仓后即可）；深跌幅当日可绕过 */
   t_min_base_entries?: number;
   /** 指数 beta 腿：空仓期间持有创业板 ETF，选到个股后卖出换股 */
   etf_beta_enabled?: boolean;
