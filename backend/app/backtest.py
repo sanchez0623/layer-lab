@@ -1228,14 +1228,21 @@ class FunnelRotationBacktest:
         # 输出与「每天现读 parquet」完全相同，只是省掉逐日磁盘扫描 + Bar 重建。
         # QuanStore（生产数据源）预加载日线面板；UniverseStore（单测桩）无此方法时
         # 置 None，_screen 回落到每日 store.load_history（原口径，测试/无 parquet 兼容）。
+        #
+        # ⚠️ 内存护栏（默认关）：DailyPanel 一次性驻留 0.5-0.8GB，在内存受限的部署
+        # （如 1.8G 内存的 ECS）上会和回测本身开销叠加，直接触发宿主 OOM killer 杀掉
+        # uvicorn（3.3.1 上线后服务器回测反复中断的根因）。因此默认回落到原来的逐日
+        # 扫描（慢但内存平缓，小内存机器跑得动）；只有在内存充裕、明确要提速的机器上
+        # 才显式设 LAYERLAB_DAILY_PANEL=1 启用预加载。
         _daily_loader = getattr(self.store, "load_daily_panel", None)
+        _daily_panel_enabled = os.getenv("LAYERLAB_DAILY_PANEL", "").strip() in ("1", "true", "True")
         self._daily_panel = (
             _daily_loader(
                 codes,
                 start=self.start_date.isoformat() if self.start_date else None,
                 end=self.end_date.isoformat() if self.end_date else None,
             )
-            if _daily_loader is not None
+            if _daily_loader is not None and _daily_panel_enabled
             else None
         )
         # 有日线的候选数（供报告展示；仅计数，不驻留 Bar）。
