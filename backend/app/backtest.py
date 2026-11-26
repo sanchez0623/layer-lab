@@ -1222,6 +1222,22 @@ class FunnelRotationBacktest:
             end=self.end_date.isoformat() if self.end_date else None,
         )
         self.timeline = sorted(set(timeline))
+        # 日线面板：候选池日线预加载一次，逐日选股内存切片（不再每天重扫 parquet +
+        # 重建 33 万根 Bar 且不释放 —— 本地 32G 上正是这个逐日累积导致 OOM）。
+        # DailyPanel 驻留约 0.5-0.8GB；逐日窗口与 load_history(end=as_of) 逐字节一致，
+        # 输出与「每天现读 parquet」完全相同，只是省掉逐日磁盘扫描 + Bar 重建。
+        # QuanStore（生产数据源）预加载日线面板；UniverseStore（单测桩）无此方法时
+        # 置 None，_screen 回落到每日 store.load_history（原口径，测试/无 parquet 兼容）。
+        _daily_loader = getattr(self.store, "load_daily_panel", None)
+        self._daily_panel = (
+            _daily_loader(
+                codes,
+                start=self.start_date.isoformat() if self.start_date else None,
+                end=self.end_date.isoformat() if self.end_date else None,
+            )
+            if _daily_loader is not None
+            else None
+        )
         # 有日线的候选数（供报告展示；仅计数，不驻留 Bar）。
         self.codes_with_daily = self.store.count_codes_with_daily(codes)
         if not self.codes_with_daily or not self.timeline:
@@ -1550,6 +1566,7 @@ class FunnelRotationBacktest:
             self.store, self.market, self.screener_config,
             as_of=as_of, include_realtime=False,
             index_history=self.index_history,
+            daily_panel=getattr(self, "_daily_panel", None),
         )
         first = result.first
         # 拆分本轮 warnings：全局口径声明去重进 self.warnings；逐轮决策日志留在本轮，
