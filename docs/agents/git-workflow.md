@@ -33,6 +33,28 @@
 流程：`git checkout main && git pull` → `git checkout -b <前缀>/<描述>` → 改 + 本地验证 →
 commit 到该分支 → 合并回 `main`（或走 PR）→ push。**版本号 bump、部署、README 更新仍按上面各节执行。**
 
+### 并行开发：用 git worktree 隔离多任务
+
+同时推进多个开发任务时，**用 `git worktree` 为每个任务建独立工作目录**，每个 worktree
+从最新 `main` 切自己的分支，互不干扰、可并行改、可同时跑本地验证。避免多个任务挤在同一个
+工作区来回切分支、改乱彼此的未提交改动。
+
+```powershell
+git fetch origin
+git worktree add ../layer-lab-featA -b feat/featA origin/main   # 任务 A 独立目录 + 新分支
+git worktree add ../layer-lab-bugB  -b bugfix/bugB  origin/main   # 任务 B 独立目录 + 新分支
+# 各 worktree 内独立改代码 / 验证；用完 git worktree remove <目录> 清理
+git worktree list   # 查看所有 worktree
+```
+
+- 每个 worktree = 一个任务 = 一个从 `origin/main` 切出的分支，前缀仍按 `feat/` `bugfix/` `ui/`。
+- worktree 目录之间共享同一个 `.git`，但工作区文件完全独立，可并行开发。
+
+**并行任务合并上线（关键）**：所有并行任务各自验证通过后，必须**把每一个都合回 `main`**，
+确保这一批并行研发的功能**全部**进入 `main`，再统一走部署流程。**不能只合一个就发版**，
+否则线上会漏掉其他并行任务的功能。合完确认 `main` 已包含全部并行改动（逐个 `git log` / diff 复核）
+后再 `pack_deploy.py` 部署。
+
 **合并冲突处理**：合回 `main` 时若产生冲突，逐个文件判断双方改动的意图后再合。
 **凡是拿不准该保留哪一边、或冲突涉及业务逻辑 / 别人的改动时，先停下来问用户，别自己瞎选**；
 能明确判断的（如本分支独有新增、纯格式差异）可直接解。解完务必本地跑一遍验证再 push。
