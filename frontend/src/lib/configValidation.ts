@@ -29,6 +29,8 @@ export const CONFIG_FIELD_LABELS: Partial<Record<keyof StrategyConfig, string>> 
   t_min_base_entries: '做 T 底仓笔数门槛',
   force_exit_holding_days: '最大持仓天数',
   stop_loss_pct: '硬止损',
+  price_take_profit: '价格轨止盈',
+  account_take_profit: '账户轨止盈',
   volume_participation: '成交量参与上限',
   slippage_bps: '滑点',
   slippage_model: '滑点模型',
@@ -128,6 +130,16 @@ export function validateStrategyConfig(config: StrategyConfig): ConfigIssueMap {
   const stopLoss = config.stop_loss_pct;
   if (stopLoss !== undefined && !(isNum(stopLoss) && stopLoss >= -1 && stopLoss <= 0)) {
     issue('stop_loss_pct', '须为 -100%~0 之间（0 = 关闭，负值 = 止损比例）');
+  }
+
+  // ---- 止盈阈值 --------------------------------------------------------------
+  // 价格轨/账户轨止盈：必须为 (0, 100%] 的百分数；价格轨阈值是超期降阈的基准，
+  // 填 0 或负数会让「价格轨止盈」永不触发（或立即触发），在源头提示。
+  for (const field of ['price_take_profit', 'account_take_profit'] as const) {
+    const value = config[field];
+    if (value !== undefined && !(isNum(value) && value > 0 && value <= 1)) {
+      issue(field, '须为 0~100%（不含 0）的百分数');
+    }
   }
 
   // ---- 交易摩擦 / 撮合 ------------------------------------------------------

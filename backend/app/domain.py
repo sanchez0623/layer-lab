@@ -304,6 +304,11 @@ class StrategyConfig:
             raise ValueError("impact_coefficient 不能为负")
         if not 0 < self.t_target_net_spread < 1:
             raise ValueError("t_target_net_spread 必须是大于0且小于1的小数（做T净利止盈阈值）")
+        # 价格轨/账户轨止盈阈值：必须为 (0,1] 小数。价格轨阈值是超期降阈的基准
+        # （strategy._effective_take_profit），填 0/负数会让止盈永不触发或立即触发，在源头拦下。
+        for name in ("price_take_profit", "account_take_profit"):
+            if not 0 < float(getattr(self, name)) <= 1:
+                raise ValueError(f"{name} 必须是大于0且不超过1的小数（止盈阈值，0.15 = 15%）")
         try:
             datetime.strptime(self.t_exit_cutoff, "%H:%M")
         except (TypeError, ValueError):

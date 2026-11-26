@@ -56,6 +56,10 @@ const fallbackConfig: StrategyConfig = {
   t_exit_cutoff_day: 'T+1',
   max_holding_days: 22,
   holding_tp_override: 0.03,
+  // 价格轨/账户轨止盈阈值：浮盈达到该幅度即触发清仓（默认 15%），也是超期降阈的基准值。
+  // 必须登记在 fallbackConfig 里，否则 mergeKnown 在「带入回测」时会静默丢弃报告快照里的值。
+  price_take_profit: 0.15,
+  account_take_profit: 0.15,
   // 硬性最大持仓天数：持有 ≥N 个交易日后无条件强平（0 = 不限/关闭）。
   force_exit_holding_days: 0,
   // 硬止损：持仓价格收益 ≤ 该线立即清仓（0 = 关闭，负值 = 止损比例）。
@@ -1096,6 +1100,12 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                     </FormGrid>
                   )}
                   <FormGrid>
+                    <Field label="价格轨止盈（%）" hint="持仓浮盈达到该幅度即清仓（默认 15%）；超期降阈也以该值为基准" error={configIssues.price_take_profit}>
+                      <NumberInput unit="%" min={0.1} max={100} step={0.5} value={Number(((config.price_take_profit ?? 0.15) * 100).toFixed(2))} onChange={(value) => updateConfig('price_take_profit', Number(value) / 100)} />
+                    </Field>
+                    <Field label="账户轨止盈（%）" hint="账户口径浮盈达到该幅度即清仓（默认 15%）；当前清仓判定沿用价格轨阈值" error={configIssues.account_take_profit}>
+                      <NumberInput unit="%" min={0.1} max={100} step={0.5} value={Number(((config.account_take_profit ?? 0.15) * 100).toFixed(2))} onChange={(value) => updateConfig('account_take_profit', Number(value) / 100)} />
+                    </Field>
                     <Field label="超期降阈天数" hint="持有 ≥N 个交易日后止盈降阈；留空=关闭">
                       <NumberInput unit="交易日" min={1} max={250} step={1} allowEmpty value={config.max_holding_days ?? ''} onChange={(value) => updateConfig('max_holding_days', value === '' ? null : Number(value))} />
                     </Field>
