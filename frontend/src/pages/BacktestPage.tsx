@@ -1523,7 +1523,7 @@ export default function BacktestPage({ initialReportId }: { initialReportId?: st
                                   <div className="h-1.5 flex-1 overflow-hidden rounded bg-muted">
                                     <div className={cn('h-full rounded', bar)} style={{ width: `${widthPct}%` }} />
                                   </div>
-                                  <span className="w-24 shrink-0 text-right font-mono text-[10px] text-muted-foreground">
+                                  <span className="min-w-24 shrink-0 whitespace-nowrap text-right font-mono text-[10px] text-muted-foreground">
                                     {integer(days)} 天 · {percent(bucket.pct_of_underwater)}
                                   </span>
                                 </div>
